@@ -1,0 +1,226 @@
+/* GORGON // SENTINEL design tokens — mirrors brand/guidelines.html.
+   Rename the company in one place: --brand-name is set on the markup, colors live here. */
+:root {
+  color-scheme: dark;
+  --carbon: #0B0C0E;
+  --graphite: #131519;
+  --graphite-2: #0F1114;
+  --gunmetal: #23272E;
+  --gunmetal-2: #191C22;
+  --ash: #7E858E;
+  --steel: #B7BDC5;
+  --bone: #ECEEF1;
+  --red: #E23A2E;
+  /* Obelisk accent. Sits between --red and --warn: distinct from both at a glance, and its
+     high-R/mid-G/low-B mix is what lets the orbit heat splats ramp orange -> yellow -> white
+     as they accumulate. */
+  --orange: #E8701E;
+  --red-dim: #8F241C;
+  --red-deep: #5E1610;
+  --red-glow: rgba(226, 58, 46, .35);
+  --ok: #4F9E7A;
+  --warn: #D9A038;
+  --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+  --sans: "Helvetica Neue", Arial, "Segoe UI", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--carbon);
+  color: var(--steel);
+  font-family: var(--sans);
+  overflow: hidden;
+}
+
+#app { position: fixed; inset: 0; }
+#app canvas { touch-action: none; display: block; } /* let OrbitControls own touch gestures */
+
+/* Cesium mount */
+#cesiumContainer { position: fixed; inset: 0; }
+#cesiumContainer .cesium-widget, #cesiumContainer .cesium-widget canvas { width: 100%; height: 100%; touch-action: none; }
+/* keep required attribution but tone it into the tactical palette */
+.cesium-credit-container, .cesium-widget-credits { color: var(--ash) !important; font-family: var(--mono) !important; font-size: 10px !important; }
+.cesium-credit-container a { color: var(--ash) !important; }
+
+/* Show mouse vs touch instructions by input type. */
+.touch { display: none; }
+@media (pointer: coarse) {
+  .mouse { display: none; }
+  .touch { display: inline; }
+}
+
+/* ---------- in-game HUD ---------- */
+#hud {
+  position: fixed;
+  top: 14px;
+  left: 14px;
+  z-index: 10;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.7;
+  letter-spacing: .06em;
+  color: var(--steel);
+  background: rgba(11, 12, 14, .72);
+  border: 1px solid var(--gunmetal);
+  border-left: 2px solid var(--red);
+  padding: 12px 16px;
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+  text-transform: uppercase;
+  white-space: pre;
+}
+#hud .co { color: var(--bone); font-weight: 700; letter-spacing: .14em; }
+#hud .co b { color: var(--red); }
+#hud .k { color: var(--ash); }
+#hud .v { color: var(--bone); font-variant-numeric: tabular-nums; }
+
+#hint {
+  position: fixed;
+  bottom: 12px;
+  left: 14px;
+  z-index: 10;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--ash);
+}
+
+/* ---------- globe theater-select chrome (overlay; the globe renders in #app) ---------- */
+#globe-ui { position: fixed; inset: 0; z-index: 100; pointer-events: none; transition: opacity .5s ease; }
+#globe-ui.dismiss { opacity: 0; }
+body:has(#globe-ui) #hint { display: none; }
+
+#globe-ui .g-status {
+  position: absolute; top: 0; left: 0; right: 0;
+  display: flex; justify-content: space-between; gap: 16px;
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .16em; text-transform: uppercase;
+  color: var(--ash);
+  padding: 12px clamp(20px, 4vw, 44px);
+  border-bottom: 1px solid var(--gunmetal);
+  background: rgba(11, 12, 14, .5); backdrop-filter: blur(6px);
+}
+#globe-ui .g-status .live { color: var(--bone); display: inline-flex; align-items: center; gap: 8px; }
+#globe-ui .g-status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--red); }
+
+#globe-ui .g-title { position: absolute; top: 56px; left: clamp(20px, 4vw, 44px); }
+#globe-ui .eyebrow {
+  font-family: var(--mono); font-size: 11px; letter-spacing: .22em; text-transform: uppercase;
+  color: var(--ash); display: inline-flex; align-items: center; gap: 10px;
+}
+#globe-ui .eyebrow::before { content: ""; width: 20px; height: 1px; background: var(--red); }
+#globe-ui .wordmark { margin: 10px 0 0; font-weight: 800; font-size: clamp(34px, 6vw, 60px); line-height: .9; letter-spacing: -.02em; color: var(--bone); }
+#globe-ui .wordmark b { color: var(--red); }
+
+#globe-ui .g-readout {
+  position: absolute; left: clamp(20px, 4vw, 44px); bottom: clamp(56px, 9vh, 92px);
+  min-width: 250px;
+  border: 1px solid var(--gunmetal); border-left: 2px solid var(--red);
+  background: rgba(11, 12, 14, .62); backdrop-filter: blur(6px);
+  padding: 12px 16px;
+}
+#globe-ui .g-readout .row { display: flex; justify-content: space-between; gap: 24px; padding: 4px 0; font-family: var(--mono); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; }
+#globe-ui .g-readout .k { color: var(--ash); }
+#globe-ui .g-readout .v { color: var(--bone); font-variant-numeric: tabular-nums; }
+
+#globe-ui .g-hint {
+  position: absolute; left: 50%; transform: translateX(-50%); bottom: 18px;
+  font-family: var(--mono); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ash);
+  border: 1px solid var(--gunmetal); background: rgba(11, 12, 14, .62); padding: 8px 16px; white-space: nowrap;
+}
+#globe-ui .g-hint b { color: var(--red); }
+
+@media (max-width: 680px) {
+  #globe-ui .g-hint { font-size: 9px; white-space: normal; text-align: center; max-width: 92vw; }
+  #globe-ui .g-readout { min-width: 0; right: clamp(20px, 4vw, 44px); }
+}
+@media (prefers-reduced-motion: reduce) { #globe-ui { transition: none; } }
+
+/* ---------- escape-to-world-map button ---------- */
+#g-exit {
+  position: absolute;
+  top: calc(56px + env(safe-area-inset-top, 0px));
+  left: clamp(20px, 4vw, 44px);
+  z-index: 60;
+  pointer-events: auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--bone);
+  background: rgba(11, 12, 14, .72);
+  border: 1px solid var(--gunmetal);
+  border-left: 2px solid var(--red);
+  padding: 9px 14px;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+}
+#g-exit:hover { border-color: var(--red); background: var(--red-deep); }
+#g-exit:focus-visible { outline: 2px solid var(--red); outline-offset: 2px; }
+#g-exit[hidden] { display: none; }
+@media (max-width: 500px) { #g-exit { left: 16px; font-size: 10px; padding: 8px 12px; } }
+
+/* ---------- marquee selection box ---------- */
+#marquee {
+  position: fixed;
+  z-index: 50;
+  display: none;
+  pointer-events: none;
+  border: 1px solid var(--red);
+  background: rgba(226, 58, 46, .12);
+  box-shadow: 0 0 0 1px rgba(11, 12, 14, .5) inset;
+}
+
+/* ---------- loading overlay (elevation fetch) ---------- */
+#loading {
+  position: fixed; inset: 0; z-index: 200;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+  background: var(--carbon);
+  background-image:
+    linear-gradient(var(--gunmetal-2) 1px, transparent 1px),
+    linear-gradient(90deg, var(--gunmetal-2) 1px, transparent 1px);
+  background-size: 44px 44px;
+  font-family: var(--mono);
+}
+#loading .spin { width: 46px; height: 46px; border: 2px solid var(--gunmetal); border-top-color: var(--red); border-radius: 50%; animation: spin .9s linear infinite; }
+#loading .ll { color: var(--bone); font-size: 13px; letter-spacing: .28em; text-transform: uppercase; }
+#loading .lc { color: var(--ash); font-size: 11px; letter-spacing: .12em; text-transform: uppercase; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { #loading .spin { animation: none; } }
+
+/* ---------- mobile / portrait (iPhone 14 ≈ 390×844) ---------- */
+@media (max-width: 500px) {
+  /* respect the notch / status bar */
+  #globe-ui .g-status { padding-top: calc(12px + env(safe-area-inset-top, 0px)); font-size: 9.5px; }
+  #globe-ui .g-status > span:last-child { display: none; }
+
+  #globe-ui .g-title { top: calc(52px + env(safe-area-inset-top, 0px)); left: 16px; }
+  #globe-ui .wordmark { font-size: 40px; }
+
+  #globe-ui .g-readout {
+    left: 16px; right: 16px; min-width: 0;
+    bottom: calc(100px + env(safe-area-inset-bottom, 0px)); /* clear the wrapped touch hint */
+  }
+  #globe-ui .g-readout .row { font-size: 11px; }
+
+  #globe-ui .g-hint {
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+    font-size: 9.5px; white-space: normal; text-align: center;
+    max-width: calc(100vw - 32px); line-height: 1.5;
+  }
+
+  #hud {
+    top: calc(12px + env(safe-area-inset-top, 0px));
+    left: calc(12px + env(safe-area-inset-left, 0px));
+    font-size: 10px; padding: 9px 12px;
+  }
+  #hint {
+    bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    left: 50%; transform: translateX(-50%); text-align: center;
+  }
+
+  #loading .ll { font-size: 12px; }
+}

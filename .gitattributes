@@ -1,0 +1,2 @@
+# The obelisk site table is a packed binary — never let eol normalisation touch it.
+*.bin binary

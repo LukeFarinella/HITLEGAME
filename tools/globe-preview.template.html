@@ -1,0 +1,266 @@
+<title>GORGON // Tactical Globe</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --carbon: #0B0C0E; --graphite: #131519; --gunmetal: #23272E;
+    --ash: #7E858E; --steel: #B7BDC5; --bone: #ECEEF1;
+    --red: #E23A2E; --red-deep: #5E1610;
+    --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+    --sans: "Helvetica Neue", Arial, "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--carbon); overflow: hidden; font-family: var(--sans); }
+  #g { position: fixed; inset: 0; display: block; touch-action: none; }
+
+  .chrome { position: fixed; inset: 0; pointer-events: none; z-index: 5; }
+  .status {
+    position: absolute; top: 0; left: 0; right: 0;
+    display: flex; justify-content: space-between; gap: 12px;
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--ash);
+    padding: calc(12px + env(safe-area-inset-top, 0px)) clamp(16px, 4vw, 40px) 12px;
+    border-bottom: 1px solid var(--gunmetal); background: rgba(11,12,14,.5); backdrop-filter: blur(6px);
+  }
+  .status .live { color: var(--bone); display: inline-flex; align-items: center; gap: 8px; }
+  .status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--red); }
+
+  .title { position: absolute; top: calc(56px + env(safe-area-inset-top, 0px)); left: clamp(16px, 4vw, 40px); }
+  .eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: .22em; text-transform: uppercase; color: var(--ash); display: inline-flex; align-items: center; gap: 10px; }
+  .eyebrow::before { content: ""; width: 20px; height: 1px; background: var(--red); }
+  .wordmark { margin: 10px 0 0; font-weight: 800; font-size: clamp(34px, 7vw, 56px); line-height: .9; letter-spacing: -.02em; color: var(--bone); }
+  .wordmark b { color: var(--red); }
+
+  .readout {
+    position: absolute; left: clamp(16px, 4vw, 40px); bottom: calc(96px + env(safe-area-inset-bottom, 0px));
+    min-width: 250px; border: 1px solid var(--gunmetal); border-left: 2px solid var(--red);
+    background: rgba(11,12,14,.62); backdrop-filter: blur(6px); padding: 12px 16px;
+  }
+  .readout .row { display: flex; justify-content: space-between; gap: 24px; padding: 4px 0; font-family: var(--mono); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; }
+  .readout .k { color: var(--ash); } .readout .v { color: var(--bone); font-variant-numeric: tabular-nums; }
+  .readout .v.sel { color: var(--red); }
+
+  .hint {
+    position: absolute; left: 50%; transform: translateX(-50%); bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--ash);
+    border: 1px solid var(--gunmetal); background: rgba(11,12,14,.62); padding: 8px 16px; white-space: nowrap; text-align: center;
+  }
+  .hint b { color: var(--red); }
+  .touch { display: none; }
+  @media (pointer: coarse) { .mouse { display: none; } .touch { display: inline; } }
+
+  @media (max-width: 500px) {
+    .status > span:last-child { display: none; }
+    .readout { left: 16px; right: 16px; min-width: 0; bottom: calc(104px + env(safe-area-inset-bottom, 0px)); }
+    .hint { font-size: 9.5px; white-space: normal; max-width: calc(100vw - 32px); line-height: 1.5; }
+  }
+</style>
+
+<canvas id="g"></canvas>
+<div class="chrome">
+  <div class="status">
+    <span class="live"><span class="dot"></span>GORGON // SENTINEL C2</span>
+    <span>TACTICAL GLOBE · PREVIEW</span>
+  </div>
+  <div class="title">
+    <span class="eyebrow">Select Operating Theater</span>
+    <h1 class="wordmark">G<b>O</b>RGON</h1>
+  </div>
+  <div class="readout">
+    <div class="row"><span class="k">Cursor Lat</span><span class="v" id="lat">—</span></div>
+    <div class="row"><span class="k">Cursor Lon</span><span class="v" id="lon">—</span></div>
+    <div class="row"><span class="k">Ring</span><span class="v">20 MI RADIUS</span></div>
+    <div class="row"><span class="k">Selected</span><span class="v sel" id="sel">— TAP GLOBE —</span></div>
+  </div>
+  <div class="hint">
+    <span class="mouse"><b>DRAG</b> orbit &nbsp;·&nbsp; <b>WHEEL</b> zoom &nbsp;·&nbsp; <b>CLICK</b> select</span>
+    <span class="touch"><b>DRAG</b> orbit &nbsp;·&nbsp; <b>PINCH</b> zoom &nbsp;·&nbsp; <b>TAP</b> select</span>
+  </div>
+</div>
+
+<script>
+// Real coastlines (world-atlas land-110m), injected at build time as [[ [lon,lat], ... ], ...].
+const COAST = /*__COAST__*/[]/*__COAST__*/;
+
+const cv = document.getElementById('g');
+const ctx = cv.getContext('2d');
+const DEG = Math.PI / 180;
+let W = 0, H = 0, cx = 0, cy = 0, DPR = 1;
+
+// view state
+let lon0 = -30, lat0 = 20;      // sub-viewer point
+let scale = 300;                 // px per unit radius
+let baseScale = 300;
+const RING_ANG = 20 / 3959;      // 20-mile radius in radians on unit sphere
+let cursor = null;               // {lon,lat}
+let selected = null;
+let autoRotate = true;
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR;
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  cx = W / 2; cy = H / 2;
+  baseScale = Math.min(W, H) * 0.42;
+  if (!scaleUserSet) scale = baseScale;
+}
+let scaleUserSet = false;
+
+function project(lon, lat) {
+  const l0 = lon0 * DEG, p0 = lat0 * DEG, l = lon * DEG, p = lat * DEG;
+  const d = l - l0;
+  const cosc = Math.sin(p0) * Math.sin(p) + Math.cos(p0) * Math.cos(p) * Math.cos(d);
+  const x = Math.cos(p) * Math.sin(d);
+  const y = Math.cos(p0) * Math.sin(p) - Math.sin(p0) * Math.cos(p) * Math.cos(d);
+  return { x: cx + scale * x, y: cy - scale * y, vis: cosc >= 0 };
+}
+
+function invert(sx, sy) {
+  const x = (sx - cx) / scale, y = -(sy - cy) / scale;
+  const rho = Math.hypot(x, y);
+  if (rho > 1) return null;
+  const p0 = lat0 * DEG;
+  if (rho < 1e-9) return { lon: lon0, lat: lat0 };
+  const c = Math.asin(Math.max(-1, Math.min(1, rho)));
+  const sinc = Math.sin(c), cosc = Math.cos(c);
+  const lat = Math.asin(cosc * Math.sin(p0) + (y * sinc * Math.cos(p0)) / rho) / DEG;
+  let lon = lon0 + Math.atan2(x * sinc, rho * cosc * Math.cos(p0) - y * sinc * Math.sin(p0)) / DEG;
+  lon = ((lon + 540) % 360) - 180;
+  return { lon, lat };
+}
+
+// spherical destination point, angular distance ang, bearing brg (rad) from (lat,lon in deg)
+function dest(lat, lon, ang, brg) {
+  const p1 = lat * DEG, l1 = lon * DEG;
+  const p2 = Math.asin(Math.sin(p1) * Math.cos(ang) + Math.cos(p1) * Math.sin(ang) * Math.cos(brg));
+  const l2 = l1 + Math.atan2(Math.sin(brg) * Math.sin(ang) * Math.cos(p1), Math.cos(ang) - Math.sin(p1) * Math.sin(p2));
+  return { lat: p2 / DEG, lon: l2 / DEG };
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+
+  // globe disc
+  ctx.beginPath(); ctx.arc(cx, cy, scale, 0, Math.PI * 2);
+  ctx.fillStyle = '#0D1013'; ctx.fill();
+  ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(226,58,46,0.25)'; ctx.stroke();
+
+  // graticule
+  ctx.strokeStyle = 'rgba(43,49,58,0.9)'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let lon = -180; lon < 180; lon += 15) polyline(lonLatLine(lon, 'meridian'));
+  for (let lat = -75; lat <= 75; lat += 15) polyline(lonLatLine(lat, 'parallel'));
+  ctx.stroke();
+
+  // coastlines
+  ctx.strokeStyle = 'rgba(226,58,46,0.85)'; ctx.lineWidth = 1.1;
+  ctx.beginPath();
+  for (const ring of COAST) polyline(ring);
+  ctx.stroke();
+
+  // cursor 20-mi ring
+  if (cursor) {
+    const pts = [];
+    for (let i = 0; i <= 48; i++) { const d = dest(cursor.lat, cursor.lon, RING_ANG, (i / 48) * Math.PI * 2); pts.push([d.lon, d.lat]); }
+    ctx.strokeStyle = '#E23A2E'; ctx.lineWidth = 1.5; ctx.beginPath(); polyline(pts, true); ctx.stroke();
+    const c = project(cursor.lon, cursor.lat);
+    if (c.vis) { ctx.beginPath(); ctx.arc(c.x, c.y, 2.5, 0, Math.PI * 2); ctx.fillStyle = '#E23A2E'; ctx.fill(); }
+  }
+  // selected marker
+  if (selected) {
+    const s = project(selected.lon, selected.lat);
+    if (s.vis) {
+      ctx.strokeStyle = '#E23A2E'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(s.x - 9, s.y); ctx.lineTo(s.x - 3, s.y);
+      ctx.moveTo(s.x + 3, s.y); ctx.lineTo(s.x + 9, s.y);
+      ctx.moveTo(s.x, s.y - 9); ctx.lineTo(s.x, s.y - 3);
+      ctx.moveTo(s.x, s.y + 3); ctx.lineTo(s.x, s.y + 9); ctx.stroke();
+    }
+  }
+}
+
+function polyline(ring, closed) {
+  let started = false;
+  for (let i = 0; i < ring.length; i++) {
+    const p = project(ring[i][0], ring[i][1]);
+    if (!p.vis) { started = false; continue; }
+    if (!started) { ctx.moveTo(p.x, p.y); started = true; } else { ctx.lineTo(p.x, p.y); }
+  }
+}
+
+// build a graticule line as a point array
+function lonLatLine(v, kind) {
+  const out = [];
+  if (kind === 'meridian') for (let lat = -90; lat <= 90; lat += 3) out.push([v, lat]);
+  else for (let lon = -180; lon <= 180; lon += 3) out.push([lon, v]);
+  return out;
+}
+
+// ---- interaction ----
+const pointers = new Map();
+let dragStart = null, dragged = false, pinchDist = 0;
+
+cv.addEventListener('pointerdown', (e) => {
+  try { cv.setPointerCapture(e.pointerId); } catch (_) { /* synthetic events can't be captured */ }
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  dragStart = { x: e.clientX, y: e.clientY, lon0, lat0 };
+  dragged = false;
+  autoRotate = false;
+  if (pointers.size === 2) { const p = [...pointers.values()]; pinchDist = Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y); }
+});
+
+cv.addEventListener('pointermove', (e) => {
+  const ll = invert(e.clientX, e.clientY);
+  cursor = ll;
+  if (ll) { setText('lat', fmt(ll.lat, 'N', 'S')); setText('lon', fmt(ll.lon, 'E', 'W')); }
+  else { setText('lat', '—'); setText('lon', '—'); }
+
+  if (!pointers.has(e.pointerId)) return;
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+  if (pointers.size === 2) {
+    const p = [...pointers.values()];
+    const d = Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+    if (pinchDist > 0) { scale *= d / pinchDist; clampScale(); scaleUserSet = true; }
+    pinchDist = d;
+    return;
+  }
+  if (dragStart) {
+    const dx = e.clientX - dragStart.x, dy = e.clientY - dragStart.y;
+    if (Math.hypot(dx, dy) > 4) dragged = true;
+    const k = 0.25 * (baseScale / scale);
+    lon0 = dragStart.lon0 - dx * k;
+    lat0 = Math.max(-85, Math.min(85, dragStart.lat0 + dy * k));
+  }
+});
+
+function endPointer(e) {
+  if (!dragged && pointers.size === 1) {
+    const ll = invert(e.clientX, e.clientY);
+    if (ll) { selected = ll; setText('sel', fmt(ll.lat, 'N', 'S') + ' ' + fmt(ll.lon, 'E', 'W')); }
+  }
+  pointers.delete(e.pointerId);
+  if (pointers.size < 2) pinchDist = 0;
+  if (pointers.size === 0) dragStart = null;
+}
+cv.addEventListener('pointerup', endPointer);
+cv.addEventListener('pointercancel', endPointer);
+
+cv.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  scale *= Math.exp(-e.deltaY * 0.0012); clampScale(); scaleUserSet = true; autoRotate = false;
+}, { passive: false });
+
+function clampScale() { scale = Math.max(baseScale * 0.6, Math.min(baseScale * 9, scale)); }
+function fmt(v, pos, neg) { return Math.abs(v).toFixed(3) + '° ' + (v >= 0 ? pos : neg); }
+function setText(id, t) { const e = document.getElementById(id); if (e) e.textContent = t; }
+
+window.addEventListener('resize', resize);
+resize();
+const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+(function loop() {
+  if (autoRotate && !reduce) lon0 = (lon0 + 0.06 + 540) % 360 - 180;
+  draw();
+  requestAnimationFrame(loop);
+})();
+</script>
