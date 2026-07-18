@@ -36,8 +36,8 @@ const CLASS_HALF: Record<RoadClass, number> = {
   tertiary: 4,
 };
 
-/** Extra gap between a building's near edge and the road edge, metres. */
-const ROAD_GAP = 8;
+/** Default extra gap between a building's near edge and the road edge, metres. Overridable per-call. */
+const DEFAULT_ROAD_GAP = 14;
 
 export interface ProcOptions {
   /** How far from centre to generate (metres). Density self-limits the countryside within this. */
@@ -46,6 +46,10 @@ export interface ProcOptions {
   maxBuildings: number;
   /** Tallest tower, metres. */
   maxHeight: number;
+  /** Extra gap between a building's near edge and the road edge, metres. Defaults to {@link DEFAULT_ROAD_GAP}. */
+  roadGap?: number;
+  /** Scales how many buildings are attempted per cell (density). 1 = default; <1 thins, >1 packs. */
+  populationScale?: number;
 }
 
 const CELL = 300; // density / spatial grid, metres
@@ -214,6 +218,8 @@ export function generateBuildings(
   const polys: BuildingSet['polys'] = [];
   let points = 0;
 
+  const roadGap = opts.roadGap ?? DEFAULT_ROAD_GAP;
+  const popScale = Math.max(0, opts.populationScale ?? 1);
   const DMIN = 0.02; // below this fraction of peak density → countryside, stop
   const MAX_PER_CELL = 60;
 
@@ -224,7 +230,7 @@ export function generateBuildings(
     const cx = ((c % gridN) + 0.5) * CELL - R;
     const cy = (Math.floor(c / gridN) + 0.5) * CELL - R;
 
-    const count = Math.round((0.2 + 0.8 * d) * MAX_PER_CELL);
+    const count = Math.round((0.2 + 0.8 * d) * MAX_PER_CELL * popScale);
     for (let k = 0; k < count; k++) {
       if (polys.length >= opts.maxBuildings) break outer;
       // seed a random spot, then snap the building to FRONT the nearest street: near edge just off
@@ -254,7 +260,7 @@ export function generateBuildings(
         ay /= al;
       }
       // near edge clears the drawn ribbon (its half-width) plus a gap, so buildings sit OFF the road
-      const setback = near.hw + ROAD_GAP + dep / 2;
+      const setback = near.hw + roadGap + dep / 2;
       const x = near.nx + ax * setback;
       const y = near.ny + ay * setback;
       if (heightAt(toLon(x), toLat(y)) < 0.5) continue; // keep off water

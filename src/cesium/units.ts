@@ -168,6 +168,7 @@ interface Unit {
   lon: number;
   lat: number;
   heading: number;
+  mark: boolean; // C2 "investigate" flag — persists, shown as a field marker
   // land/foot: graph traversal
   edge?: number;
   dist?: number;
@@ -189,13 +190,45 @@ export const KIND_LABEL: Record<UnitKind, string> = {
 /** Metres/second per kind (mirrors SPEED) surfaced for the panel. */
 export const KIND_SPEED = SPEED;
 
-export interface SelectedUnit {
-  id: string;
-  kind: UnitKind;
-  state: UnitState;
-  lon: number;
-  lat: number;
-  heading: number;
+/** What the panel renders for the current selection (one unit, or a summary of many). */
+export interface SelectionInfo {
+  count: number;
+  byKind: Record<UnitKind, number>;
+  byState: Record<UnitState, number>;
+  markedCount: number;
+  /** Present only when exactly one unit is selected. */
+  single?: {
+    id: string;
+    kind: UnitKind;
+    state: UnitState;
+    lon: number;
+    lat: number;
+    heading: number;
+    mark: boolean;
+  };
+}
+
+/** "Investigate" marker colour (amber = attention). */
+const MARK_COLOR = '#F2A83B';
+
+/** A diamond-outline texture drawn once, used for every investigate marker. */
+function makeMarkTexture(): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = 48;
+  c.height = 48;
+  const g = c.getContext('2d')!;
+  g.translate(24, 24);
+  g.strokeStyle = MARK_COLOR;
+  g.lineWidth = 4;
+  g.lineJoin = 'round';
+  g.beginPath();
+  g.moveTo(0, -18);
+  g.lineTo(18, 0);
+  g.lineTo(0, 18);
+  g.lineTo(-18, 0);
+  g.closePath();
+  g.stroke();
+  return c;
 }
 
 export interface UnitFieldOptions {
@@ -216,7 +249,12 @@ export class UnitField {
   private nextId: Record<UnitKind, number> = { land: 0, sea: 0, air: 0, foot: 0 };
   /** Per-unit world position from the last render(), for screen-space picking. */
   private ecef = new Float64Array(0);
-  private selectedIdx: number | null = null;
+  private selection = new Set<number>();
+  /** Investigate-marked unit indices, and the billboards that flag them. */
+  private markedIdx: number[] = [];
+  private markTexture = makeMarkTexture();
+  readonly marksLayer = new Cesium.BillboardCollection();
+  private markScratch = new Cesium.Cartesian3();
 
   private mkId(kind: UnitKind): string {
     return `${CALLSIGN[kind]}-${String(++this.nextId[kind]).padStart(3, '0')}`;
@@ -277,7 +315,7 @@ export class UnitField {
       const dist = Math.random() * e.len;
       const dir: 1 | -1 = Math.random() < 0.5 ? 1 : -1;
       const p = g.sample(e, dist);
-      this.units.push({ id: this.mkId(kind), kind, state: this.rollState(), lon: p.lon, lat: p.lat, heading: p.heading, edge, dist, dir });
+      this.units.push({ id: this.mkId(kind), kind, state: this.rollState(), lon: p.lon, lat: p.lat, heading: p.heading, mark: false, edge, dist, dir });
     }
   }
 
@@ -303,6 +341,7 @@ export class UnitField {
         lon: p.lon,
         lat: p.lat,
         heading: Math.random() * Math.PI * 2,
+        mark: false,
         turn: 0,
       });
       i++;
@@ -319,6 +358,7 @@ export class UnitField {
         lon: p.lon,
         lat: p.lat,
         heading: Math.random() * Math.PI * 2,
+        mark: false,
         turn: (Math.random() - 0.5) * 0.05,
       });
     }
@@ -436,7 +476,7 @@ export class UnitField {
       this.ecef[i * 3 + 1] = this.scratch.y;
       this.ecef[i * 3 + 2] = this.scratch.z;
 
-      const selected = i === this.selectedIdx;
+      const selected = this.selection.has(i);
       const base = STATE_COLOR[u.state];
       const seen = !sensor || sensor.isCovered(u.lon, u.lat);
       const color = seen || selected ? base : Cesium.Color.fromAlpha(base, UNSEEN_ALPHA, this.scratchColor);
@@ -444,23 +484,39 @@ export class UnitField {
       this.batches[u.kind].setInstance(this.scratch, u.heading, scale, color);
     }
     for (const k of ['land', 'sea', 'air', 'foot'] as UnitKind[]) this.batches[k].endFrame();
+
+    // move each investigate marker onto its (moving) unit
+    for (let m = 0; m < this.markedIdx.length; m++) {
+      const i = this.markedIdx[m];
+      this.markScratch.x = this.ecef[i * 3];
+      this.markScratch.y = this.ecef[i * 3 + 1];
+      this.markScratch.z = this.ecef[i * 3 + 2];
+      this.marksLayer.get(m).position = this.markScratch;
+    }
   }
 
   // --- selection ------------------------------------------------------------------------------
 
-  /**
-   * Select the unit nearest to a window point (within `maxPx`); returns whether one was picked.
-   * Projects the cached world positions, so call after at least one render().
-   */
-  pick(scene: Cesium.Scene, x: number, y: number, maxPx: number): boolean {
+  private toWin(): ((s: Cesium.Scene, p: Cesium.Cartesian3, r?: Cesium.Cartesian2) => Cesium.Cartesian2 | undefined) | undefined {
     const ST = Cesium.SceneTransforms as unknown as {
       worldToWindowCoordinates?: (s: Cesium.Scene, p: Cesium.Cartesian3, r?: Cesium.Cartesian2) => Cesium.Cartesian2 | undefined;
       wgs84ToWindowCoordinates?: (s: Cesium.Scene, p: Cesium.Cartesian3, r?: Cesium.Cartesian2) => Cesium.Cartesian2 | undefined;
     };
-    const toWin = ST.worldToWindowCoordinates ?? ST.wgs84ToWindowCoordinates;
+    return ST.worldToWindowCoordinates ?? ST.wgs84ToWindowCoordinates;
+  }
+
+  private pickScratchC = new Cesium.Cartesian3();
+  private pickScratchW = new Cesium.Cartesian2();
+
+  /**
+   * Select the single unit nearest a window point (within `maxPx`); returns whether one was picked.
+   * Projects the cached world positions, so call after at least one render().
+   */
+  pick(scene: Cesium.Scene, x: number, y: number, maxPx: number): boolean {
+    const toWin = this.toWin();
     if (!toWin) return false;
-    const c = new Cesium.Cartesian3();
-    const w = new Cesium.Cartesian2();
+    const c = this.pickScratchC;
+    const w = this.pickScratchW;
     let best = -1;
     let bestD = maxPx * maxPx;
     for (let i = 0; i < this.units.length; i++) {
@@ -477,30 +533,96 @@ export class UnitField {
         best = i;
       }
     }
-    this.selectedIdx = best >= 0 ? best : null;
+    this.selection.clear();
+    if (best >= 0) this.selection.add(best);
     return best >= 0;
   }
 
+  /** Select every unit whose screen position falls inside a drag box. Returns the count. */
+  pickBox(scene: Cesium.Scene, x0: number, y0: number, x1: number, y1: number): number {
+    const toWin = this.toWin();
+    this.selection.clear();
+    if (!toWin) return 0;
+    const lx = Math.min(x0, x1);
+    const hx = Math.max(x0, x1);
+    const ly = Math.min(y0, y1);
+    const hy = Math.max(y0, y1);
+    const c = this.pickScratchC;
+    const w = this.pickScratchW;
+    for (let i = 0; i < this.units.length; i++) {
+      c.x = this.ecef[i * 3];
+      c.y = this.ecef[i * 3 + 1];
+      c.z = this.ecef[i * 3 + 2];
+      const win = toWin(scene, c, w);
+      if (!win) continue;
+      if (win.x >= lx && win.x <= hx && win.y >= ly && win.y <= hy) this.selection.add(i);
+    }
+    return this.selection.size;
+  }
+
   deselect(): void {
-    this.selectedIdx = null;
+    this.selection.clear();
   }
 
-  /** Live info for the selected unit (its fields change as it moves / gets infected). */
-  selected(): SelectedUnit | null {
-    if (this.selectedIdx == null) return null;
-    const u = this.units[this.selectedIdx];
-    return { id: u.id, kind: u.kind, state: u.state, lon: u.lon, lat: u.lat, heading: u.heading };
+  /** Live info for the selection: one unit's full stats, or a summary of many. */
+  selected(): SelectionInfo | null {
+    if (this.selection.size === 0) return null;
+    const byKind: Record<UnitKind, number> = { land: 0, sea: 0, air: 0, foot: 0 };
+    const byState: Record<UnitState, number> = { normal: 0, protected: 0, infected: 0 };
+    let markedCount = 0;
+    let one: Unit | undefined;
+    for (const i of this.selection) {
+      const u = this.units[i];
+      byKind[u.kind]++;
+      byState[u.state]++;
+      if (u.mark) markedCount++;
+      one = u;
+    }
+    const info: SelectionInfo = { count: this.selection.size, byKind, byState, markedCount };
+    if (this.selection.size === 1 && one) {
+      info.single = { id: one.id, kind: one.kind, state: one.state, lon: one.lon, lat: one.lat, heading: one.heading, mark: one.mark };
+    }
+    return info;
   }
 
-  /** Window position of the selected unit, for the reticle. Call after render(). */
+  /** Whether the current selection is 'none', 'some', or 'all' investigate-marked. */
+  markState(): 'none' | 'some' | 'all' {
+    if (this.selection.size === 0) return 'none';
+    let m = 0;
+    for (const i of this.selection) if (this.units[i].mark) m++;
+    return m === 0 ? 'none' : m === this.selection.size ? 'all' : 'some';
+  }
+
+  /** Flag (or clear) the current selection as investigate, and rebuild the field markers. */
+  markSelected(on: boolean): void {
+    for (const i of this.selection) this.units[i].mark = on;
+    this.rebuildMarks();
+  }
+
+  private rebuildMarks(): void {
+    this.markedIdx = [];
+    for (let i = 0; i < this.units.length; i++) if (this.units[i].mark) this.markedIdx.push(i);
+    this.marksLayer.removeAll();
+    for (let m = 0; m < this.markedIdx.length; m++) {
+      const b = this.marksLayer.add({
+        position: Cesium.Cartesian3.ZERO, // set each frame in render()
+        image: this.markTexture,
+        width: 26,
+        height: 26,
+        pixelOffset: new Cesium.Cartesian2(0, -20),
+      });
+      // A C2 marker stays visible even when its unit is behind a building. NOTE: Cesium billboards
+      // coerce `Infinity` here to null (which does NOT disable the test) — a large finite value
+      // (well past any theater distance) is what actually keeps the marker on top.
+      b.disableDepthTestDistance = 1e12;
+    }
+  }
+
+  /** Window position of the single selected unit, for the reticle. Call after render(). */
   selectedScreen(scene: Cesium.Scene, result: Cesium.Cartesian2): Cesium.Cartesian2 | undefined {
-    if (this.selectedIdx == null) return undefined;
-    const ST = Cesium.SceneTransforms as unknown as {
-      worldToWindowCoordinates?: (s: Cesium.Scene, p: Cesium.Cartesian3, r?: Cesium.Cartesian2) => Cesium.Cartesian2 | undefined;
-      wgs84ToWindowCoordinates?: (s: Cesium.Scene, p: Cesium.Cartesian3, r?: Cesium.Cartesian2) => Cesium.Cartesian2 | undefined;
-    };
-    const toWin = ST.worldToWindowCoordinates ?? ST.wgs84ToWindowCoordinates;
-    const i = this.selectedIdx;
+    if (this.selection.size !== 1) return undefined;
+    const toWin = this.toWin();
+    const i = this.selection.values().next().value as number;
     const c = new Cesium.Cartesian3(this.ecef[i * 3], this.ecef[i * 3 + 1], this.ecef[i * 3 + 2]);
     return toWin?.(scene, c, result);
   }

@@ -8,7 +8,8 @@ import { loadObelisks, createHeatField, buildObeliskPyramids, type ObeliskField 
 import { fetchRoads, buildRoadPrimitive, type RoadClass, type RoadGroup, type RoadNet } from './roads';
 import { buildBuildings } from './buildings';
 import { generateBuildings } from './procBuildings';
-import { UnitField, KIND_LABEL, KIND_SPEED } from './units';
+import { UnitField, KIND_LABEL, KIND_SPEED, type UnitState } from './units';
+import type { UnitKind } from './unitModels';
 import { SensorField } from './sensors';
 
 const RED = Cesium.Color.fromCssColorString('#E23A2E');
@@ -397,12 +398,63 @@ const BUILDING_MAX = IS_MOBILE ? 35_000 : 120_000;
 const BUILDING_MAX_HEIGHT_M = 230;
 const BUILDING_SINK_M = 2;
 
+// Live dev-tunable settings, adjustable from the header ⚙ panel. Defaults reproduce the shipped look.
+const devSettings = {
+  buildingPopulation: 1, // scales attempted building density (0.25–2)
+  roadGap: 14, // metres buildings sit off the road edge (raised from 8 — they crowded the roads)
+  maxHeight: BUILDING_MAX_HEIGHT_M, // tallest tower, metres
+};
+
 // Buildings arrive as a stream of chunk primitives, so the city fills in progressively.
 let buildingPrimitives: Cesium.Primitive[] = [];
+let lastBuildingCount = 0; // footprints from the most recent generation (dev-panel readout/tests)
+// Bumped on every (re)generation so a stream in flight can tell it's been superseded (e.g. the user
+// nudged a dev slider mid-build, or exited the theater).
+let buildingsToken = 0;
 
 function removeBuildings() {
   for (const p of buildingPrimitives) scene.primitives.remove(p);
   buildingPrimitives = [];
+}
+
+/**
+ * Generate + stream the procedural skyline for the current theater using the live {@link devSettings}.
+ * Shared by the initial theater build and the dev-panel "regenerate". Reuses the already-fetched road
+ * graph (no refetch). Aborts cleanly if the theater changes or a newer generation starts.
+ */
+async function streamBuildings(
+  lon: number,
+  lat: number,
+  map: TheaterMap,
+  net: RoadNet,
+  tok: number,
+) {
+  const bTok = ++buildingsToken;
+  removeBuildings();
+  const bset = generateBuildings(net, { lon, lat }, map.heightAt, {
+    radiusM: BUILDING_GEN_RADIUS_M,
+    maxBuildings: BUILDING_MAX,
+    maxHeight: devSettings.maxHeight,
+    roadGap: devSettings.roadGap,
+    populationScale: devSettings.buildingPopulation,
+  });
+  lastBuildingCount = bset.polys.length;
+  setText('g-buildings', String(bset.polys.length));
+  const bbounds = new Cesium.BoundingSphere(
+    Cesium.Cartesian3.fromDegrees(lon, lat, 0),
+    BUILDING_GEN_RADIUS_M * 1.4 + 1000,
+  );
+  const stale = () => tok !== theaterToken || bTok !== buildingsToken;
+  await buildBuildings(bset, map.heightAt, bbounds, BUILDING_SINK_M, stale, (prim) => {
+    if (!stale()) buildingPrimitives.push(scene.primitives.add(prim));
+    else prim.destroy();
+  });
+}
+
+/** Rebuild the skyline in-place with the current dev settings. No-op outside a live theater. */
+function regenerateBuildings() {
+  if (mode !== 'theater' || !theaterMap || !theaterNet || !theaterCenter) return;
+  void streamBuildings(theaterCenter.lon, theaterCenter.lat, theaterMap, theaterNet, theaterToken);
 }
 
 // ---- live units ----
@@ -418,6 +470,7 @@ function addUnits(center: { lon: number; lat: number }, map: TheaterMap, net: Ro
   removeUnits();
   const field = new UnitField(center, THEATER_RADIUS_M, map.heightAt, net, UNIT_COUNTS);
   for (const k of ['land', 'sea', 'air', 'foot'] as const) scene.primitives.add(field.batches[k]);
+  scene.primitives.add(field.marksLayer); // investigate markers
   unitField = field;
   updateUnitHud();
 }
@@ -425,6 +478,7 @@ function addUnits(center: { lon: number; lat: number }, map: TheaterMap, net: Ro
 function removeUnits() {
   if (unitField) {
     for (const k of ['land', 'sea', 'air', 'foot'] as const) scene.primitives.remove(unitField.batches[k]);
+    scene.primitives.remove(unitField.marksLayer);
     unitField = undefined;
   }
 }
@@ -694,45 +748,93 @@ const panelEl = el('unit-panel');
 const reticleEl = el('unit-reticle');
 const reticleWin = new Cesium.Cartesian2();
 
+// Marquee drag-box (theater, desktop LMB) for multi-select.
+const marqueeEl = document.createElement('div');
+marqueeEl.id = 'marquee';
+document.body.appendChild(marqueeEl);
+let marqueeStart: Cesium.Cartesian2 | null = null;
+let marqueeActive = false; // dragged past the threshold, so it's a box not a click
+const MARQUEE_MIN = 6;
+
+function drawMarquee(a: Cesium.Cartesian2, b: Cesium.Cartesian2) {
+  marqueeEl.style.display = 'block';
+  marqueeEl.style.left = `${Math.min(a.x, b.x)}px`;
+  marqueeEl.style.top = `${Math.min(a.y, b.y)}px`;
+  marqueeEl.style.width = `${Math.abs(a.x - b.x)}px`;
+  marqueeEl.style.height = `${Math.abs(a.y - b.y)}px`;
+}
+function endMarquee() {
+  marqueeEl.style.display = 'none';
+  marqueeStart = null;
+  marqueeActive = false;
+}
+
 const STATE_LABEL: Record<string, string> = { normal: 'NORMAL', protected: 'PROTECTED', infected: 'INFECTED' };
 const STATE_HEX: Record<string, string> = { normal: '#EDEFF2', protected: '#F2C13B', infected: '#E23A2E' };
+const KIND_ABBR: Record<UnitKind, string> = { land: 'CV', sea: 'SV', air: 'AV', foot: 'FT' };
+const STATE_ABBR: Record<UnitState, string> = { normal: 'NORM', protected: 'PROT', infected: 'INF' };
 const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+const MARK_HEX = '#F2A83B';
 
 function hideUnitPanel() {
   if (panelEl) (panelEl as HTMLElement).hidden = true;
   if (reticleEl) (reticleEl as HTMLElement).hidden = true;
 }
 
-/** Refresh the panel text + reticle position from the current selection. Called each frame. */
+const tally = <K extends string>(counts: Record<K, number>, abbr: Record<K, string>) =>
+  (Object.keys(counts) as K[])
+    .filter((k) => counts[k] > 0)
+    .map((k) => `${abbr[k]} ${counts[k]}`)
+    .join(' · ') || '—';
+
+/** Refresh the panel + reticle from the current selection. Called each frame. */
 function updateUnitPanel() {
   if (!unitField) return hideUnitPanel();
   const sel = unitField.selected();
-  if (!sel) return hideUnitPanel();
+  if (!sel || !panelEl) return hideUnitPanel();
+  (panelEl as HTMLElement).hidden = false;
 
-  if (panelEl) {
-    (panelEl as HTMLElement).hidden = false;
-    setText('up-id', sel.id);
-    setText('up-type', KIND_LABEL[sel.kind]);
+  const one = sel.single;
+  const singleEl = el('up-single');
+  const multiEl = el('up-multi');
+  if (singleEl) (singleEl as HTMLElement).hidden = !one;
+  if (multiEl) (multiEl as HTMLElement).hidden = !!one;
+  const dot = el('up-dot');
+
+  if (one) {
+    setText('up-id', one.id);
+    setText('up-type', KIND_LABEL[one.kind]);
     const stEl = el('up-status');
     if (stEl) {
-      stEl.textContent = STATE_LABEL[sel.state];
-      stEl.className = `v state-${sel.state}`;
+      stEl.textContent = STATE_LABEL[one.state];
+      stEl.className = `v state-${one.state}`;
     }
-    const dot = el('up-dot');
-    if (dot) (dot as HTMLElement).style.color = STATE_HEX[sel.state];
+    if (dot) (dot as HTMLElement).style.color = STATE_HEX[one.state];
     setText(
       'up-pos',
-      `${Math.abs(sel.lat).toFixed(3)}°${sel.lat >= 0 ? 'N' : 'S'} ${Math.abs(sel.lon).toFixed(3)}°${sel.lon >= 0 ? 'E' : 'W'}`,
+      `${Math.abs(one.lat).toFixed(3)}°${one.lat >= 0 ? 'N' : 'S'} ${Math.abs(one.lon).toFixed(3)}°${one.lon >= 0 ? 'E' : 'W'}`,
     );
-    let deg = (Cesium.Math.toDegrees(sel.heading) + 360) % 360;
-    const dir = COMPASS[Math.round(deg / 45) % 8];
-    setText('up-hdg', `${Math.round(deg)}° ${dir} · ${KIND_SPEED[sel.kind]} M/S`);
-    const seen = !sensorField || sensorField.isCovered(sel.lon, sel.lat);
+    const deg = (Cesium.Math.toDegrees(one.heading) + 360) % 360;
+    setText('up-hdg', `${Math.round(deg)}° ${COMPASS[Math.round(deg / 45) % 8]} · ${KIND_SPEED[one.kind]} M/S`);
+    const seen = !sensorField || sensorField.isCovered(one.lon, one.lat);
     const senEl = el('up-sensor');
     if (senEl) {
       senEl.textContent = seen ? 'TRACKED' : 'OUT OF RANGE';
       senEl.className = `v ${seen ? 'sensor-tracked' : 'sensor-dark'}`;
     }
+  } else {
+    setText('up-id', `${sel.count} UNITS`);
+    if (dot) (dot as HTMLElement).style.color = sel.markedCount > 0 ? MARK_HEX : '#B7BDC5';
+    setText('up-kinds', tally(sel.byKind, KIND_ABBR));
+    setText('up-states', tally(sel.byState, STATE_ABBR));
+    setText('up-marked', `${sel.markedCount} / ${sel.count}`);
+  }
+
+  const mk = el('up-mark');
+  if (mk) {
+    const st = unitField.markState();
+    mk.textContent = st === 'all' ? '◈ CLEAR INVESTIGATE' : '◈ MARK INVESTIGATE';
+    mk.classList.toggle('active', st !== 'none');
   }
 
   if (reticleEl) {
@@ -830,6 +932,8 @@ function updateChrome() {
 }
 
 let theaterMap: TheaterMap | undefined;
+/** The current theater's road graph, kept so the dev panel can regenerate buildings without refetching. */
+let theaterNet: RoadNet | undefined;
 /** Bumped on every enter/exit so a slow build can tell it's been superseded. */
 let theaterToken = 0;
 
@@ -955,19 +1059,8 @@ async function buildTheater(lon: number, lat: number, tok: number) {
     // — real footprints were too sparse. Dense where roads converge, clear of the roadway, towers
     // downtown. The extrude then streams in as chunk primitives so the skyline fills in as you arrive.
     if (net) {
-      const bset = generateBuildings(net, { lon, lat }, map.heightAt, {
-        radiusM: BUILDING_GEN_RADIUS_M,
-        maxBuildings: BUILDING_MAX,
-        maxHeight: BUILDING_MAX_HEIGHT_M,
-      });
-      const bbounds = new Cesium.BoundingSphere(
-        Cesium.Cartesian3.fromDegrees(lon, lat, 0),
-        BUILDING_GEN_RADIUS_M * 1.4 + 1000,
-      );
-      await buildBuildings(bset, map.heightAt, bbounds, BUILDING_SINK_M, () => tok !== theaterToken, (prim) => {
-        if (tok === theaterToken) buildingPrimitives.push(scene.primitives.add(prim));
-        else prim.destroy();
-      });
+      theaterNet = net; // keep for dev-panel regeneration
+      await streamBuildings(lon, lat, map, net, tok);
     }
   } catch (e) {
     console.warn('[GORGON] theater map build failed:', e);
@@ -990,6 +1083,7 @@ function exitTheater() {
     theaterMap.destroyMaterials();
     theaterMap = undefined;
   }
+  theaterNet = undefined;
   hideTheaterLines();
   hideBokeh();
   removeObeliskPyramids();
@@ -1024,6 +1118,12 @@ const fmt = (rad: number, pos: string, neg: string) => {
 };
 
 handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.MotionEvent) => {
+  // theater: draw the marquee box while dragging
+  if (marqueeStart) {
+    if (Cesium.Cartesian2.distance(marqueeStart, m.endPosition) > MARQUEE_MIN) marqueeActive = true;
+    if (marqueeActive) drawMarquee(marqueeStart, m.endPosition);
+    return;
+  }
   if (mode !== 'globe') return; // cursor readout is orbit-only
   const carto = pickLonLat(m.endPosition);
   if (carto) {
@@ -1038,7 +1138,27 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.MotionEvent) => {
   }
 }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
 
-// LMB click: pick a theater in orbit, pick a single unit in a theater.
+// LMB down: begin a possible marquee (theater, desktop — mobile LMB pans the map).
+handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
+  if (mode !== 'theater' || IS_MOBILE) return;
+  marqueeStart = Cesium.Cartesian2.clone(m.position);
+  marqueeActive = false;
+}, Cesium.ScreenSpaceEventType.LEFT_DOWN);
+
+// LMB up: finish a marquee box (multi-select). A non-drag falls through to LEFT_CLICK (single pick).
+handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
+  if (marqueeStart && marqueeActive) {
+    if (unitField && unitField.pickBox(scene, marqueeStart.x, marqueeStart.y, m.position.x, m.position.y) > 0) {
+      updateUnitPanel();
+    } else {
+      unitField?.deselect();
+      hideUnitPanel();
+    }
+  }
+  endMarquee();
+}, Cesium.ScreenSpaceEventType.LEFT_UP);
+
+// LMB click (no drag): pick a theater in orbit, a single unit in a theater.
 handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
   if (mode === 'globe') {
     const carto = pickLonLat(m.position);
@@ -1054,9 +1174,73 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
 }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
 el('g-exit')?.addEventListener('click', exitTheater);
+
+// ---- dev settings panel (⚙) ----
+// A small header panel for live-tuning the procedural city. Sliders write into `devSettings`; the
+// two that change geometry (population, road gap) regenerate the skyline on release.
+{
+  const gear = el('dev-toggle');
+  const panel = el('dev-panel');
+  gear?.addEventListener('click', () => {
+    if (!panel) return;
+    panel.hidden = !panel.hidden;
+    gear.classList.toggle('active', !panel.hidden);
+  });
+  el('dev-close')?.addEventListener('click', () => {
+    if (panel) panel.hidden = true;
+    gear?.classList.remove('active');
+  });
+
+  // wire one slider: reflect its value into a label live, and run `commit` when released
+  const bindSlider = (
+    id: string,
+    fmt: (v: number) => string,
+    apply: (v: number) => void,
+    commit: () => void,
+  ) => {
+    const input = el(id) as HTMLInputElement | null;
+    const out = el(`${id}-val`);
+    if (!input) return;
+    const show = () => {
+      if (out) out.textContent = fmt(parseFloat(input.value));
+    };
+    show();
+    input.addEventListener('input', () => {
+      apply(parseFloat(input.value));
+      show();
+    });
+    input.addEventListener('change', commit);
+  };
+
+  bindSlider(
+    'dev-population',
+    (v) => `${v.toFixed(2)}×`,
+    (v) => (devSettings.buildingPopulation = v),
+    regenerateBuildings,
+  );
+  bindSlider(
+    'dev-roadgap',
+    (v) => `${v.toFixed(0)} m`,
+    (v) => (devSettings.roadGap = v),
+    regenerateBuildings,
+  );
+  bindSlider(
+    'dev-maxheight',
+    (v) => `${v.toFixed(0)} m`,
+    (v) => (devSettings.maxHeight = v),
+    regenerateBuildings,
+  );
+
+  el('dev-regen')?.addEventListener('click', regenerateBuildings);
+}
 el('up-close')?.addEventListener('click', () => {
   unitField?.deselect();
   hideUnitPanel();
+});
+el('up-mark')?.addEventListener('click', () => {
+  if (!unitField) return;
+  unitField.markSelected(unitField.markState() !== 'all'); // toggle: mark all, or clear if all marked
+  updateUnitPanel();
 });
 
 window.addEventListener('keydown', (e) => {
@@ -1089,6 +1273,11 @@ if (import.meta.env.DEV) {
     exitTheater,
     spawnUnits,
     clearUnits,
+    devSettings,
+    regenerateBuildings,
+    get buildingCount() {
+      return lastBuildingCount;
+    },
     get unitField() {
       return unitField;
     },

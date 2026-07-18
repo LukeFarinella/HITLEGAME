@@ -30,6 +30,31 @@
       </div>
 
       <button id="g-exit" type="button" hidden>◀ WORLD MAP</button>
+
+      <!-- Dev settings -->
+      <button id="dev-toggle" type="button" aria-label="Dev settings" title="Dev settings">⚙</button>
+      <div id="dev-panel" hidden>
+        <div class="dev-head">
+          <span class="dev-title">DEV SETTINGS</span>
+          <button class="dev-close" id="dev-close" type="button" aria-label="Close">✕</button>
+        </div>
+        <div class="dev-body">
+          <label class="dev-row" for="dev-population">
+            <span class="dev-k">Building population <span class="dev-v" id="dev-population-val">—</span></span>
+            <input type="range" id="dev-population" min="0.25" max="2" step="0.05" value="1" />
+          </label>
+          <label class="dev-row" for="dev-roadgap">
+            <span class="dev-k">Road clearance <span class="dev-v" id="dev-roadgap-val">—</span></span>
+            <input type="range" id="dev-roadgap" min="4" max="40" step="1" value="14" />
+          </label>
+          <label class="dev-row" for="dev-maxheight">
+            <span class="dev-k">Max height <span class="dev-v" id="dev-maxheight-val">—</span></span>
+            <input type="range" id="dev-maxheight" min="60" max="400" step="10" value="230" />
+          </label>
+          <button class="dev-regen" id="dev-regen" type="button">↻ REGENERATE CITY</button>
+          <p class="dev-note">Adjustments rebuild the current theater's skyline. Enter a theater to see them.</p>
+        </div>
+      </div>
     </div>
 
     <!-- Single-unit selection panel (theater) -->
@@ -39,12 +64,20 @@
         <span class="up-id" id="up-id">—</span>
         <button class="up-close" id="up-close" type="button" aria-label="Deselect">✕</button>
       </div>
-      <div class="up-body">
+      <div class="up-body" id="up-single">
         <div class="up-row"><span class="k">Type</span><span class="v" id="up-type">—</span></div>
         <div class="up-row"><span class="k">Status</span><span class="v" id="up-status">—</span></div>
         <div class="up-row"><span class="k">Position</span><span class="v" id="up-pos">—</span></div>
         <div class="up-row"><span class="k">Heading</span><span class="v" id="up-hdg">—</span></div>
         <div class="up-row"><span class="k">Sensor</span><span class="v" id="up-sensor">—</span></div>
+      </div>
+      <div class="up-body" id="up-multi" hidden>
+        <div class="up-row"><span class="k">Types</span><span class="v" id="up-kinds">—</span></div>
+        <div class="up-row"><span class="k">States</span><span class="v" id="up-states">—</span></div>
+        <div class="up-row"><span class="k">Marked</span><span class="v" id="up-marked">—</span></div>
+      </div>
+      <div class="up-actions">
+        <button class="up-mark" id="up-mark" type="button">◈ MARK INVESTIGATE</button>
       </div>
     </div>
 
