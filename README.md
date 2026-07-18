@@ -175,6 +175,11 @@ Two constraints pinned this design, both measured rather than assumed:
 - **Not GL lines.** `ALIASED_LINE_WIDTH_RANGE` is **[1,1]** on ANGLE/D3D11 and every other
   mainstream backend, so `PrimitiveType.LINES` can only ever be 1 px.
 
+Raw OSM road geometry is sparse and angular, so before rendering each polyline is smoothed with
+**two iterations of Chaikin corner-cutting** (`chaikin()` in `roads.ts`) — endpoints stay fixed so
+roads still meet exactly at their intersection nodes, but bends round into clean curves (158k → 677k
+segments for an SF theater). Units route on the smoothed geometry too, so they follow the curves.
+
 So each point carries two vertices (side −1/+1) and the **vertex shader** pushes them apart along
 the screen-space normal, found by projecting a second point 8 m along the line's tangent. Same
 technique `PolylineCollection` uses; the difference is it runs once per vertex on the GPU instead
@@ -193,43 +198,115 @@ Measured against a lone motorway (real width 32 m) over Altamont Pass:
 At theater scale a motorway is a fourteenth of a pixel, so without the floor the network would
 simply vanish; up close the real geometry takes over.
 
-## Buildings
+## Buildings (procedural, from road density)
 
-Real OSM footprints, extruded to real heights — but **a core around the theater centre, not the
-whole theater**. That isn't a shortcut, it's forced: OpenMapTiles only carries the `building`
-layer at **z13–14**, and only z14 has `render_height` (z13 merges every building into one
-property-less blob). A 200-mile box at z14 is **~27,900 tiles**. So `BUILDING_RADIUS_M` (6 km
-desktop / 3 km mobile) defines an objective core; the rest of the theater stays bare terrain.
+Buildings are **generated procedurally from the real road network** (`procBuildings.ts`), not
+fetched. Real OSM footprints turned out too sparse and geographically uneven — z14 only covers a
+small core, and a downtown returns ~5k big highrises with nothing between them. **Road density is a
+far better signal for where a city is,** and we already have the full real road graph across the
+theater.
 
-**OSM counts every shed, garage and carport**, and that dominates the cost. At a 6 km core SF has
-147,689 footprints and NYC 228,732 — ~3M vertices of extrusion. Filtering to real structures
-(`>=10 m` tall, `>=150 m²` footprint) keeps the skyline and drops ~85%:
+How it works:
 
-| theater | buildings | triangles | tiles |
-| --- | --- | --- | --- |
-| New York | 43,521 | 1,107k | 62 |
-| San Francisco | 19,430 | 689k | 43 |
-| Chicago | 9,709 | 262k | 39 |
-| Denver | 4,931 | 192k | 56 |
+- **Density field.** Rasterise every road segment's length into a ~300 m grid, weighted by class
+  (local streets count full; freeways less, since they run *between* cities). `sqrt`-normalised so a
+  whole district reads as urban, not just the single peak cell.
+- **Line the streets.** For each cell, seed candidates in proportion to density, snap each to
+  **front the nearest road** (near edge ~11 m off the centreline, footprint extending into the
+  block, long axis along the street). This lines every road and leaves the roadway clear — so
+  traffic shows *between* the buildings instead of boxes landing on the road.
+- **Scale with density.** Footprints grow (20→60 m) and heights rise (14→85 m, with a tower tail up
+  to 230 m) toward the core; suburbs get small low-rises; the countryside stays bare. A spatial-hash
+  reject stops overlaps.
+- **Coverage + cap.** Generated out to a metro radius (26 km desktop / 14 km mobile) — density
+  self-limits the rural remainder — with a hard cap (120k desktop / 35k mobile), densest cells
+  filled first. Seattle yields **~93k buildings**; arrival building coverage went from 0.4% (real
+  footprints) to **11.3%**, street-level nadir to **17.6%**, while roads stay clearly visible
+  between them (~124k road px at street zoom). 74 fps arrival / ~45 fps at street level.
 
-Two implementation notes worth keeping:
+The footprints feed the **same extruder and progressive chunked renderer** as before — the generator
+only swaps the source, so all the rendering carries over:
 
-- **OpenFreeMap merges footprints by height.** One "feature" is a whole height class holding a
-  MultiPolygon of every building at that height — a single downtown SF z14 tile is 131 features but
-  **4,215 buildings**. Iterate the polygons, not the features.
-- **Flat shading without duplicate vertices.** The normal is recovered per-fragment from
-  `dFdx/dFdy` of the eye-space position, so walls and roof share one bottom ring and one top ring —
-  2 vertices per footprint point instead of the 4-per-wall-quad a normal attribute would force.
-  That's ~0.9M vertices instead of ~3.5M for a city core. Roofs are `earcut`-ed with hole support;
-  verified at **72% coverage** looking straight down at the Financial District (missing roofs would
-  show only thin wall slivers).
+- **Progressive chunks.** `buildBuildings` emits one primitive per ~3,000 buildings via a callback,
+  each added to the scene as it's ready, so the skyline visibly fills in from ~1 s instead of a 9 s
+  blank pop. A staleness check aborts a build the user has left.
+- **Flat shading without duplicate vertices.** The normal is recovered per-fragment from `dFdx/dFdy`
+  of the eye-space position, so walls and roof share one bottom ring and one top ring — 2 vertices
+  per footprint point. Roofs are `earcut`-ed. Coordinate conversion is inlined (skipping
+  `Cesium.Cartesian3.fromDegrees`' per-call scratch); indices go straight into preallocated typed
+  arrays.
+- Ground height is sampled **once per building**, not per vertex (a footprint is tens of metres
+  across; the terrain mesh is ~300 m per vertex).
 
-Ground height is sampled **once per building**, not per vertex: a footprint is tens of metres
-across and the terrain mesh is ~300 m per vertex, so per-vertex sampling would only skew something
-that should sit level.
+The fly-in **frames the city obliquely** (`flyToBoundingSphere` at the centre, ~7.5 km / −38°) so you
+arrive to a skyline rather than at theater-overview height where real-scale buildings are sub-pixel.
 
-With terrain, roads, buildings, obelisks and the rim bokeh all live, a theater renders in
-**0.25–0.66 ms**.
+Tradeoff: these aren't *real* footprints — it's a procedural city. But it's dense everywhere there's
+a real street grid, which is what reads as a city and what the real data couldn't deliver. (The old
+OSM path still lives in `buildings.ts::fetchBuildings`, now unused.)
+
+## Units
+
+Live units — land / sea / air / foot — each a procedural low-poly model, moving every frame.
+They're **GPU-instanced**: the model mesh uploads once and a per-instance buffer (position +
+heading + scale + state colour) is rewritten each frame, so all units of a kind draw in one
+`drawElementsInstanced` call. Everything else in the theater bakes static geometry once; units
+can't, and the two other options don't fit — a `Primitive` can't be rebuilt per frame (shader
+compile, async upload) and Entities charge a per-entity updater. So the unit layer drops below
+Cesium's Primitive/Appearance abstraction to the renderer classes it exposes but doesn't type
+(`DrawCommand`, `VertexArray`, `Buffer`, `ShaderProgram`) — see `instancedModels.ts`.
+
+Positions are ECEF (millions of metres, past float32), so each is split high/low and reassembled
+relative to the eye in the vertex shader — the same trick Cesium's own geometry uses. The model's
+local vertices stay in metres and are placed in an ENU frame the shader builds from the instance's
+own direction, so a unit sits level and faces its heading anywhere on the globe.
+
+- **Land + foot** route the **real road graph**. `units.ts` turns the fetched road polylines into
+  a graph — endpoints within ~1 m are one node (OSM splits ways at intersections, so shared
+  endpoints are how roads connect) — giving ~33k edges / ~53k nodes for an SF theater. At each
+  junction a unit takes the **straightest continuation, biased toward bigger roads** (not a random
+  turn), so traffic flows *through* interchanges instead of meandering and backtracking — the
+  median unit covers 786 m of a possible 814 m over 10 s. Vehicles spawn 45% on freeways and
+  straightest-continuation keeps them there (~56% ride motorways/trunks), giving a constant stream
+  on the highways; pedestrians stay on surface streets. Spawns are length-weighted so long roads
+  carry proportionally more traffic and units don't pile onto tiny stubs.
+- **Sea** units spawn only where the baked terrain is below water and wander, turning away from
+  shore and the theater rim. **Air** units fly waypoints above the ground.
+- **States** are orthogonal to kind: every unit is `normal` / `protected` / `infected`, shown
+  **white / yellow / red** as a per-instance colour (verified by forcing each state: 483 red /
+  495 yellow / 477 white px). Seeded ~70/20/10. `I` in a theater sweeps the infection wider so the
+  red state is easy to watch — a stand-in until a real contagion sim lands on top of this field.
+
+**5,770 units** (2500 land · 3000 foot · 150 sea · 120 air; ~1/3 that on mobile) with terrain,
+roads, buildings and the sensor network all live render in **~9 ms** at a downtown zoom. The sim
+steps in `scene.preUpdate` on real wall-clock dt, clamped to 0.1 s so a backgrounded tab doesn't
+teleport everyone. States seed ~90% normal / ~5% protected / ~5% infected.
+
+## Sensor network (`sensors.ts`)
+
+Every obelisk watches a disc (`SENSOR_RANGE_M`, 750 m) shown as a faint additive ring, and that
+drives two things — unit visibility and obelisk alerts. Both are relations between thousands of
+obelisks and thousands of units, so neither is an O(obelisks × units) sweep; both go through one
+uniform grid keyed on the theater bbox:
+
+- **Unit visibility** — a **coverage** grid, stamped once with every obelisk's disc. A unit outside
+  it is out of sensor range and renders at **30% opacity** (a stand-in for fog of war — units may
+  be culled entirely later). O(1) per unit. Verified by the instance alpha: ships offshore come out
+  99% faint (obelisks are land sensors), rural air units mostly faint, metro land/foot ~70% seen.
+- **Obelisk alerts** — a **threat** grid, restamped each frame from the *infected* units' discs. An
+  obelisk whose cell is threatened is seeing an infected unit and **glows red** (a
+  `PointPrimitiveCollection` where only alerted apexes are shown, toggling just the per-frame
+  delta). Verified at 750 m: 167 infected light ~334 obelisks (~5% of the network); the `I` sweep
+  raises both together.
+
+`SENSOR_RANGE_M` tunes the whole feel — at 750 m a few obelisks light up per infected unit; the
+alert count scales with range² (1500 m alerted ~4× as many).
+
+**Known gaps (next pass):** the marquee-select box still targets the old point-unit collection, not
+the instanced units — it needs re-pointing. Units are a fixed size, so they're clear at a tactical
+zoom (a few km) but sub-pixel from the 95 km entry view; a screen-space size floor (like the road
+ribbons already have) would fix that. And "infected" is still a colour + the `I` demo sweep, not yet
+a real contagion sim — but the state field and threat grid are exactly what one would build on.
 
 ## Performance notes (this project expects *thousands* of units)
 
@@ -249,7 +326,12 @@ src/cesium/gorgonGlobe.ts             app entry: viewer, styling, modes, control
 src/cesium/theaterMap.ts              the static theater mesh: elevation, shoreline SDF, sea, shaders
 src/cesium/obelisks.ts                obelisk sites: orbit heat splats + theater pyramid geometry
 src/cesium/roads.ts                   OSM vector tiles -> one merged shader-expanded ribbon
-src/cesium/buildings.ts               OSM footprints -> extruded core around the theater centre
+src/cesium/procBuildings.ts           procedural city from road density (footprints + heights)
+src/cesium/buildings.ts               footprint extruder + progressive chunked renderer
+src/cesium/instancedModels.ts         GPU-instanced model batch (custom DrawCommand)
+src/cesium/unitModels.ts              procedural low-poly unit meshes (land/sea/air/foot)
+src/cesium/units.ts                   unit sim: road-graph routing, wander, states, opacity
+src/cesium/sensors.ts                 obelisk sensor grid: coverage, threat/alerts, range rings
 tools/build-obelisks.mjs              sheet -> US-filtered public/obelisks.bin
 src/cesium/TerrariumTerrainProvider.ts  custom topo+bathy terrain provider
 src/ui/theme.css                      GORGON design tokens + HUD/overlay

@@ -58,6 +58,31 @@ export interface RoadNet {
   zoom: number;
 }
 
+/**
+ * Chaikin corner-cutting: rounds a polyline's angular vertices into a smooth curve. OSM road
+ * geometry is sparse and angular, and the raw ribbons read as jointed/faceted — the opposite of
+ * the clean look a portfolio piece wants. Each iteration replaces every segment with points at 1/4
+ * and 3/4, keeping the endpoints fixed so roads still meet exactly at their intersection nodes; two
+ * iterations give visibly smooth curves. Collinear runs (straight roads) are left effectively
+ * unchanged.
+ */
+function chaikin(pts: number[][], iterations: number): number[][] {
+  if (pts.length < 3) return pts;
+  let out = pts;
+  for (let it = 0; it < iterations; it++) {
+    const next: number[][] = [out[0]];
+    for (let i = 0; i < out.length - 1; i++) {
+      const a = out[i];
+      const b = out[i + 1];
+      next.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25]);
+      next.push([a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]);
+    }
+    next.push(out[out.length - 1]);
+    out = next;
+  }
+  return out;
+}
+
 const lon2tileX = (lon: number, z: number) => ((lon + 180) / 360) * 2 ** z;
 const lat2tileY = (lat: number, z: number) => {
   const r = (lat * Math.PI) / 180;
@@ -104,8 +129,9 @@ export async function fetchRoads(bbox: [number, number, number, number], zoom: n
             : [];
           for (const line of lines) {
             if (line.length < 2) continue;
-            roads.push({ cls: cls as RoadClass, coords: line });
-            points += line.length;
+            const smooth = chaikin(line, 2);
+            roads.push({ cls: cls as RoadClass, coords: smooth });
+            points += smooth.length;
           }
         }
       } catch {
@@ -142,7 +168,7 @@ const ROAD_VS = `
 in vec3 position3DHigh;
 in vec3 position3DLow;
 in vec3 tangent;    // unit direction of the line at this point (ECEF)
-in vec2 params;     // x = side (-1/+1), y = half-width in metres
+in vec3 params;     // x = side (-1/+1), y = half-width in metres, z = end-cap extend (-1/0/+1)
 in vec4 color;
 in float batchId;
 out vec4 v_color;
@@ -164,10 +190,14 @@ void main() {
     vec2 sB = clipB.xy / clipB.w;
     vec2 d = (sB - sA) * czm_viewport.zw;
     if (dot(d, d) > 0.0) {
-      vec2 nrm = normalize(vec2(-d.y, d.x));
+      vec2 t = normalize(d);
+      vec2 nrm = vec2(-t.y, t.x);
       float mpp = czm_metersPerPixel(czm_modelViewRelativeToEye * p);
       float halfPx = max(u_minHalfPx, params.y / mpp);
-      clip.xy += nrm * params.x * halfPx * 2.0 / czm_viewport.zw * clip.w;
+      // Side offset builds the ribbon width; the cap term extends each end forward by half a width
+      // so separate road ways overlap and fill the gap at their shared intersection node.
+      vec2 off = nrm * params.x * halfPx + t * params.z * halfPx;
+      clip.xy += off * 2.0 / czm_viewport.zw * clip.w;
     }
   }
 
@@ -202,13 +232,15 @@ export function buildRoadPrimitive(
   bounds: Cesium.BoundingSphere,
   minHalfPx: number,
 ): { primitive: Cesium.Primitive; segments: number } | undefined {
+  // Every ribbon gets two extra "cap" points (one per end) that the shader extends outward by half
+  // a width, so ways meeting at an intersection overlap instead of leaving a gap.
   let nPts = 0;
   let nSeg = 0;
   for (const g of groups) {
     for (const line of g.lines) {
       if (line.length < 2) continue;
-      nPts += line.length;
-      nSeg += line.length - 1;
+      nPts += line.length + 2;
+      nSeg += line.length + 1;
     }
   }
   if (!nSeg) return undefined;
@@ -216,7 +248,7 @@ export function buildRoadPrimitive(
   // two vertices per point (side -1 / +1), six indices per segment
   const positions = new Float64Array(nPts * 2 * 3);
   const tangents = new Float32Array(nPts * 2 * 3);
-  const params = new Float32Array(nPts * 2 * 2);
+  const params = new Float32Array(nPts * 2 * 3);
   const colors = new Uint8Array(nPts * 2 * 4);
   const indices = new Uint32Array(nSeg * 6);
 
@@ -225,6 +257,35 @@ export function buildRoadPrimitive(
 
   let v = 0;
   let ix = 0;
+
+  const emit = (
+    pos: Cesium.Cartesian3,
+    t: Cesium.Cartesian3,
+    half: number,
+    cap: number,
+    cr: number,
+    cg: number,
+    cb: number,
+    ca: number,
+  ) => {
+    for (let s = 0; s < 2; s++) {
+      positions[v * 3] = pos.x;
+      positions[v * 3 + 1] = pos.y;
+      positions[v * 3 + 2] = pos.z;
+      tangents[v * 3] = t.x;
+      tangents[v * 3 + 1] = t.y;
+      tangents[v * 3 + 2] = t.z;
+      params[v * 3] = s === 0 ? -1 : 1;
+      params[v * 3 + 1] = half;
+      params[v * 3 + 2] = cap;
+      colors[v * 4] = cr;
+      colors[v * 4 + 1] = cg;
+      colors[v * 4 + 2] = cb;
+      colors[v * 4 + 3] = ca;
+      v++;
+    }
+  };
+
   for (const g of groups) {
     const cr = Math.round(g.color.red * 255);
     const cg = Math.round(g.color.green * 255);
@@ -240,45 +301,38 @@ export function buildRoadPrimitive(
         Cesium.Cartesian3.fromDegrees(lon, lat, heightAt(lon, lat) + lift, undefined, pt);
         pts.push(Cesium.Cartesian3.clone(pt));
       }
+      const n = pts.length;
+
+      const dirOf = (a: Cesium.Cartesian3, b: Cesium.Cartesian3): Cesium.Cartesian3 => {
+        const t = Cesium.Cartesian3.subtract(b, a, new Cesium.Cartesian3());
+        if (Cesium.Cartesian3.magnitudeSquared(t) === 0) Cesium.Cartesian3.clone(Cesium.Cartesian3.UNIT_X, t);
+        return Cesium.Cartesian3.normalize(t, t);
+      };
 
       const first = v;
-      for (let i = 0; i < pts.length; i++) {
-        // Tangent from the average of the incoming and outgoing directions, so the two segments
-        // meeting at a point agree on where the ribbon edge is and the join doesn't notch.
+      // start cap (extends backward from pts[0])
+      emit(pts[0], dirOf(pts[0], pts[1]), half, -1, cr, cg, cb, ca);
+      // body points, tangent = average of adjacent directions so joins don't notch
+      for (let i = 0; i < n; i++) {
         const prev = pts[Math.max(0, i - 1)];
-        const next = pts[Math.min(pts.length - 1, i + 1)];
-        const t = Cesium.Cartesian3.subtract(next, prev, new Cesium.Cartesian3());
-        if (Cesium.Cartesian3.magnitudeSquared(t) === 0) Cesium.Cartesian3.clone(Cesium.Cartesian3.UNIT_X, t);
-        Cesium.Cartesian3.normalize(t, t);
-
-        for (let s = 0; s < 2; s++) {
-          positions[v * 3] = pts[i].x;
-          positions[v * 3 + 1] = pts[i].y;
-          positions[v * 3 + 2] = pts[i].z;
-          tangents[v * 3] = t.x;
-          tangents[v * 3 + 1] = t.y;
-          tangents[v * 3 + 2] = t.z;
-          params[v * 2] = s === 0 ? -1 : 1;
-          params[v * 2 + 1] = half;
-          colors[v * 4] = cr;
-          colors[v * 4 + 1] = cg;
-          colors[v * 4 + 2] = cb;
-          colors[v * 4 + 3] = ca;
-          v++;
-        }
+        const next = pts[Math.min(n - 1, i + 1)];
+        emit(pts[i], dirOf(prev, next), half, 0, cr, cg, cb, ca);
       }
+      // end cap (extends forward from pts[n-1])
+      emit(pts[n - 1], dirOf(pts[n - 2], pts[n - 1]), half, 1, cr, cg, cb, ca);
 
-      for (let i = 0; i < pts.length - 1; i++) {
-        const a = first + i * 2; // side -1 at point i
-        const b = a + 1; // side +1 at point i
-        const c = a + 2; // side -1 at point i+1
-        const d = a + 3; // side +1 at point i+1
+      // quads across the n+2 ribbon points
+      for (let i = 0; i < n + 1; i++) {
+        const a = first + i * 2;
+        const b = a + 1;
+        const c = a + 2;
+        const dd = a + 3;
         indices[ix++] = a;
         indices[ix++] = c;
         indices[ix++] = b;
         indices[ix++] = b;
         indices[ix++] = c;
-        indices[ix++] = d;
+        indices[ix++] = dd;
       }
     }
   }
@@ -297,7 +351,7 @@ export function buildRoadPrimitive(
       }),
       params: new Cesium.GeometryAttribute({
         componentDatatype: Cesium.ComponentDatatype.FLOAT,
-        componentsPerAttribute: 2,
+        componentsPerAttribute: 3,
         values: params,
       }),
       color: new Cesium.GeometryAttribute({

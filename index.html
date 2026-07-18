@@ -24,25 +24,32 @@
         <h1 class="wordmark">G<b>O</b>RGON</h1>
       </div>
 
-      <div class="g-readout">
-        <div class="row"><span class="k">Cursor Lat</span><span class="v" id="g-lat">—</span></div>
-        <div class="row"><span class="k">Cursor Lon</span><span class="v" id="g-lon">—</span></div>
-        <div class="row"><span class="k">Theater</span><span class="v">200 MI Ø</span></div>
-        <div class="row"><span class="k">Terrain</span><span class="v" id="g-terrain">loading…</span></div>
-        <div class="row"><span class="k">Obelisks</span><span class="v" id="g-obelisks">loading…</span></div>
-        <div class="row"><span class="k">Roads</span><span class="v" id="g-roads">—</span></div>
-        <div class="row"><span class="k">Buildings</span><span class="v" id="g-buildings">—</span></div>
-        <div class="row"><span class="k">Units</span><span class="v" id="g-units">0</span></div>
-        <div class="row"><span class="k">Selected</span><span class="v" id="g-selected">0</span></div>
+      <!-- Cursor readout only in orbit, to aim the theater pick -->
+      <div class="g-cursor" id="g-cursor">
+        <span id="g-lat">—</span><span class="sep">/</span><span id="g-lon">—</span>
       </div>
 
       <button id="g-exit" type="button" hidden>◀ WORLD MAP</button>
+    </div>
 
-      <div class="g-hint" id="g-hint">
-        <span class="mouse"><b>DRAG</b> orbit &nbsp;·&nbsp; <b>WHEEL</b> zoom &nbsp;·&nbsp; <b>CLICK</b> select 200mi theater</span>
-        <span class="touch"><b>DRAG</b> orbit &nbsp;·&nbsp; <b>PINCH</b> zoom &nbsp;·&nbsp; <b>TAP</b> select theater</span>
+    <!-- Single-unit selection panel (theater) -->
+    <div id="unit-panel" hidden>
+      <div class="up-head">
+        <span class="up-dot" id="up-dot"></span>
+        <span class="up-id" id="up-id">—</span>
+        <button class="up-close" id="up-close" type="button" aria-label="Deselect">✕</button>
+      </div>
+      <div class="up-body">
+        <div class="up-row"><span class="k">Type</span><span class="v" id="up-type">—</span></div>
+        <div class="up-row"><span class="k">Status</span><span class="v" id="up-status">—</span></div>
+        <div class="up-row"><span class="k">Position</span><span class="v" id="up-pos">—</span></div>
+        <div class="up-row"><span class="k">Heading</span><span class="v" id="up-hdg">—</span></div>
+        <div class="up-row"><span class="k">Sensor</span><span class="v" id="up-sensor">—</span></div>
       </div>
     </div>
+
+    <!-- Reticle that tracks the selected unit on screen -->
+    <div id="unit-reticle" hidden><i></i><i></i><i></i><i></i></div>
 
     <script type="module" src="/src/cesium/gorgonGlobe.ts"></script>
   </body>

@@ -118,6 +118,29 @@ export async function fetchBuildings(
 
 // --- rendering ---------------------------------------------------------------------------------
 
+// Inlined WGS84 lon/lat/height -> ECEF. `Cesium.Cartesian3.fromDegrees` allocates a Cartographic
+// scratch and re-does the trig each call; at ~940k vertices for a full city core that overhead
+// dominated the build. The surface normal (cosLat·cosLon, cosLat·sinLon, sinLat) is already unit
+// length, so the usual normalize is skipped.
+const WGS84_A2 = 6378137.0 * 6378137.0;
+const WGS84_B2 = 6356752.314245179 * 6356752.314245179;
+const D2R = Math.PI / 180;
+function ecef(lonDeg: number, latDeg: number, h: number, out: Float64Array, o: number): void {
+  const lon = lonDeg * D2R;
+  const lat = latDeg * D2R;
+  const cosLat = Math.cos(lat);
+  const nx = cosLat * Math.cos(lon);
+  const ny = cosLat * Math.sin(lon);
+  const nz = Math.sin(lat);
+  const kx = WGS84_A2 * nx;
+  const ky = WGS84_A2 * ny;
+  const kz = WGS84_B2 * nz;
+  const gamma = Math.sqrt(nx * kx + ny * ky + nz * kz);
+  out[o] = kx / gamma + nx * h;
+  out[o + 1] = ky / gamma + ny * h;
+  out[o + 2] = kz / gamma + nz * h;
+}
+
 /**
  * Flat shading WITHOUT duplicating vertices: the normal is recovered per-fragment from the
  * derivatives of the eye-space position. That lets walls and roof share one bottom ring and one
@@ -162,143 +185,166 @@ void main() {
   out_FragColor = vec4(base * (0.34 + 0.95 * diff), 1.0);
 }`;
 
-export interface BuiltBuildings {
-  primitive: Cesium.Primitive;
-  count: number;
-  triangles: number;
+
+function buildingAppearance(): Cesium.Appearance {
+  return new Cesium.Appearance({
+    vertexShaderSource: BUILDING_VS,
+    fragmentShaderSource: BUILDING_FS,
+    translucent: false,
+    closed: false,
+    renderState: {
+      depthTest: { enabled: true },
+      // Footprint winding isn't guaranteed consistent, and the FS recovers its own normal anyway,
+      // so culling would only ever hide the wrong faces.
+      cull: { enabled: false },
+    },
+  });
 }
 
 /**
- * Extrude every footprint into one merged primitive.
+ * Extrude the footprints into primitives, **one per chunk of buildings**, calling `onChunk` as each
+ * is ready. A full city core is ~80k buildings / ~2.4M triangles: extruding it in one pass froze
+ * the page for ~9 s and, worse, showed NOTHING until the whole thing landed. Emitting a primitive
+ * every few thousand buildings makes the city visibly fill in from the first ~second while the
+ * fly-in keeps rendering. `isStale()` aborts a build the user has navigated away from.
+ *
  * Ground height is sampled ONCE per building (at its first vertex), not per vertex: a footprint is
  * tens of metres across and the terrain mesh is ~300 m per vertex, so per-vertex sampling would
  * only add a skew to something that should sit level.
  */
-export function buildBuildingPrimitive(
+const BUILD_CHUNK = 3000;
+
+export async function buildBuildings(
   set: BuildingSet,
   heightAt: (lon: number, lat: number) => number,
   bounds: Cesium.BoundingSphere,
   sink: number,
-): BuiltBuildings | undefined {
-  if (!set.polys.length) return undefined;
+  isStale: () => boolean,
+  onChunk: (primitive: Cesium.Primitive) => void,
+): Promise<{ count: number; triangles: number }> {
+  const polys = set.polys;
+  const flat: number[] = []; // reused per building
+  const holes: number[] = [];
+  let total = 0;
+  let triangles = 0;
 
-  // upper bound: 2 verts per point; walls 2 tris per point + roof (k-2) tris
-  const maxVerts = set.points * 2;
-  const positions = new Float64Array(maxVerts * 3);
-  const aux = new Float32Array(maxVerts * 2);
-  const idx: number[] = [];
+  for (let start = 0; start < polys.length; start += BUILD_CHUNK) {
+    if (isStale()) break;
+    const end = Math.min(polys.length, start + BUILD_CHUNK);
 
-  const pt = new Cesium.Cartesian3();
-  let v = 0;
-  let count = 0;
+    // size this chunk's buffers to its own point sum (a JS number[] + final Uint32Array conversion
+    // is what made the old single-pass build slow — typed arrays with a running counter avoid it)
+    let pts = 0;
+    for (let i = start; i < end; i++) for (const r of polys[i].rings) pts += r.length;
+    const positions = new Float64Array(pts * 2 * 3);
+    const aux = new Float32Array(pts * 2 * 2);
+    const indices = new Uint32Array(pts * 9);
+    let v = 0;
+    let ix = 0;
 
-  for (const b of set.polys) {
-    const outer = b.rings[0];
-    // toGeoJSON closes rings (last === first); drop the repeat so we don't emit a zero-area wall.
-    const closed = outer.length > 1 && outer[0][0] === outer[outer.length - 1][0] && outer[0][1] === outer[outer.length - 1][1];
-    const rings = b.rings.map((r) => (closed ? r.slice(0, -1) : r));
-    if (rings[0].length < 3) continue;
+    for (let bi = start; bi < end; bi++) {
+      const b = polys[bi];
+      const outer = b.rings[0];
+      // toGeoJSON closes rings (last === first); drop the repeat so we don't emit a zero-area wall.
+      const closed =
+        outer.length > 1 && outer[0][0] === outer[outer.length - 1][0] && outer[0][1] === outer[outer.length - 1][1];
+      const rings = b.rings.map((r) => (closed ? r.slice(0, -1) : r));
+      if (rings[0].length < 3) continue;
 
-    const ground = heightAt(rings[0][0][0], rings[0][0][1]) - sink;
-    const base = ground + b.minHeight;
-    const top = ground + Math.max(b.height, b.minHeight + 1);
-    const wallH = top - base;
+      const ground = heightAt(rings[0][0][0], rings[0][0][1]) - sink;
+      const base = ground + b.minHeight;
+      const top = ground + Math.max(b.height, b.minHeight + 1);
+      const wallH = top - base;
 
-    // --- vertices: bottom ring then top ring, per ring
-    const ringStart: number[] = [];
-    for (const ring of rings) {
-      ringStart.push(v);
-      for (const [lon, lat] of ring) {
-        Cesium.Cartesian3.fromDegrees(lon, lat, base, undefined, pt);
-        positions[v * 3] = pt.x;
-        positions[v * 3 + 1] = pt.y;
-        positions[v * 3 + 2] = pt.z;
-        aux[v * 2] = 0;
-        aux[v * 2 + 1] = wallH;
-        v++;
+      const ringStart: number[] = [];
+      for (const ring of rings) {
+        ringStart.push(v);
+        for (const [lon, lat] of ring) {
+          ecef(lon, lat, base, positions, v * 3);
+          aux[v * 2] = 0;
+          aux[v * 2 + 1] = wallH;
+          v++;
+        }
+        for (const [lon, lat] of ring) {
+          ecef(lon, lat, top, positions, v * 3);
+          aux[v * 2] = wallH;
+          aux[v * 2 + 1] = wallH;
+          v++;
+        }
       }
-      for (const [lon, lat] of ring) {
-        Cesium.Cartesian3.fromDegrees(lon, lat, top, undefined, pt);
-        positions[v * 3] = pt.x;
-        positions[v * 3 + 1] = pt.y;
-        positions[v * 3 + 2] = pt.z;
-        aux[v * 2] = wallH;
-        aux[v * 2 + 1] = wallH;
-        v++;
+
+      for (let r = 0; r < rings.length; r++) {
+        const k = rings[r].length;
+        const bot = ringStart[r];
+        const tp = bot + k;
+        for (let i = 0; i < k; i++) {
+          const j = (i + 1) % k;
+          indices[ix++] = bot + i;
+          indices[ix++] = bot + j;
+          indices[ix++] = tp + i;
+          indices[ix++] = tp + i;
+          indices[ix++] = bot + j;
+          indices[ix++] = tp + j;
+        }
       }
+
+      flat.length = 0;
+      holes.length = 0;
+      for (let r = 0; r < rings.length; r++) {
+        if (r > 0) holes.push(flat.length / 2);
+        for (const [lon, lat] of rings[r]) flat.push(lon, lat);
+      }
+      const tris = earcut(flat, holes, 2);
+      const topOf = (n: number) => {
+        let r = 0;
+        let acc = 0;
+        while (r + 1 < rings.length && n >= acc + rings[r].length) {
+          acc += rings[r].length;
+          r++;
+        }
+        return ringStart[r] + rings[r].length + (n - acc);
+      };
+      for (let i = 0; i < tris.length; i += 3) {
+        indices[ix++] = topOf(tris[i]);
+        indices[ix++] = topOf(tris[i + 1]);
+        indices[ix++] = topOf(tris[i + 2]);
+      }
+      total++;
     }
 
-    // --- walls: a quad per edge of every ring (outer and holes both need walls)
-    for (let r = 0; r < rings.length; r++) {
-      const k = rings[r].length;
-      const bot = ringStart[r];
-      const tp = bot + k;
-      for (let i = 0; i < k; i++) {
-        const j = (i + 1) % k;
-        idx.push(bot + i, bot + j, tp + i, tp + i, bot + j, tp + j);
+    if (ix) {
+      const geometry = new Cesium.Geometry({
+        attributes: {
+          position: new Cesium.GeometryAttribute({
+            componentDatatype: Cesium.ComponentDatatype.DOUBLE,
+            componentsPerAttribute: 3,
+            values: positions.subarray(0, v * 3),
+          }),
+          aux: new Cesium.GeometryAttribute({
+            componentDatatype: Cesium.ComponentDatatype.FLOAT,
+            componentsPerAttribute: 2,
+            values: aux.subarray(0, v * 2),
+          }),
+        } as unknown as Cesium.GeometryAttributes,
+        indices: indices.subarray(0, ix),
+        primitiveType: Cesium.PrimitiveType.TRIANGLES,
+        boundingSphere: bounds,
+      });
+      triangles += ix / 3;
+      const primitive = new Cesium.Primitive({
+        geometryInstances: new Cesium.GeometryInstance({ geometry }),
+        appearance: buildingAppearance(),
+        asynchronous: false,
+      });
+      if (isStale()) {
+        primitive.destroy();
+        break;
       }
+      onChunk(primitive);
     }
 
-    // --- roof: earcut the outer ring with its holes, indexing the TOP ring vertices
-    const flat: number[] = [];
-    const holes: number[] = [];
-    for (let r = 0; r < rings.length; r++) {
-      if (r > 0) holes.push(flat.length / 2);
-      for (const [lon, lat] of rings[r]) flat.push(lon, lat);
-    }
-    const tris = earcut(flat, holes, 2);
-    // earcut indexes the concatenated rings; map that back to each ring's TOP vertices.
-    const topOf = (n: number) => {
-      let r = 0;
-      let acc = 0;
-      while (r + 1 < rings.length && n >= acc + rings[r].length) {
-        acc += rings[r].length;
-        r++;
-      }
-      return ringStart[r] + rings[r].length + (n - acc);
-    };
-    for (let i = 0; i < tris.length; i += 3) {
-      idx.push(topOf(tris[i]), topOf(tris[i + 1]), topOf(tris[i + 2]));
-    }
-    count++;
+    await new Promise((r) => setTimeout(r)); // let the chunk render before the next one
   }
 
-  if (!idx.length) return undefined;
-
-  const geometry = new Cesium.Geometry({
-    attributes: {
-      position: new Cesium.GeometryAttribute({
-        componentDatatype: Cesium.ComponentDatatype.DOUBLE,
-        componentsPerAttribute: 3,
-        values: positions.subarray(0, v * 3),
-      }),
-      aux: new Cesium.GeometryAttribute({
-        componentDatatype: Cesium.ComponentDatatype.FLOAT,
-        componentsPerAttribute: 2,
-        values: aux.subarray(0, v * 2),
-      }),
-    } as unknown as Cesium.GeometryAttributes,
-    indices: new Uint32Array(idx),
-    primitiveType: Cesium.PrimitiveType.TRIANGLES,
-    boundingSphere: bounds,
-  });
-
-  const primitive = new Cesium.Primitive({
-    geometryInstances: new Cesium.GeometryInstance({ geometry }),
-    appearance: new Cesium.Appearance({
-      vertexShaderSource: BUILDING_VS,
-      fragmentShaderSource: BUILDING_FS,
-      translucent: false,
-      closed: false,
-      renderState: {
-        depthTest: { enabled: true },
-        // Footprint winding isn't guaranteed consistent, and the FS recovers its own normal
-        // anyway, so culling would only ever hide the wrong faces.
-        cull: { enabled: false },
-      },
-    }),
-    asynchronous: false,
-  });
-
-  return { primitive, count, triangles: idx.length / 3 };
+  return { count: total, triangles };
 }

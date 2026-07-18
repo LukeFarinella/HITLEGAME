@@ -284,6 +284,9 @@ export interface ObeliskPyramids {
   /** Additive apex flares — what carries the field at altitude. */
   flare: Cesium.Primitive;
   count: number;
+  /** In-theater obelisk sites: lon/lat pairs and matching apex ECEF (x,y,z) — for the sensor field. */
+  lonLat: Float64Array;
+  apex: Float64Array;
 }
 
 /**
@@ -324,6 +327,7 @@ export function buildObeliskPyramids(
   const eyes = new Float32Array(n * 12);
   const indices = new Uint32Array(n * 12);
   const apexes = new Float64Array(n * 3);
+  const lonLat = new Float64Array(n * 2);
 
   const r = OBELISK_BASE_M / Math.SQRT2; // half-diagonal of the square base
   const origin = new Cesium.Cartesian3();
@@ -345,6 +349,8 @@ export function buildObeliskPyramids(
     apexes[o * 3] = world.x;
     apexes[o * 3 + 1] = world.y;
     apexes[o * 3 + 2] = world.z;
+    lonLat[o * 2] = lon;
+    lonLat[o * 2 + 1] = lat;
     o++;
 
     const h = (field.heading[i] * Math.PI) / 180;
@@ -432,5 +438,5 @@ export function buildObeliskPyramids(
     u_intensity: flareIntensity,
   });
 
-  return { primitive, flare, count: n };
+  return { primitive, flare, count: n, lonLat, apex: apexes };
 }

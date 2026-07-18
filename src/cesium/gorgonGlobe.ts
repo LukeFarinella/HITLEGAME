@@ -5,8 +5,11 @@ import { mesh, feature } from 'topojson-client';
 import countries50m from 'world-atlas/countries-50m.json';
 import { buildTheaterMap, RIM_FADE_START, type TheaterMap } from './theaterMap';
 import { loadObelisks, createHeatField, buildObeliskPyramids, type ObeliskField } from './obelisks';
-import { fetchRoads, buildRoadPrimitive, type RoadClass, type RoadGroup } from './roads';
-import { fetchBuildings, buildBuildingPrimitive } from './buildings';
+import { fetchRoads, buildRoadPrimitive, type RoadClass, type RoadGroup, type RoadNet } from './roads';
+import { buildBuildings } from './buildings';
+import { generateBuildings } from './procBuildings';
+import { UnitField, KIND_LABEL, KIND_SPEED } from './units';
+import { SensorField } from './sensors';
 
 const RED = Cesium.Color.fromCssColorString('#E23A2E');
 const STEEL = Cesium.Color.fromCssColorString('#8A9AA8');
@@ -24,10 +27,15 @@ if (token) Cesium.Ion.defaultAccessToken = token;
 /**
  * Phones get lighter terrain + a smaller render target so there's headroom for units.
  * Force either path with `?mobile=1` / `?mobile=0` (handy for testing the phone build on desktop).
+ *
+ * Detection is SCREEN-SIZE only. A `(pointer: coarse)` check used to be OR'd in, but touchscreen
+ * laptops (and this preview pane) report coarse while being full desktops — so they silently got
+ * the degraded phone build (sparse buildings, coarse roads). Size is the reliable "actual phone"
+ * signal; the smaller dimension catches portrait and landscape.
  */
 const forcedMobile = new URLSearchParams(window.location.search).get('mobile');
 const IS_MOBILE =
-  forcedMobile !== null ? forcedMobile === '1' : window.matchMedia('(pointer: coarse)').matches || window.innerWidth < 900;
+  forcedMobile !== null ? forcedMobile === '1' : Math.min(window.innerWidth, window.innerHeight) < 640;
 
 const viewer = new Cesium.Viewer('cesiumContainer', {
   baseLayer: false,
@@ -382,22 +390,72 @@ function removeRoads() {
 }
 
 // ---- buildings ----
-// A core around the theater centre, NOT the whole theater: render_height only exists at z14, and a
-// 200-mi box at z14 is ~27,900 tiles. See buildings.ts. The height/area filter is what makes this
-// affordable — OSM counts every shed, and dropping them cuts a city core by ~85%.
-const BUILDING_RADIUS_M = IS_MOBILE ? 3000 : 6000;
-const BUILDING_MIN_HEIGHT_M = 10; // ~3 storeys
-const BUILDING_MIN_AREA_M2 = 150;
+// Buildings are generated procedurally from road density (procBuildings.ts), not fetched. Generate
+// out to the metro scale — density self-limits the countryside — and cap the total for framerate.
+const BUILDING_GEN_RADIUS_M = IS_MOBILE ? 14_000 : 26_000;
+const BUILDING_MAX = IS_MOBILE ? 35_000 : 120_000;
+const BUILDING_MAX_HEIGHT_M = 230;
 const BUILDING_SINK_M = 2;
 
-let buildingPrimitive: Cesium.Primitive | undefined;
+// Buildings arrive as a stream of chunk primitives, so the city fills in progressively.
+let buildingPrimitives: Cesium.Primitive[] = [];
 
 function removeBuildings() {
-  if (buildingPrimitive) {
-    scene.primitives.remove(buildingPrimitive);
-    buildingPrimitive = undefined;
+  for (const p of buildingPrimitives) scene.primitives.remove(p);
+  buildingPrimitives = [];
+}
+
+// ---- live units ----
+// Land vehicles route on the real road graph, ships wander water, aircraft fly, foot units mill.
+// Each kind is one GPU-instanced batch (one draw call) stepped every frame; states show as colour.
+const UNIT_COUNTS = IS_MOBILE
+  ? { land: 1400, sea: 60, air: 50, foot: 1400 }
+  : { land: 4200, sea: 150, air: 120, foot: 3200 };
+
+let unitField: UnitField | undefined;
+
+function addUnits(center: { lon: number; lat: number }, map: TheaterMap, net: RoadNet | undefined) {
+  removeUnits();
+  const field = new UnitField(center, THEATER_RADIUS_M, map.heightAt, net, UNIT_COUNTS);
+  for (const k of ['land', 'sea', 'air', 'foot'] as const) scene.primitives.add(field.batches[k]);
+  unitField = field;
+  updateUnitHud();
+}
+
+function removeUnits() {
+  if (unitField) {
+    for (const k of ['land', 'sea', 'air', 'foot'] as const) scene.primitives.remove(unitField.batches[k]);
+    unitField = undefined;
   }
 }
+
+function updateUnitHud() {
+  if (!unitField) {
+    setText('g-units', '0');
+    return;
+  }
+  const s = unitField.stateCounts();
+  setText('g-units', `${unitField.count} · ${s.normal}N ${s.protected}P ${s.infected}I`);
+}
+
+// Step the sim every frame. preUpdate fires before the scene renders, so positions written here
+// are what gets drawn this frame. Real wall-clock dt (the Cesium clock is frozen for the studio
+// light), clamped inside tick() so a backgrounded tab doesn't teleport everyone.
+let lastTickMs = performance.now();
+scene.preUpdate.addEventListener(() => {
+  const now = performance.now();
+  const dt = (now - lastTickMs) / 1000;
+  lastTickMs = now;
+  if (unitField) {
+    unitField.tick(dt);
+    if (sensorField) {
+      const inf = unitField.infectedPositions();
+      sensorField.updateThreat(inf.buf, inf.count); // lights up obelisks that see an infected
+    }
+    unitField.render(sensorField); // out-of-range units drawn faint
+    updateUnitPanel(); // keep the selection panel + reticle tracking the live unit
+  }
+});
 
 // ---- obelisks ----
 // One dataset, two renderings: additive orange splats in orbit (they sum into a heatmap where
@@ -437,6 +495,11 @@ void loadObelisks()
     setText('g-obelisks', 'ERR');
   });
 
+// Each obelisk watches a disc of this radius. Dense in cities, so metro units read as "seen" and
+// units out in the country render faint. Tunable.
+const SENSOR_RANGE_M = 750;
+let sensorField: SensorField | undefined;
+
 function addObeliskPyramids(lon: number, lat: number, map: TheaterMap) {
   if (!obelisks) return;
   removeObeliskPyramids();
@@ -456,6 +519,11 @@ function addObeliskPyramids(lon: number, lat: number, map: TheaterMap) {
   obeliskPyramids = scene.primitives.add(built.primitive);
   obeliskFlare = scene.primitives.add(built.flare);
   setText('g-obelisks', `${built.count} IN THEATER`);
+
+  // Sensor network: range rings + coverage/threat grids driving unit opacity and the red alert glow.
+  sensorField = new SensorField(built.lonLat, built.apex, SENSOR_RANGE_M, map.bbox, map.heightAt);
+  if (sensorField.rings) scene.primitives.add(sensorField.rings);
+  scene.primitives.add(sensorField.glow);
 }
 
 function removeObeliskPyramids() {
@@ -466,6 +534,11 @@ function removeObeliskPyramids() {
   if (obeliskFlare) {
     scene.primitives.remove(obeliskFlare);
     obeliskFlare = undefined;
+  }
+  if (sensorField) {
+    if (sensorField.rings) scene.primitives.remove(sensorField.rings);
+    scene.primitives.remove(sensorField.glow); // remove() destroys the collection
+    sensorField = undefined;
   }
 }
 
@@ -608,71 +681,70 @@ function spawnUnits(n: number): number {
   return n;
 }
 function clearUnits() {
-  clearSelection();
   units.removeAll();
   setText('g-units', '0');
 }
 
-// ---- marquee select (theater, LMB) ----
-const SELECT_COLOR = Cesium.Color.fromCssColorString('#FFFFFF');
-const marqueeEl = document.createElement('div');
-marqueeEl.id = 'marquee';
-document.body.appendChild(marqueeEl);
+// ---- single-unit selection (theater, LMB click) ----
+// Click a unit to select it; a panel + a tracking reticle show its live status. The instanced
+// units aren't in Cesium's pick pipeline (custom DrawCommand), so UnitField.pick projects each
+// unit's cached world position to the screen and takes the nearest within a pixel radius.
+const SELECT_PX = 26;
+const panelEl = el('unit-panel');
+const reticleEl = el('unit-reticle');
+const reticleWin = new Cesium.Cartesian2();
 
-// Cesium renamed this helper across versions — support both.
-const sceneTransforms = Cesium.SceneTransforms as unknown as {
-  worldToWindowCoordinates?: (s: Cesium.Scene, p: Cesium.Cartesian3, r?: Cesium.Cartesian2) => Cesium.Cartesian2 | undefined;
-  wgs84ToWindowCoordinates?: (s: Cesium.Scene, p: Cesium.Cartesian3, r?: Cesium.Cartesian2) => Cesium.Cartesian2 | undefined;
-};
-const toWindow = (p: Cesium.Cartesian3, r: Cesium.Cartesian2) =>
-  (sceneTransforms.worldToWindowCoordinates ?? sceneTransforms.wgs84ToWindowCoordinates)?.(scene, p, r);
+const STATE_LABEL: Record<string, string> = { normal: 'NORMAL', protected: 'PROTECTED', infected: 'INFECTED' };
+const STATE_HEX: Record<string, string> = { normal: '#EDEFF2', protected: '#F2C13B', infected: '#E23A2E' };
+const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
 
-let marqueeStart: Cesium.Cartesian2 | null = null;
-let selected: { p: Cesium.PointPrimitive; color: Cesium.Color; size: number }[] = [];
-
-function clearSelection() {
-  for (const s of selected) {
-    s.p.color = s.color;
-    s.p.pixelSize = s.size;
-  }
-  selected = [];
-  setText('g-selected', '0');
+function hideUnitPanel() {
+  if (panelEl) (panelEl as HTMLElement).hidden = true;
+  if (reticleEl) (reticleEl as HTMLElement).hidden = true;
 }
 
-function drawMarquee(a: Cesium.Cartesian2, b: Cesium.Cartesian2) {
-  marqueeEl.style.display = 'block';
-  marqueeEl.style.left = `${Math.min(a.x, b.x)}px`;
-  marqueeEl.style.top = `${Math.min(a.y, b.y)}px`;
-  marqueeEl.style.width = `${Math.abs(a.x - b.x)}px`;
-  marqueeEl.style.height = `${Math.abs(a.y - b.y)}px`;
-}
+/** Refresh the panel text + reticle position from the current selection. Called each frame. */
+function updateUnitPanel() {
+  if (!unitField) return hideUnitPanel();
+  const sel = unitField.selected();
+  if (!sel) return hideUnitPanel();
 
-function endMarquee(end: Cesium.Cartesian2) {
-  marqueeEl.style.display = 'none';
-  const a = marqueeStart;
-  marqueeStart = null;
-  if (!a) return;
-
-  const x0 = Math.min(a.x, end.x);
-  const x1 = Math.max(a.x, end.x);
-  const y0 = Math.min(a.y, end.y);
-  const y1 = Math.max(a.y, end.y);
-
-  clearSelection();
-  if (x1 - x0 < 4 && y1 - y0 < 4) return; // a click, not a drag — just deselects
-
-  const win = new Cesium.Cartesian2();
-  for (let i = 0; i < units.length; i++) {
-    const p = units.get(i);
-    const w = toWindow(p.position, win);
-    if (!w) continue;
-    if (w.x >= x0 && w.x <= x1 && w.y >= y0 && w.y <= y1) {
-      selected.push({ p, color: Cesium.Color.clone(p.color), size: p.pixelSize });
-      p.color = SELECT_COLOR;
-      p.pixelSize = p.pixelSize + 3;
+  if (panelEl) {
+    (panelEl as HTMLElement).hidden = false;
+    setText('up-id', sel.id);
+    setText('up-type', KIND_LABEL[sel.kind]);
+    const stEl = el('up-status');
+    if (stEl) {
+      stEl.textContent = STATE_LABEL[sel.state];
+      stEl.className = `v state-${sel.state}`;
+    }
+    const dot = el('up-dot');
+    if (dot) (dot as HTMLElement).style.color = STATE_HEX[sel.state];
+    setText(
+      'up-pos',
+      `${Math.abs(sel.lat).toFixed(3)}°${sel.lat >= 0 ? 'N' : 'S'} ${Math.abs(sel.lon).toFixed(3)}°${sel.lon >= 0 ? 'E' : 'W'}`,
+    );
+    let deg = (Cesium.Math.toDegrees(sel.heading) + 360) % 360;
+    const dir = COMPASS[Math.round(deg / 45) % 8];
+    setText('up-hdg', `${Math.round(deg)}° ${dir} · ${KIND_SPEED[sel.kind]} M/S`);
+    const seen = !sensorField || sensorField.isCovered(sel.lon, sel.lat);
+    const senEl = el('up-sensor');
+    if (senEl) {
+      senEl.textContent = seen ? 'TRACKED' : 'OUT OF RANGE';
+      senEl.className = `v ${seen ? 'sensor-tracked' : 'sensor-dark'}`;
     }
   }
-  setText('g-selected', String(selected.length));
+
+  if (reticleEl) {
+    const w = unitField.selectedScreen(scene, reticleWin);
+    if (w) {
+      (reticleEl as HTMLElement).hidden = false;
+      (reticleEl as HTMLElement).style.left = `${w.x}px`;
+      (reticleEl as HTMLElement).style.top = `${w.y}px`;
+    } else {
+      (reticleEl as HTMLElement).hidden = true;
+    }
+  }
 }
 
 // ---- camera controls: globe orbit vs C2 theater ----
@@ -754,15 +826,7 @@ function updateChrome() {
   if (title) title.style.display = mode === 'globe' ? '' : 'none';
   const exit = el('g-exit');
   if (exit) (exit as HTMLButtonElement).hidden = mode !== 'theater';
-  const hint = el('g-hint');
-  if (hint) {
-    hint.innerHTML =
-      mode === 'globe'
-        ? `<span class="mouse"><b>DRAG</b> orbit · <b>WHEEL</b> zoom · <b>CLICK</b> select 200mi theater</span>` +
-          `<span class="touch"><b>DRAG</b> orbit · <b>PINCH</b> zoom · <b>TAP</b> select theater</span>`
-        : `<span class="mouse"><b>LMB</b> marquee · <b>MMB-DRAG</b> pan · <b>RMB-DRAG</b> rotate/tilt · <b>WHEEL</b> zoom · <b>U</b> units · <b>ESC</b> orbit</span>` +
-          `<span class="touch"><b>DRAG</b> pan · <b>PINCH</b> zoom · <b>ESC</b> orbit</span>`;
-  }
+  el('globe-ui')?.classList.toggle('in-theater', mode === 'theater');
 }
 
 let theaterMap: TheaterMap | undefined;
@@ -793,9 +857,12 @@ function enterTheater(carto: Cesium.Cartographic) {
   // Apply immediately, NOT on flyTo completion: a flight that's interrupted (user grabs the
   // camera mid-flight) would otherwise never hand over the C2 scheme.
   applyC2Controls();
-  camera.flyTo({
-    destination: Cesium.Cartesian3.fromDegrees(lon, lat - 0.8, 95_000),
-    orientation: { heading: 0, pitch: Cesium.Math.toRadians(-52), roll: 0 },
+  // Arrive framed on the city, not at theater-overview height: buildings are real-scale, so at the
+  // old 95 km they were sub-pixel and you saw a road network with no buildings. flyToBoundingSphere
+  // aims the camera AT the centre (robust to terrain height) at an oblique range that reads as a
+  // skyline — the shot a portfolio piece wants. Zoom out for the theater overview.
+  camera.flyToBoundingSphere(new Cesium.BoundingSphere(Cesium.Cartesian3.fromDegrees(lon, lat, 0), 3500), {
+    offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-38), 7500),
     duration: 3.0,
   });
   void buildTheater(lon, lat, ++theaterToken);
@@ -814,15 +881,6 @@ async function buildTheater(lon: number, lat: number, tok: number) {
     // series. A road failure must not cost the theater, hence the catch.
     const roadsPromise = fetchRoads(bbox, ROAD_ZOOM).catch((e) => {
       console.warn('[GORGON] roads failed to load:', e);
-      return undefined;
-    });
-    const buildingsPromise = fetchBuildings(
-      { lon, lat },
-      BUILDING_RADIUS_M,
-      BUILDING_MIN_HEIGHT_M,
-      BUILDING_MIN_AREA_M2,
-    ).catch((e) => {
-      console.warn('[GORGON] buildings failed to load:', e);
       return undefined;
     });
     const map = await buildTheaterMap({ lon, lat }, THEATER_RADIUS_M, land, {
@@ -884,28 +942,33 @@ async function buildTheater(lon: number, lat: number, tok: number) {
       setText('g-roads', 'UNAVAILABLE');
     }
 
-    const bset = await buildingsPromise;
-    if (tok !== theaterToken) return;
-    if (bset) {
-      const bbounds = new Cesium.BoundingSphere(
-        Cesium.Cartesian3.fromDegrees(lon, lat, 0),
-        BUILDING_RADIUS_M * 1.6 + 1000,
-      );
-      const built = buildBuildingPrimitive(bset, map.heightAt, bbounds, BUILDING_SINK_M);
-      if (built) {
-        buildingPrimitive = scene.primitives.add(built.primitive);
-        setText('g-buildings', `${built.count} · ${(built.triangles / 1000).toFixed(0)}k TRI · ${bset.tiles} TILES`);
-      } else {
-        setText('g-buildings', '0 IN CORE');
-      }
-    } else {
-      setText('g-buildings', 'UNAVAILABLE');
-    }
+    // Units need the baked terrain (to ride on) and the road graph (to route on) — both ready now.
+    // Spawn them before the building extrude so they're live immediately; buildings fill in after.
+    addUnits({ lon, lat }, map, net);
 
     setText(
       'g-terrain',
       `STATIC z${map.zoom} · ${map.tiles} TILES · ${(map.triangles / 1000).toFixed(0)}k TRI`,
     );
+
+    // Buildings are generated PROCEDURALLY from the road density (see procBuildings.ts), not fetched
+    // — real footprints were too sparse. Dense where roads converge, clear of the roadway, towers
+    // downtown. The extrude then streams in as chunk primitives so the skyline fills in as you arrive.
+    if (net) {
+      const bset = generateBuildings(net, { lon, lat }, map.heightAt, {
+        radiusM: BUILDING_GEN_RADIUS_M,
+        maxBuildings: BUILDING_MAX,
+        maxHeight: BUILDING_MAX_HEIGHT_M,
+      });
+      const bbounds = new Cesium.BoundingSphere(
+        Cesium.Cartesian3.fromDegrees(lon, lat, 0),
+        BUILDING_GEN_RADIUS_M * 1.4 + 1000,
+      );
+      await buildBuildings(bset, map.heightAt, bbounds, BUILDING_SINK_M, () => tok !== theaterToken, (prim) => {
+        if (tok === theaterToken) buildingPrimitives.push(scene.primitives.add(prim));
+        else prim.destroy();
+      });
+    }
   } catch (e) {
     console.warn('[GORGON] theater map build failed:', e);
     setText('g-terrain', 'MAP BUILD FAILED');
@@ -932,6 +995,8 @@ function exitTheater() {
   removeObeliskPyramids();
   removeRoads();
   removeBuildings();
+  removeUnits();
+  hideUnitPanel();
   borderLines.show = true;
   grat.show = true;
   if (heatField) heatField.show = true;
@@ -959,13 +1024,11 @@ const fmt = (rad: number, pos: string, neg: string) => {
 };
 
 handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.MotionEvent) => {
-  if (marqueeStart) drawMarquee(marqueeStart, m.endPosition);
+  if (mode !== 'globe') return; // cursor readout is orbit-only
   const carto = pickLonLat(m.endPosition);
   if (carto) {
-    if (mode === 'globe') {
-      cursor.position = new Cesium.ConstantPositionProperty(Cesium.Cartesian3.fromRadians(carto.longitude, carto.latitude));
-      cursor.show = true;
-    }
+    cursor.position = new Cesium.ConstantPositionProperty(Cesium.Cartesian3.fromRadians(carto.longitude, carto.latitude));
+    cursor.show = true;
     if (latEl) latEl.textContent = fmt(carto.latitude, 'N', 'S');
     if (lonEl) lonEl.textContent = fmt(carto.longitude, 'E', 'W');
   } else {
@@ -975,31 +1038,33 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.MotionEvent) => {
   }
 }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
 
+// LMB click: pick a theater in orbit, pick a single unit in a theater.
 handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
-  if (mode !== 'globe') return; // in theater, LMB drives marquee select (below)
-  const carto = pickLonLat(m.position);
-  if (carto) enterTheater(carto);
+  if (mode === 'globe') {
+    const carto = pickLonLat(m.position);
+    if (carto) enterTheater(carto);
+    return;
+  }
+  if (unitField && unitField.pick(scene, m.position.x, m.position.y, SELECT_PX)) {
+    updateUnitPanel();
+  } else {
+    unitField?.deselect();
+    hideUnitPanel();
+  }
 }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
-// LMB marquee — desktop only (touch has no spare button; one finger pans).
-handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
-  if (mode !== 'theater' || IS_MOBILE) return;
-  marqueeStart = Cesium.Cartesian2.clone(m.position);
-}, Cesium.ScreenSpaceEventType.LEFT_DOWN);
-
-handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
-  if (marqueeStart) endMarquee(m.position);
-}, Cesium.ScreenSpaceEventType.LEFT_UP);
-
 el('g-exit')?.addEventListener('click', exitTheater);
+el('up-close')?.addEventListener('click', () => {
+  unitField?.deselect();
+  hideUnitPanel();
+});
 
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') exitTheater();
-  // U cycles a unit stress test so we can watch FPS with a realistic load.
-  if ((e.key === 'u' || e.key === 'U') && mode === 'theater') {
-    const next = units.length === 0 ? 500 : units.length < 2000 ? 2000 : units.length < 5000 ? 5000 : 0;
-    if (next === 0) clearUnits();
-    else spawnUnits(next);
+  // I cycles the infection: spread it to more units so the red state is easy to watch, then reset.
+  if ((e.key === 'i' || e.key === 'I') && mode === 'theater' && unitField) {
+    unitField.cycleInfection();
+    updateUnitHud();
   }
 });
 
@@ -1024,6 +1089,9 @@ if (import.meta.env.DEV) {
     exitTheater,
     spawnUnits,
     clearUnits,
+    get unitField() {
+      return unitField;
+    },
     get obelisks() {
       return obelisks;
     },
