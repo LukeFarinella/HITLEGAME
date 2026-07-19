@@ -148,6 +148,16 @@ export class SiegeDirector {
     }
   }
 
+  /**
+   * An interceptor took the attacker. The unit field has already removed it; this just resets the
+   * director so it doesn't report the kill a second time through the "killed by something else"
+   * path, and schedules the next attack.
+   */
+  noteAttackerStruck(): void {
+    this.launched = false;
+    this.timer = this.interval();
+  }
+
   /** Live attacker readout for the HUD. Null when nothing is inbound. */
   inbound() {
     return this.units.attacker();

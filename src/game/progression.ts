@@ -471,9 +471,23 @@ export class Progression {
 
   /** Install gear into the platform's first free hardpoint. */
   fitGear(gear: GearDef, id: PlatformId): boolean {
-    if (this.gearBlocker(gear, id)) return false;
-    const loadout = this.loadouts.get(id)!;
-    loadout[loadout.indexOf(null)] = gear.id;
+    const loadout = this.loadouts.get(id);
+    if (!loadout) return false;
+    const free = loadout.indexOf(null);
+    return free < 0 ? false : this.fitGearAt(gear, id, free);
+  }
+
+  /**
+   * Install gear into a SPECIFIC hardpoint — what the slot menu calls, since the player picks the
+   * mount. The "no free hardpoint" blocker doesn't apply when the slot is named and empty.
+   */
+  fitGearAt(gear: GearDef, id: PlatformId, slot: number): boolean {
+    const loadout = this.loadouts.get(id);
+    if (!loadout || slot < 0 || slot >= loadout.length) return false;
+    if (loadout[slot] !== null) return false;
+    const blocker = this.gearBlocker(gear, id);
+    if (blocker && blocker !== 'NO FREE HARDPOINT') return false;
+    loadout[slot] = gear.id;
     this._officers -= gear.cost;
     this.changed();
     return true;

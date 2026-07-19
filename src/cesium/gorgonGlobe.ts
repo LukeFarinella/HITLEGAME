@@ -17,6 +17,7 @@ import {
   SIEGE,
   INFECTED_FLEE,
   CONTAGION,
+  INTERCEPT,
 } from './units';
 import { UNIT_KINDS, type UnitKind } from './unitModels';
 import { SensorField } from './sensors';
@@ -27,13 +28,17 @@ import { missions, MISSIONS } from '../game/missions';
 import { tolerance, caseStrength, toleranceLabel } from '../game/tolerance';
 import { resistance } from '../game/resistance';
 import { assessBand, BAND_LABEL, readRecord, type Record_ } from '../game/intel';
+import { portraitFor } from '../game/portraits';
 import { Store } from '../ui/store';
 import { icon } from '../ui/icons';
 import { sound, bindInterfaceSounds } from '../ui/sound';
 import { MissionPanel } from '../ui/missions';
 import { showStartWindow } from '../ui/start';
 import { LaserBeams } from './lasers';
+import { ScanBeams, Blasts, Sparks } from './effects';
 import { Reactions } from './reactions';
+import { RouteLayer } from './routes';
+import { AttackPulse } from './pulse';
 import { SiegeDirector, type SiegeEvent } from './siege';
 
 const RED = Cesium.Color.fromCssColorString('#E23A2E');
@@ -498,6 +503,43 @@ let lasers: LaserBeams | undefined;
 let siege: SiegeDirector | undefined;
 /** The crowd reacting to what the operator does. Lives and dies with the theater. */
 let reactions: Reactions | undefined;
+/** The selected platform's commanded route, drawn on the ground. */
+let routes: RouteLayer | undefined;
+/** The distress ring over a site under attack. Screen-space, so it reads at any zoom. */
+let pulse: AttackPulse | undefined;
+/** Sensor links from whatever is watching to whoever is under investigation. */
+let scans: ScanBeams | undefined;
+/** Area-weapon detonations, drawn at their true lethal radius. */
+let blasts: Blasts | undefined;
+/** Cutting sparks where an attacker is working on a site. */
+let sparks: Sparks | undefined;
+
+/** Park the pulse on whichever site the siege is currently working on, or stand it down. */
+function updateAttackPulse() {
+  if (!pulse) return;
+  const a = siege?.inbound();
+  const apex = a && sensorField ? sensorField.apexAt(a.local) : undefined;
+  if (apex) pulse.at(Cesium.Cartesian3.clone(apex));
+  else pulse.clear();
+}
+
+/** Redraw the route for whatever platform is selected, or clear it when none is. */
+function updateRouteLayer() {
+  if (!routes) return;
+  if (!unitField || !theaterMap || mode !== 'theater') return routes.clear();
+  const sel = unitField.selectedPlatform();
+  if (!sel) return routes.clear();
+  const st = unitField.platformStatus(sel.index);
+  const legs = unitField.routeOf(sel.index);
+  if (!st || !legs.length) return routes.clear();
+  routes.draw(
+    { lon: st.lon, lat: st.lat },
+    legs,
+    unitField.routeActionOf(sel.index),
+    unitField.routeLoops(sel.index),
+    theaterMap.heightAt,
+  );
+}
 
 /**
  * Play a reaction over the people standing where something happened.
@@ -663,6 +705,18 @@ function addUnits(center: { lon: number; lat: number }, map: TheaterMap, net: Ro
   scene.primitives.add(lasers.collection);
   reactions = new Reactions();
   scene.primitives.add(reactions.collection);
+  routes = new RouteLayer();
+  scene.primitives.add(routes.lines);
+  scene.primitives.add(routes.markers);
+  pulse = new AttackPulse();
+  scene.primitives.add(pulse.collection);
+  scans = new ScanBeams();
+  scene.primitives.add(scans.collection);
+  blasts = new Blasts();
+  scene.primitives.add(blasts.rings);
+  scene.primitives.add(blasts.cores);
+  sparks = new Sparks();
+  scene.primitives.add(sparks.collection);
   startSiege(field);
   updateUnitHud();
 }
@@ -733,6 +787,28 @@ function removeUnits() {
     scene.primitives.remove(reactions.collection);
     reactions = undefined;
   }
+  if (routes) {
+    scene.primitives.remove(routes.lines);
+    scene.primitives.remove(routes.markers);
+    routes = undefined;
+  }
+  if (pulse) {
+    scene.primitives.remove(pulse.collection);
+    pulse = undefined;
+  }
+  if (scans) {
+    scene.primitives.remove(scans.collection);
+    scans = undefined;
+  }
+  if (blasts) {
+    scene.primitives.remove(blasts.rings);
+    scene.primitives.remove(blasts.cores);
+    blasts = undefined;
+  }
+  if (sparks) {
+    scene.primitives.remove(sparks.collection);
+    sparks = undefined;
+  }
   stopSiege();
 }
 
@@ -769,6 +845,9 @@ scene.preUpdate.addEventListener(() => {
       reactAt(c.lon, c.lat, c.valid ? 'approve' : 'dismay');
     }
     resolveExecutions();
+    resolveArrivals(dt);
+    updateScanBeams(dt);
+    updateSiegeSparks(dt);
     runAutoMarking(dt);
     runDelivery(dt);
     runAssetGoodwill(dt);
@@ -776,11 +855,63 @@ scene.preUpdate.addEventListener(() => {
     updateSiegeHud();
     rebuildRoster();
     refreshRoster();
+    updateRouteLayer();
     updateUnitPanel(); // keep the selection panel + reticle tracking the live unit
   }
   lasers?.update(dt);
   reactions?.update(dt);
+  updateAttackPulse();
+  pulse?.update(dt);
+  blasts?.update(dt);
+  sparks?.update(dt);
 });
+
+/**
+ * Draw a sensor link to everyone currently under investigation.
+ *
+ * Rebuilt every frame rather than cached, because both ends move: the contact is walking and the
+ * platform watching it may be flying a patrol. A link that lagged its endpoints would be worse than
+ * no link at all — it would point at where the drone used to be.
+ */
+function updateScanBeams(dt: number) {
+  if (!scans) return;
+  scans.begin();
+  if (unitField && mode === 'theater') {
+    // Coverage, not armament: everything that can see contributes, armed or not.
+    for (const b of unitField.scanBeams(
+      sensorField ? (lon, lat) => sensorField?.servicingApex(lon, lat) : undefined,
+      progression.ownedPlatforms(),
+    )) {
+      scans.add(b.from, b.to);
+    }
+  }
+  scans.end(dt);
+}
+
+/**
+ * Sparks off a site being cut into.
+ *
+ * Only once the attacker is actually IN CONTACT — while it is still walking there is nothing to
+ * throw sparks off, and showing them during the approach would spend the one visual that says "the
+ * clock is running" on the part where it isn't.
+ */
+const SPARK_RATE_HZ = 26;
+let sparkDebt = 0;
+function updateSiegeSparks(dt: number) {
+  const a = siege?.inbound();
+  if (!sparks || !unitField || !a || a.rangeM > 0) {
+    sparkDebt = 0;
+    return;
+  }
+  const at = unitField.worldPositionOf(a.index);
+  if (!at) return;
+  // Accumulate fractional emissions so the shower is frame-rate independent.
+  sparkDebt += dt * SPARK_RATE_HZ;
+  const n = Math.floor(sparkDebt);
+  if (n <= 0) return;
+  sparkDebt -= n;
+  sparks.emit(at, Math.min(n, 6));
+}
 
 /**
  * What burning one company asset costs. Heavy on purpose: protected contacts carry the worst
@@ -853,6 +984,48 @@ function seedHiddenPockets(field: UnitField) {
     }
   }
   setText('g-pockets', String(placed));
+}
+
+/**
+ * Platforms arriving at what they were ordered to do.
+ *
+ * Every one of these started as a right-click on a contact and a choice from the menu — nothing
+ * here decides anything on its own. Strikes are the only ones with a bill attached: collateral
+ * hardens the ground exactly the way ordering past consent does, because from the street it is the
+ * same event.
+ */
+const COLLATERAL_RESISTANCE = 0.02;
+function resolveArrivals(dt: number) {
+  if (!unitField) return;
+  const strikes = unitField.resolveArrivals(dt);
+  for (const strike of strikes) {
+    if (theaterMap) {
+      const h = theaterMap.heightAt(strike.lon, strike.lat);
+      // The munition falling, then the detonation it becomes. The ring stops at the weapon's real
+      // lethal radius, so what the operator sees expanding is exactly the ground they just cleared.
+      lasers?.fire(
+        Cesium.Cartesian3.fromDegrees(strike.lon, strike.lat, h + 2400),
+        Cesium.Cartesian3.fromDegrees(strike.lon, strike.lat, h),
+      );
+      blasts?.fire(strike.lon, strike.lat, h, INTERCEPT.blastM);
+      // Debris off the seat of the blast, thrown much harder than a cutting torch throws sparks.
+      sparks?.emit(Cesium.Cartesian3.fromDegrees(strike.lon, strike.lat, h + 6), 18);
+    }
+    sound.play('laser');
+    siege?.noteAttackerStruck();
+
+    if (strike.collateral > 0) {
+      resistance.transgress(Math.min(1, COLLATERAL_RESISTANCE * strike.collateral));
+      reactAt(strike.lon, strike.lat, 'dismay');
+      toast(
+        `◈ STRIKE · ${strike.killed} DOWN · ${strike.collateral} BYSTANDER${strike.collateral > 1 ? 'S' : ''} LOST`,
+      );
+    } else {
+      reactCompany();
+      toast('◈ STRIKE · TARGET DOWN · NO COLLATERAL');
+    }
+  }
+  if (strikes.length) updateUnitHud();
 }
 
 /**
@@ -1419,7 +1592,7 @@ function endMarquee() {
 const BAND_HEX: Record<string, string> = { clear: '#EDEFF2', suspect: '#4F9E7A', threat: '#F2C13B' };
 const KIND_ABBR: Record<UnitKind, string> = {
   land: 'CV', sea: 'SV', air: 'AV', foot: 'FT',
-  drone: 'DISC', spider: 'ARC', biped: 'MAR', walker: 'COL', naval: 'LIT',
+  drone: 'DISC', spider: 'ARC', biped: 'MAR', walker: 'COL', naval: 'LIT', interceptor: 'RAP',
 };
 const BAND_ABBR: Record<string, string> = { clear: 'CLR', suspect: 'SUS', threat: 'THR' };
 const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
@@ -1468,6 +1641,26 @@ function renderCharges(record: Record_ | null) {
           })(),
         ]),
   );
+}
+
+/**
+ * The capture plate at the top of the card.
+ *
+ * A contact gets a face, generated from its callsign so it's the same face every time. A PLATFORM
+ * gets its glyph instead — machines don't have mug shots, and swapping the slot's contents rather
+ * than hiding it keeps the card from jumping when the selection moves between the two.
+ */
+let mugShownFor = '';
+function renderMug(id: string, platform: PlatformId | null) {
+  const slot = el('up-mug');
+  if (!slot || mugShownFor === id) return;
+  mugShownFor = id;
+  slot.classList.toggle('hardware', platform !== null);
+  if (platform) {
+    slot.innerHTML = icon(platform);
+    return;
+  }
+  slot.replaceChildren(portraitFor(id));
 }
 
 /**
@@ -1590,6 +1783,7 @@ function updateUnitPanel() {
       const fill = bar.firstElementChild as HTMLElement | null;
       if (fill) fill.style.width = `${pct}%`;
     }
+    renderMug(one.id, isPlatform ? (one.kind as PlatformId) : null);
     renderCase(isPlatform ? null : one);
     renderCharges(isPlatform ? null : one.record);
     renderOrder(one.mark, one.markTimer);
@@ -2233,15 +2427,155 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
   rightDownAt = mode === 'theater' ? Cesium.Cartesian2.clone(m.position) : null;
 }, Cesium.ScreenSpaceEventType.RIGHT_DOWN);
 
+/**
+ * What the selected platform could do to a contact, and why it can't where it can't.
+ *
+ * Every platform can flag — observation needs no hardware and no permission. Everything else is a
+ * question of what is bolted to the hull and what the chain has authorised, and the menu SHOWS the
+ * unavailable ones with the reason rather than hiding them, so the loadout screen isn't the only
+ * place to learn what a platform is missing.
+ */
+interface ContactOption {
+  action: 'investigate' | 'detain' | 'execute' | 'strike';
+  label: string;
+  blocked: string | null;
+}
+function contactOptions(kind: PlatformId): ContactOption[] {
+  const opts: ContactOption[] = [
+    { action: 'investigate', label: 'FLAG FOR INVESTIGATION', blocked: null },
+  ];
+
+  opts.push({
+    action: 'detain',
+    label: 'DETAIN',
+    blocked: !missions.hasAuth('detain')
+      ? 'NO CUSTODY AUTHORITY'
+      : !progression.platformHas(kind, 'detain')
+        ? 'NO DETAINMENT RIG FITTED'
+        : null,
+  });
+
+  opts.push({
+    action: 'execute',
+    label: 'EXECUTE',
+    blocked: !missions.hasAuth('execute')
+      ? 'NO LETHAL AUTHORITY'
+      : !progression.platformHas(kind, 'laser')
+        ? 'NO EMITTER FITTED'
+        : null,
+  });
+
+  // The area strike is the airframe, not a hardpoint — only the wing has it.
+  if (kind === 'interceptor') {
+    opts.push({
+      action: 'strike',
+      label: 'AREA STRIKE',
+      blocked: !missions.hasAuth('execute') ? 'NO LETHAL AUTHORITY' : null,
+    });
+  }
+  return opts;
+}
+
+/** Close the contact menu, if one is up. */
+function closeContactMenu() {
+  document.getElementById('g-context')?.remove();
+}
+
+/**
+ * The contact menu: right-clicking a unit asks what to do about it rather than guessing.
+ *
+ * Guessing was the previous design and it was wrong in both directions — it silently picked detain
+ * when both were fitted, and it gave no way to flag a contact from a platform that happened to be
+ * armed. Any contact can be picked, including one the operator has no business picking, which is
+ * the point.
+ */
+function openContactMenu(
+  screenX: number,
+  screenY: number,
+  kind: PlatformId,
+  contact: { index: number; lon: number; lat: number; id: string },
+  append: boolean,
+) {
+  closeContactMenu();
+  const box = document.createElement('div');
+  box.id = 'g-context';
+  box.style.left = `${screenX}px`;
+  box.style.top = `${screenY}px`;
+  box.innerHTML = `<div class="gc-head">${contact.id}</div>`;
+
+  for (const opt of contactOptions(kind)) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = `gc-item${opt.action === 'execute' || opt.action === 'strike' ? ' lethal' : ''}`;
+    b.disabled = opt.blocked !== null;
+    b.innerHTML =
+      `<span class="gc-label">${opt.label}</span>` +
+      (opt.blocked ? `<span class="gc-why">${opt.blocked}</span>` : '');
+    if (!opt.blocked) {
+      b.addEventListener('click', () => {
+        closeContactMenu();
+        if (!unitField) return;
+        if (unitField.orderSelected(contact.lon, contact.lat, append, opt.action, contact.index)) {
+          sound.play(opt.action === 'execute' || opt.action === 'strike' ? 'orderLethal' : 'order');
+          updateUnitPanel();
+        }
+      });
+    }
+    box.append(b);
+  }
+
+  document.body.append(box);
+  // Any click elsewhere dismisses it, including the next right-click.
+  const dismiss = () => {
+    closeContactMenu();
+    window.removeEventListener('pointerdown', dismiss, true);
+  };
+  window.setTimeout(() => window.addEventListener('pointerdown', dismiss, true), 0);
+}
+
 handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
   const down = rightDownAt;
   rightDownAt = null;
   if (!down || mode !== 'theater' || !unitField) return;
   if (Cesium.Cartesian2.distance(down, m.position) > ORDER_SLOP_PX) return; // that was a tilt drag
-  if (!unitField.selectedPlatform()) return; // orders only apply to a selected platform
+  const sel = unitField.selectedPlatform();
+  if (!sel) return; // orders only apply to a selected platform
+
+  // Shift queues the leg behind whatever is already commanded instead of replacing it.
+  const append = shiftHeld;
+
+  // Right-clicking a CONTACT is "go and deal with that one" — the platform routes to it carrying
+  // whatever its hardpoints can actually do. Right-clicking open ground is a plain move.
+  const contact = unitField.contactAt(scene, m.position.x, m.position.y, SELECT_PX);
+  if (contact) {
+    openContactMenu(m.position.x, m.position.y, sel.kind, contact, append);
+    return;
+  }
+
+  closeContactMenu();
   const g = groundAt(m.position);
-  if (g && unitField.orderSelected(g.lon, g.lat)) updateUnitPanel();
+  if (g && unitField.orderSelected(g.lon, g.lat, append)) {
+    sound.play('click');
+    updateUnitPanel();
+  }
 }, Cesium.ScreenSpaceEventType.RIGHT_UP);
+
+/**
+ * Shift state, tracked globally.
+ *
+ * Cesium's own modified-event types cover LEFT_DOWN and friends but not RIGHT_UP, so the modifier
+ * has to be read from the keyboard rather than from the pick event.
+ */
+let shiftHeld = false;
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Shift') shiftHeld = true;
+});
+window.addEventListener('keyup', (e) => {
+  if (e.key === 'Shift') shiftHeld = false;
+});
+window.addEventListener('blur', () => {
+  shiftHeld = false;
+});
 
 el('g-exit')?.addEventListener('click', exitTheater);
 
@@ -2591,6 +2925,23 @@ if (import.meta.env.DEV) {
     get reactions() {
       return reactions;
     },
+    get routes() {
+      return routes;
+    },
+    get pulse() {
+      return pulse;
+    },
+    get scans() {
+      return scans;
+    },
+    get blasts() {
+      return blasts;
+    },
+    get sparks() {
+      return sparks;
+    },
+    openContactMenu,
+    contactOptions,
     get fallenObelisks() {
       return fallenObelisks;
     },

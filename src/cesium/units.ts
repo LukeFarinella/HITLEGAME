@@ -28,6 +28,9 @@ import { caseStrength, tolerance } from '../game/tolerance';
 
 export type UnitState = 'normal' | 'protected' | 'infected';
 
+/** What a platform is being sent to DO when it gets there. */
+export type RouteAction = 'investigate' | 'detain' | 'execute' | 'strike' | null;
+
 /**
  * Units are coloured by the ASSESSED band, not by their true state.
  *
@@ -128,6 +131,7 @@ const SPEED: Record<UnitKind, number> = {
   biped: PLATFORM_BY_ID.get('biped')!.speed,
   walker: PLATFORM_BY_ID.get('walker')!.speed,
   naval: PLATFORM_BY_ID.get('naval')!.speed,
+  interceptor: PLATFORM_BY_ID.get('interceptor')!.speed,
 };
 /**
  * Height above the sampled ground, metres. Land/foot clear the road ribbon (draped at +12) so
@@ -144,6 +148,7 @@ const RIDE_HEIGHT: Record<UnitKind, number> = {
   biped: 2,
   walker: 2,
   naval: 1, // floats on the water plane, like the ambient shipping
+  interceptor: 0,
 };
 
 /**
@@ -153,6 +158,28 @@ const RIDE_HEIGHT: Record<UnitKind, number> = {
 export const PLATFORM_SENSOR: Record<string, number> = {};
 /** Within this many metres of its ordered destination, a platform is "on station". */
 const ARRIVE_M = 120;
+
+/** Clicking this close to a leg already on the route closes the loop instead of adding a leg. */
+const LOOP_SNAP_M = 1500;
+
+/**
+ * The interceptor's strike.
+ *
+ * ORDERED, never automatic. An area weapon that picks its own moment is a weapon the operator is
+ * not answerable for, and being answerable is the whole subject here — so the wing sits until it is
+ * sent, flies to what it was sent at, and detonates on arrival.
+ *
+ * The blast does not distinguish. Everyone inside {@link INTERCEPT.blastM} of the target dies, and
+ * everyone who was not the target is collateral the public will hear about.
+ */
+export const INTERCEPT = {
+  /** How close the wing has to get to its target before it commits. */
+  engageM: 400,
+  /** Lethal radius of the strike. */
+  blastM: 260,
+  /** Seconds before the same wing can strike again. */
+  cooldownS: 12,
+};
 
 /** March speed for a contact being routed into coverage by the delivery pass. */
 const DELIVERY_SPEED = 55;
@@ -398,15 +425,31 @@ interface Unit {
   sea?:
     | { mode: 'coastal'; /** +1 runs the coast one way round the landmass, -1 the other. */ side: 1 | -1; standoffM: number }
     | { mode: 'ferry'; a: [number, number]; b: [number, number]; toB: boolean };
-  // drone: commanded destination (RMB order); absent once it arrives and holds station
+  // platform: commanded destination (RMB order); absent once it arrives and holds station
   tlon?: number;
   tlat?: number;
+  /**
+   * Queued legs after the current one. Shift-clicking appends; clicking an existing waypoint closes
+   * the route into a loop, at which point arriving at the last leg re-queues the whole route.
+   */
+  route?: { lon: number; lat: number }[];
+  /** A closed route patrols forever instead of running down to nothing. */
+  loop?: boolean;
+  /** Interceptor only: seconds until it can strike again. */
+  strikeCooldown?: number;
+  /**
+   * A standing order attached to the route's end: go there and do this to what's there. `null` is a
+   * plain move. This is what makes a red leg red — the route carries the intent, not the geometry.
+   */
+  routeAction?: RouteAction;
+  /** The contact this route was issued against, for the actions that need a specific target. */
+  routeTarget?: number;
 }
 
 /** Callsign prefix per kind. */
 const CALLSIGN: Record<UnitKind, string> = {
   land: 'CV', sea: 'SV', air: 'AV', foot: 'FT',
-  drone: 'GORGON', spider: 'ARC', biped: 'MAR', walker: 'COL', naval: 'LIT',
+  drone: 'GORGON', spider: 'ARC', biped: 'MAR', walker: 'COL', naval: 'LIT', interceptor: 'RAP',
 };
 /** Human label per kind, for the panel. */
 export const KIND_LABEL: Record<UnitKind, string> = {
@@ -419,6 +462,7 @@ export const KIND_LABEL: Record<UnitKind, string> = {
   biped: 'MARSHAL BIPED',
   walker: 'COLOSSUS SIEGE WALKER',
   naval: 'LITTORAL DRONE',
+  interceptor: 'RAPTOR INTERCEPTOR',
 };
 
 /** Metres/second per kind (mirrors SPEED) surfaced for the panel. */
@@ -587,7 +631,7 @@ export class UnitField {
   private shoreAt: (lon: number, lat: number) => number;
   private scratch = new Cesium.Cartesian3();
   private nextId: Record<UnitKind, number> = {
-    land: 0, sea: 0, air: 0, foot: 0, drone: 0, spider: 0, biped: 0, walker: 0, naval: 0,
+    land: 0, sea: 0, air: 0, foot: 0, drone: 0, spider: 0, biped: 0, walker: 0, naval: 0, interceptor: 0,
   };
   /** Obelisk coverage test, used both to seed infection and to steer it toward the dark. */
   private isCovered?: (lon: number, lat: number) => boolean;
@@ -656,6 +700,12 @@ export class UnitField {
       biped: new InstancedModelBatch(UNIT_MESHES.biped, PLATFORM_BY_ID.get('biped')!.maxCount, bounds, true),
       walker: new InstancedModelBatch(UNIT_MESHES.walker, PLATFORM_BY_ID.get('walker')!.maxCount, bounds, true),
       naval: new InstancedModelBatch(UNIT_MESHES.naval, PLATFORM_BY_ID.get('naval')!.maxCount, bounds, true),
+      interceptor: new InstancedModelBatch(
+        UNIT_MESHES.interceptor,
+        PLATFORM_BY_ID.get('interceptor')!.maxCount,
+        bounds,
+        true,
+      ),
     };
 
     // Vehicles favour freeways heavily (constant motorway flow); pedestrians stay on surface streets.
@@ -1000,8 +1050,21 @@ export class UnitField {
     if (dist <= ARRIVE_M) {
       u.lon = u.tlon;
       u.lat = u.tlat;
-      u.tlon = undefined;
-      u.tlat = undefined;
+      const arrived = { lon: u.tlon, lat: u.tlat };
+      const next = u.route?.shift();
+      if (next) {
+        u.tlon = next.lon;
+        u.tlat = next.lat;
+        // A closed route puts the leg it just finished back on the end, so it runs forever.
+        if (u.loop) (u.route ??= []).push(arrived);
+      } else if (u.loop) {
+        // Single-leg loop: keep bouncing between here and there.
+        u.tlon = arrived.lon;
+        u.tlat = arrived.lat;
+      } else {
+        u.tlon = undefined;
+        u.tlat = undefined;
+      }
       return;
     }
     const step = Math.min(dist, SPEED[u.kind] * dt);
@@ -1206,18 +1269,85 @@ export class UnitField {
   }
 
   /**
-   * Order the currently selected platform to a point. False if none is selected — or if the order
-   * doesn't make sense for it: a littoral drone cannot be sent inland, and refusing outright is
-   * clearer than watching it swim up a valley.
+   * Order the currently selected platform to a point.
+   *
+   * `append` (shift-click) queues the point behind whatever is already commanded instead of
+   * replacing it. False if nothing is selected, or if the order doesn't make sense for the
+   * platform: a littoral drone cannot be sent inland, and refusing outright is clearer than
+   * watching it swim up a valley.
    */
-  orderSelected(lon: number, lat: number): boolean {
+  orderSelected(
+    lon: number,
+    lat: number,
+    append = false,
+    action: RouteAction = null,
+    target?: number,
+  ): boolean {
     const sel = this.selectedPlatform();
     if (!sel) return false;
     if (sel.kind === 'naval' && this.shoreAt(lon, lat) > -60) return false;
     const u = this.units[sel.index];
-    u.tlon = lon;
-    u.tlat = lat;
+
+    if (!append || u.tlon === undefined) {
+      u.tlon = lon;
+      u.tlat = lat;
+      u.route = [];
+      u.loop = false;
+      u.routeAction = action;
+      u.routeTarget = target;
+      return true;
+    }
+
+    // Appending onto an existing route. Clicking near a leg that's already on it closes the loop
+    // rather than adding a near-duplicate — which is how a patrol is drawn rather than declared.
+    const legs = this.routeOf(sel.index);
+    const near = legs.findIndex((w) => this.metresBetween(w.lon, w.lat, lon, lat) < LOOP_SNAP_M);
+    if (near >= 0) {
+      u.loop = true;
+      return true;
+    }
+    (u.route ??= []).push({ lon, lat });
+    if (action) {
+      u.routeAction = action;
+      u.routeTarget = target;
+    }
     return true;
+  }
+
+  /** Every commanded leg for a platform, current first. Empty when it's holding station. */
+  routeOf(index: number): { lon: number; lat: number }[] {
+    const u = this.units[index];
+    if (!u || u.tlon === undefined || u.tlat === undefined) return [];
+    return [{ lon: u.tlon, lat: u.tlat }, ...(u.route ?? [])];
+  }
+
+  /** The standing order attached to a platform's route, if any. */
+  routeActionOf(index: number): RouteAction {
+    return this.units[index]?.routeAction ?? null;
+  }
+
+  /** Whether a platform's route is a closed patrol. */
+  routeLoops(index: number): boolean {
+    return !!this.units[index]?.loop;
+  }
+
+  /** Cancel everything commanded on the selected platform. */
+  clearRoute(): boolean {
+    const sel = this.selectedPlatform();
+    if (!sel) return false;
+    const u = this.units[sel.index];
+    u.tlon = undefined;
+    u.tlat = undefined;
+    u.route = [];
+    u.loop = false;
+    u.routeAction = null;
+    u.routeTarget = undefined;
+    return true;
+  }
+
+  private metresBetween(lon1: number, lat1: number, lon2: number, lat2: number): number {
+    const mLon = mPerLat * Math.cos(((lat1 + lat2) / 2) * DEG);
+    return Math.hypot((lon2 - lon1) * mLon, (lat2 - lat1) * mPerLat);
   }
 
   /** Which platform unit is selected, if any. Drives whether RMB issues a move order. */
@@ -1624,6 +1754,46 @@ export class UnitField {
   }
 
   /**
+   * The non-platform contact nearest a window point, WITHOUT changing the selection.
+   *
+   * Right-clicking a contact has to identify it while leaving the selected platform selected — the
+   * whole gesture is "you, go and deal with that one", and going through `pick()` would drop the
+   * platform doing the dealing.
+   */
+  contactAt(
+    scene: Cesium.Scene,
+    x: number,
+    y: number,
+    maxPx: number,
+  ): { index: number; lon: number; lat: number; id: string } | null {
+    const toWin = this.toWin();
+    if (!toWin) return null;
+    const c = this.pickScratchC;
+    const w = this.pickScratchW;
+    let best = -1;
+    let bestD = maxPx * maxPx;
+    for (let i = 0; i < this.units.length; i++) {
+      const u = this.units[i];
+      if (u.dead || PLATFORM_KINDS.includes(u.kind)) continue;
+      c.x = this.ecef[i * 3];
+      c.y = this.ecef[i * 3 + 1];
+      c.z = this.ecef[i * 3 + 2];
+      const win = toWin(scene, c, w);
+      if (!win) continue;
+      const dx = win.x - x;
+      const dy = win.y - y;
+      const d = dx * dx + dy * dy;
+      if (d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    }
+    if (best < 0) return null;
+    const u = this.units[best];
+    return { index: best, lon: u.lon, lat: u.lat, id: u.id };
+  }
+
+  /**
    * Select every unit whose screen position falls inside a drag box. Returns the count.
    *
    * FRIENDLY FIRST: if any of the player's own platforms fall in the box, the box selects only
@@ -1667,7 +1837,7 @@ export class UnitField {
   selected(): SelectionInfo | null {
     if (this.selection.size === 0) return null;
     const byKind: Record<UnitKind, number> = {
-      land: 0, sea: 0, air: 0, foot: 0, drone: 0, spider: 0, biped: 0, walker: 0, naval: 0,
+      land: 0, sea: 0, air: 0, foot: 0, drone: 0, spider: 0, biped: 0, walker: 0, naval: 0, interceptor: 0,
     };
     const byBand: Record<'clear' | 'suspect' | 'threat', number> = { clear: 0, suspect: 0, threat: 0 };
     let markedCount = 0;
@@ -1868,6 +2038,67 @@ export class UnitField {
     return true;
   }
 
+  /**
+   * The sensor links to draw this frame: one per investigation-marked contact that something can
+   * currently see, from whatever is doing the seeing.
+   *
+   * Unlike {@link resolveExecutions} this asks about COVERAGE, not armament — an obelisk with no
+   * emitter still watches, and an unarmed drone is still a camera. That asymmetry is the point: the
+   * operator can surveil far more of the theater than they can shoot, and the scan lines are what
+   * make the size of that gap visible.
+   *
+   * A marked contact with no link is one that has wandered out of coverage. Nothing is drawn, which
+   * is the honest answer — the investigation is still on the books and nobody is watching.
+   */
+  scanBeams(
+    obeliskApex: ((lon: number, lat: number) => Cesium.Cartesian3 | undefined) | undefined,
+    platforms: PlatformId[],
+  ): { from: Cesium.Cartesian3; to: Cesium.Cartesian3 }[] {
+    const out: { from: Cesium.Cartesian3; to: Cesium.Cartesian3 }[] = [];
+    for (const i of this.markedIdx) {
+      const u = this.units[i];
+      if (u.dead || u.mark !== 'investigate') continue;
+
+      let from: Cesium.Cartesian3 | undefined;
+      // Prefer a platform: a drone tasked over a contact is the more interesting answer to "who is
+      // watching this", and an operator who moved it there should see their own asset on the line.
+      for (const id of platforms) {
+        const idx = this.coveringUnit(id, u.lon, u.lat);
+        if (idx < 0) continue;
+        from = new Cesium.Cartesian3(
+          this.ecef[idx * 3],
+          this.ecef[idx * 3 + 1],
+          this.ecef[idx * 3 + 2],
+        );
+        break;
+      }
+      // Clone: the sensor field hands back a shared scratch, and many links resolve in one frame —
+      // keeping the reference would leave every beam originating from the last obelisk.
+      if (!from && obeliskApex) {
+        const apex = obeliskApex(u.lon, u.lat);
+        if (apex) from = Cesium.Cartesian3.clone(apex);
+      }
+      if (!from) continue;
+
+      out.push({
+        from,
+        to: new Cesium.Cartesian3(this.ecef[i * 3], this.ecef[i * 3 + 1], this.ecef[i * 3 + 2]),
+      });
+    }
+    return out;
+  }
+
+  /** World position of one unit, from the cache the last render filled. */
+  worldPositionOf(index: number): Cesium.Cartesian3 | null {
+    const u = this.units[index];
+    if (!u || u.dead) return null;
+    return new Cesium.Cartesian3(
+      this.ecef[index * 3],
+      this.ecef[index * 3 + 1],
+      this.ecef[index * 3 + 2],
+    );
+  }
+
   // --- execution ---------------------------------------------------------------------------------
 
   /**
@@ -1894,25 +2125,29 @@ export class UnitField {
       if (u.markTimer !== undefined) continue; // still inside its rescind window — hold fire
 
       let from: Cesium.Cartesian3 | undefined;
+      // A PLATFORM in range shoots before the obelisk net does.
+      //
+      // The other order was the obvious one and it was wrong. Obelisk coverage blankets a developed
+      // state, so checking it first meant a laser-armed drone parked directly over a contact never
+      // once appeared to fire — every beam fell out of the sky from the nearest tower. The operator
+      // buys a drone, arms it, flies it somewhere, and gets no evidence it did anything.
+      //
+      // First platform in range wins; which one is cosmetic, but that it is one at all is not.
+      for (const id of armedPlatforms) {
+        const idx = this.coveringUnit(id, u.lon, u.lat);
+        if (idx < 0) continue;
+        from = new Cesium.Cartesian3(
+          this.ecef[idx * 3],
+          this.ecef[idx * 3 + 1],
+          this.ecef[idx * 3 + 2],
+        );
+        break;
+      }
       // Clone: the sensor field hands back a shared scratch, and several shots can land in one
       // frame — keeping the reference would leave every beam originating from the last obelisk.
-      if (obeliskReach) {
+      if (!from && obeliskReach) {
         const apex = obeliskReach(u.lon, u.lat);
         if (apex) from = Cesium.Cartesian3.clone(apex);
-      }
-      // Then any armed platform whose envelope the contact has wandered into. First one wins —
-      // the beam has to come from somewhere, and which armed platform fired is cosmetic.
-      if (!from) {
-        for (const id of armedPlatforms) {
-          const idx = this.coveringUnit(id, u.lon, u.lat);
-          if (idx < 0) continue;
-          from = new Cesium.Cartesian3(
-            this.ecef[idx * 3],
-            this.ecef[idx * 3 + 1],
-            this.ecef[idx * 3 + 2],
-          );
-          break;
-        }
       }
       if (!from) continue;
 
@@ -1953,6 +2188,95 @@ export class UnitField {
     return this.platformUnits().map(
       (u) => new Cesium.Cartesian3(this.ecef[u.index * 3], this.ecef[u.index * 3 + 1], this.ecef[u.index * 3 + 2]),
     );
+  }
+
+  /**
+   * Resolve platforms that have arrived at whatever they were ORDERED to do.
+   *
+   * Everything here is the tail end of a right-click: the operator picked a contact, picked an
+   * action their loadout supports, and the platform flew there. This is the arrival.
+   *
+   * Returns the strikes that went off, so the caller can bill the collateral.
+   */
+  resolveArrivals(dt: number): { lon: number; lat: number; killed: number; collateral: number }[] {
+    const out: { lon: number; lat: number; killed: number; collateral: number }[] = [];
+
+    for (const { kind, index } of this.platformUnits()) {
+      const u = this.units[index];
+      u.strikeCooldown = Math.max(0, (u.strikeCooldown ?? 0) - dt);
+
+      const action = u.routeAction;
+      if (!action || u.route?.length) continue; // still legs to fly before the last one
+
+      // Track a moving target: a contact ordered against doesn't wait to be arrived at.
+      const t = u.routeTarget !== undefined ? this.units[u.routeTarget] : undefined;
+      if (t && !t.dead) {
+        u.tlon = t.lon;
+        u.tlat = t.lat;
+      } else if (t?.dead) {
+        // Target gone before arrival — stand down rather than striking an empty street.
+        u.routeAction = null;
+        u.routeTarget = undefined;
+        u.tlon = undefined;
+        u.tlat = undefined;
+        continue;
+      }
+      if (u.tlon === undefined || u.tlat === undefined) continue;
+
+      const mLon = mPerLat * Math.cos(u.lat * DEG);
+      const reach = action === 'strike' ? INTERCEPT.engageM : this.sensorOf(kind);
+      const dx = (u.tlon - u.lon) * mLon;
+      const dy = (u.tlat - u.lat) * mPerLat;
+      if (Math.hypot(dx, dy) > reach) continue;
+
+      if (action === 'strike') {
+        if (u.strikeCooldown > 0) continue;
+        u.strikeCooldown = INTERCEPT.cooldownS;
+        out.push(this.detonate(u.tlon, u.tlat));
+      } else if (t) {
+        // Investigate / detain / execute all land on the one contact that was picked.
+        if (action === 'detain') {
+          t.dead = true;
+          t.mark = null;
+          this.selection.delete(u.routeTarget!);
+          if (this.attackerIdx === u.routeTarget) this.attackerIdx = -1;
+        } else {
+          t.mark = action === 'execute' ? 'execute' : 'investigate';
+          t.markTimer = ORDER_DELAY[t.mark];
+        }
+        this.rebuildMarks();
+      }
+
+      u.routeAction = null;
+      u.routeTarget = undefined;
+      u.tlon = undefined;
+      u.tlat = undefined;
+    }
+    return out;
+  }
+
+  /** Everything inside the blast dies. Returns the toll, split into target and everyone else. */
+  private detonate(lon: number, lat: number): { lon: number; lat: number; killed: number; collateral: number } {
+    const mLon = mPerLat * Math.cos(lat * DEG);
+    const r2 = INTERCEPT.blastM * INTERCEPT.blastM;
+    let killed = 0;
+    let collateral = 0;
+    for (let i = 0; i < this.units.length; i++) {
+      const o = this.units[i];
+      if (o.dead || PLATFORM_KINDS.includes(o.kind)) continue;
+      const ox = (o.lon - lon) * mLon;
+      const oy = (o.lat - lat) * mPerLat;
+      if (ox * ox + oy * oy > r2) continue;
+      o.dead = true;
+      o.mark = null;
+      this.selection.delete(i);
+      if (i === this.attackerIdx) this.attackerIdx = -1;
+      killed++;
+      // Anyone in the blast who was not attacking a site is collateral.
+      if (!o.siege) collateral++;
+    }
+    this.rebuildMarks();
+    return { lon, lat, killed, collateral };
   }
 
   /** Live (undead) unit count, for the HUD. */

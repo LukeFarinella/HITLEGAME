@@ -176,12 +176,19 @@
         <button class="up-close" id="up-close" type="button" aria-label="Deselect">✕</button>
       </div>
       <div class="up-body" id="up-single">
-        <div class="up-row"><span class="k">Type</span><span class="v" id="up-type">—</span></div>
-        <!-- Assessment, not ground truth: C2 sees a confidence, never the contagion sim's answer -->
-        <div class="up-row"><span class="k">Assessment</span><span class="v" id="up-status">—</span></div>
-        <div class="up-assess" id="up-assess-bar"><i></i></div>
-        <!-- Case strength vs the public-tolerance line: why a contact can or can't be ordered against -->
-        <div class="up-case" id="up-case" hidden><span class="bar"><i></i><u></u></span><span class="v">—</span></div>
+        <!-- The capture plate, and the read on whoever is in it. Procedural, seeded from the
+             callsign — see src/game/portraits.ts. -->
+        <div class="up-top">
+          <div class="up-mug" id="up-mug"></div>
+          <div class="up-top-rows">
+            <div class="up-row"><span class="k">Type</span><span class="v" id="up-type">—</span></div>
+            <!-- Assessment, not ground truth: C2 sees a confidence, never the sim's answer -->
+            <div class="up-row"><span class="k">Assessment</span><span class="v" id="up-status">—</span></div>
+            <div class="up-assess" id="up-assess-bar"><i></i></div>
+            <!-- Case strength vs the public-tolerance line: why a contact can or can't be ordered -->
+            <div class="up-case" id="up-case" hidden><span class="bar"><i></i><u></u></span><span class="v">—</span></div>
+          </div>
+        </div>
         <div class="up-row"><span class="k">Position</span><span class="v" id="up-pos">—</span></div>
         <div class="up-row"><span class="k">Heading</span><span class="v" id="up-hdg">—</span></div>
         <div class="up-row"><span class="k">Sensor</span><span class="v" id="up-sensor">—</span></div>

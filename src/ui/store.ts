@@ -40,8 +40,8 @@ export class Store {
   private sitesEl: HTMLElement;
   private bodyEl: HTMLElement;
   private tab: Tab = 'platforms';
-  /** Which platform's hardpoints are expanded for fitting. */
-  private fitting: PlatformId | null = null;
+  /** Which hardpoint slot has its gear menu open, if any. */
+  private slotOpen: { id: PlatformId; slot: number } | null = null;
   /** Which territory block has its member states expanded. */
   private expanded: string | null = null;
   private territory?: Territory;
@@ -148,49 +148,66 @@ export class Store {
       return row;
     }
 
-    // Owned: hardpoints, then the fleet expansion if there is one left to buy.
+    // Owned: the hardpoints as clickable slots.
+    //
+    // A rack of boxes under the platform, one per mount, each showing what's in it. Clicking a slot
+    // opens a menu of the gear that will actually go in THAT slot on THIS platform — compatible,
+    // authorised, affordable, and not already fitted. The previous design hid all of that behind a
+    // single "FIT GEAR" button that filled the first free mount, which meant the player could not
+    // choose where anything went or see why something was unavailable.
     const loadout = progression.loadoutOf(p.id);
-    const hp = document.createElement('div');
-    hp.className = 'c2-hardpoints';
+    const rack = document.createElement('div');
+    rack.className = 'c2-rack';
     loadout.forEach((gearId, slot) => {
       const gear = gearId ? GEAR_BY_ID.get(gearId) : undefined;
-      const line = document.createElement('div');
-      line.className = `c2-hp ${gear ? 'fitted' : 'empty'}`;
-      line.innerHTML = `<span class="c2-hp-k">HP${slot + 1}</span><span class="c2-hp-v">${gear ? gear.name : 'OPEN'}</span>`;
+      const box = document.createElement('div');
+      box.className = `c2-slot ${gear ? 'fitted' : 'open'}`;
+      if (this.slotOpen?.id === p.id && this.slotOpen.slot === slot) box.classList.add('active');
+
+      const face = document.createElement('button');
+      face.type = 'button';
+      face.className = 'c2-slot-face';
+      face.innerHTML =
+        `<span class="c2-slot-k">HP${slot + 1}</span>` +
+        (gear
+          ? `<span class="c2-slot-icon">${icon(gear.id)}</span><span class="c2-slot-v">${gear.name}</span>`
+          : `<span class="c2-slot-v empty">EMPTY</span>`);
+      face.addEventListener('click', () => {
+        const same = this.slotOpen?.id === p.id && this.slotOpen.slot === slot;
+        this.slotOpen = same ? null : { id: p.id, slot };
+        this.render();
+      });
+      box.append(face);
+
       if (gear) {
         const strip = document.createElement('button');
         strip.type = 'button';
         strip.className = 'c2-strip';
         strip.title = `Strip — refunds ${fmt.format(Math.floor(gear.cost / 2))}`;
         strip.textContent = '✕';
-        strip.addEventListener('click', () => {
+        strip.addEventListener('click', (e) => {
+          e.stopPropagation();
           if (progression.stripHardpoint(p.id, slot)) this.hooks.onPurchase();
         });
-        line.append(strip);
+        box.append(strip);
       }
-      hp.append(line);
+
+      rack.append(box);
+
+      // The menu hangs under the slot it belongs to, so which mount is being filled is never in
+      // question — it's the one the list is attached to.
+      if (this.slotOpen?.id === p.id && this.slotOpen.slot === slot) {
+        rack.append(this.slotMenu(p, slot, loadout));
+      }
     });
-    row.append(hp);
-    // Gear is fitted per TYPE, so say so once rather than implying each unit is configured alone.
+    row.append(rack);
+
     if (count > 1) {
       const note = document.createElement('p');
       note.className = 'c2-fleetnote';
       note.textContent = `Loadout applies to all ${count}.`;
       row.append(note);
     }
-
-    const fit = document.createElement('button');
-    fit.type = 'button';
-    fit.className = 'c2-buy';
-    const open = this.fitting === p.id;
-    const hasFree = loadout.includes(null);
-    fit.disabled = !hasFree && !open;
-    fit.textContent = !hasFree && !open ? 'ALL HARDPOINTS FITTED' : open ? 'CLOSE ARMOURY' : 'FIT GEAR';
-    fit.addEventListener('click', () => {
-      this.fitting = open ? null : p.id;
-      this.render();
-    });
-    row.append(fit);
 
     if (p.expansion && count < p.maxCount) {
       const blocker = progression.expansionBlocker(p);
@@ -219,44 +236,65 @@ export class Store {
       row.append(exp);
     }
 
-    if (open) row.append(this.armoury(p));
     return row;
   }
 
-  /** The gear list for one platform, filtered to what actually fits it. */
-  private armoury(p: PlatformDef): HTMLElement {
-    const wrap = document.createElement('div');
-    wrap.className = 'c2-armoury';
-    for (const gear of GEAR) {
-      if (!gearFits(gear, p.id)) continue;
-      const blocker = progression.gearBlocker(gear, p.id);
-      const item = document.createElement('div');
-      item.className = 'c2-gear';
-      item.innerHTML =
-        `<div class="c2-row-head"><span class="c2-name">${icon(gear.id)}${gear.name}</span>` +
-        `<span class="c2-cost">${fmt.format(gear.cost)}</span></div>` +
-        `<p class="c2-blurb">${gear.blurb}</p>`;
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'c2-buy';
-      if (blocker) {
-        btn.disabled = true;
-        btn.textContent = blocker;
-        if (blocker === 'FITTED') btn.classList.add('done');
-      } else {
-        btn.textContent = 'INSTALL';
-        btn.addEventListener('click', () => {
-          if (progression.fitGear(gear, p.id)) {
-            if (!progression.loadoutOf(p.id).includes(null)) this.fitting = null;
+  /**
+   * The menu for one hardpoint: everything that could go in it, and for anything that can't, why.
+   *
+   * Gear already fitted elsewhere on the same platform is hidden rather than disabled — a second
+   * emitter on the same hull does nothing, so offering it would be offering a mistake.
+   */
+  private slotMenu(p: PlatformDef, slot: number, loadout: (string | null)[]): HTMLElement {
+    const menu = document.createElement('div');
+    menu.className = 'c2-slotmenu';
+
+    const fitted = loadout[slot];
+    if (fitted) {
+      const g = GEAR_BY_ID.get(fitted);
+      const note = document.createElement('p');
+      note.className = 'c2-blurb';
+      note.textContent = g ? g.blurb : '';
+      menu.append(note);
+    }
+
+    const options = GEAR.filter((g) => gearFits(g, p.id) && !loadout.includes(g.id));
+    if (!options.length) {
+      const none = document.createElement('p');
+      none.className = 'c2-note';
+      none.textContent = fitted ? 'NOTHING ELSE FITS THIS HULL' : 'NO COMPATIBLE GEAR';
+      menu.append(none);
+      return menu;
+    }
+
+    for (const gear of options) {
+      const opt = document.createElement('button');
+      opt.type = 'button';
+      opt.className = 'c2-slotopt';
+      // gearBlocker answers for the platform, not the slot; "no free hardpoint" is the one reason
+      // that doesn't apply here, since the player has picked the mount explicitly.
+      const raw = progression.gearBlocker(gear, p.id);
+      const blocker = raw === 'NO FREE HARDPOINT' ? null : raw;
+      opt.disabled = blocker !== null;
+      opt.innerHTML =
+        `<span class="c2-slot-icon">${icon(gear.id)}</span>` +
+        `<span class="c2-slotopt-body"><span class="c2-name">${gear.name}</span>` +
+        `<span class="c2-slotopt-why">${blocker ?? gear.blurb}</span></span>` +
+        `<span class="c2-cost">${fmt.format(gear.cost)}</span>`;
+      if (!blocker) {
+        opt.addEventListener('click', () => {
+          // Fitting into an occupied slot swaps: strip first, then install.
+          if (loadout[slot]) progression.stripHardpoint(p.id, slot);
+          if (progression.fitGearAt(gear, p.id, slot)) {
+            this.slotOpen = null;
             this.hooks.onPurchase();
             this.render();
           }
         });
       }
-      item.append(btn);
-      wrap.append(item);
+      menu.append(opt);
     }
-    return wrap;
+    return menu;
   }
 
   private renderAssets(): DocumentFragment {
@@ -264,7 +302,7 @@ export class Store {
     // What the network can be used FOR is capped by the climate, so say where it stands here too.
     const note = document.createElement('div');
     note.className = 'c2-section';
-    note.textContent = `PUBLIC TOLERANCE ${Math.round(tolerance.level * 100)}% · ${toleranceLabel(tolerance.level)}`;
+    note.textContent = `PUBLIC TOLERANCE ${Math.round(tolerance.level * 100)}% Â· ${toleranceLabel(tolerance.level)}`;
     frag.append(note);
     for (const a of ASSETS) frag.append(this.assetRow(a));
     return frag;

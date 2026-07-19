@@ -12,7 +12,8 @@ import type { UnitKind } from '../cesium/unitModels';
  * entry plus one `hasCapability` check at the point it matters.
  */
 
-export type PlatformId = UnitKind & ('drone' | 'spider' | 'biped' | 'walker' | 'naval');
+export type PlatformId = UnitKind &
+  ('drone' | 'spider' | 'biped' | 'walker' | 'naval' | 'interceptor');
 
 /** What a piece of gear grants. The scene asks for these by name. */
 export type Capability = 'laser' | 'wide-sensor' | 'deep-scan' | 'detain';
@@ -119,6 +120,24 @@ export const PLATFORMS: PlatformDef[] = [
     sensorM: BASE_SENSOR_M,
     speed: 90,
     altM: 0,
+  },
+  {
+    id: 'interceptor',
+    name: 'RAPTOR INTERCEPTOR',
+    blurb:
+      'Flying wing that dives on obelisk attackers without being tasked. Its strike is an area effect and it does not distinguish — everyone standing nearby is in it.',
+    cost: 24_000,
+    maxCount: 2,
+    expansion: {
+      count: 1,
+      cost: 26_000,
+      name: 'SECOND RAPTOR',
+      blurb: 'A second wing, halving the time any site waits for one.',
+    },
+    hardpoints: 1,
+    sensorM: BASE_SENSOR_M,
+    speed: 620,
+    altM: 2400,
   },
   {
     id: 'walker',

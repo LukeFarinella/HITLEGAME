@@ -962,3 +962,98 @@ body:has(#globe-ui) #hint { display: none; }
 .dev-mini:hover { color: var(--bone); border-color: var(--steel); }
 .dev-mini.on { color: var(--carbon); background: var(--orange); border-color: var(--orange); }
 .dev-mini.done { color: var(--ok); border-color: rgba(79, 158, 122, .45); }
+
+/* ---------- hardpoint slots ----------
+   A rack of mounts under the platform. Clicking one opens the gear that will go in THAT slot on
+   THIS hull — the old single "fit" button hid both the choice of mount and the reason anything was
+   unavailable. */
+.c2-rack { display: flex; flex-direction: column; gap: 3px; }
+.c2-slot {
+  display: flex; align-items: stretch;
+  border: 1px solid var(--gunmetal); border-left: 2px solid var(--gunmetal);
+  background: rgba(11, 12, 14, .45);
+}
+.c2-slot.fitted { border-left-color: var(--sel, #6FD3E8); }
+.c2-slot.active { border-color: var(--orange); border-left-color: var(--orange); }
+.c2-slot-face {
+  flex: 1; display: flex; align-items: center; gap: 7px;
+  pointer-events: auto; cursor: pointer; text-align: left;
+  background: none; border: none; padding: 6px 8px;
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em;
+  color: var(--bone);
+}
+.c2-slot-face:hover { background: rgba(232, 112, 30, .08); }
+.c2-slot-k { color: var(--ash); width: 26px; flex: none; }
+.c2-slot-icon { display: flex; flex: none; }
+.c2-slot-icon .c2-glyph { width: 13px; height: 13px; color: var(--sel, #6FD3E8); }
+.c2-slot-v { flex: 1; }
+.c2-slot-v.empty { color: var(--ash); }
+.c2-slot .c2-strip { padding: 0 7px; }
+
+.c2-slotmenu {
+  display: flex; flex-direction: column; gap: 3px;
+  border: 1px solid var(--orange); border-top: none;
+  background: rgba(11, 12, 14, .82);
+  padding: 6px;
+}
+.c2-slotmenu .c2-blurb { padding: 0 2px 4px; border-bottom: 1px solid var(--gunmetal); }
+.c2-slotmenu .c2-note { padding: 8px 0; }
+.c2-slotopt {
+  display: flex; align-items: center; gap: 8px;
+  pointer-events: auto; cursor: pointer; text-align: left;
+  background: var(--graphite-2); border: 1px solid var(--gunmetal);
+  padding: 6px 8px; font-family: var(--mono);
+}
+.c2-slotopt:hover:not(:disabled) { border-color: var(--orange); background: rgba(232, 112, 30, .1); }
+.c2-slotopt:disabled { cursor: not-allowed; opacity: .5; }
+.c2-slotopt .c2-slot-icon .c2-glyph { color: var(--orange); }
+.c2-slotopt-body { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.c2-slotopt .c2-name { font-size: 9.5px; }
+.c2-slotopt-why { color: var(--ash); font-size: 8.5px; letter-spacing: .04em; line-height: 1.4; }
+.c2-slotopt:disabled .c2-slotopt-why { color: var(--warn); }
+
+/* ---------- contact menu (right-click a unit) ----------
+   Asks what to do rather than guessing, and shows the unavailable options with the reason — the
+   loadout screen shouldn't be the only place to learn what a platform is missing. */
+#g-context {
+  position: fixed; z-index: 240;
+  min-width: 208px;
+  pointer-events: auto;
+  font-family: var(--mono);
+  background: rgba(11, 12, 14, .94); backdrop-filter: blur(8px);
+  border: 1px solid var(--gunmetal); border-left: 2px solid var(--red);
+  animation: up-in .12s ease-out;
+}
+.gc-head {
+  color: var(--bone); font-size: 10px; letter-spacing: .14em;
+  padding: 8px 11px; border-bottom: 1px solid var(--gunmetal);
+}
+.gc-item {
+  display: flex; flex-direction: column; gap: 2px; width: 100%;
+  pointer-events: auto; cursor: pointer; text-align: left;
+  background: none; border: none; padding: 7px 11px;
+  font-family: var(--mono); font-size: 10px; letter-spacing: .1em;
+  color: var(--steel);
+}
+.gc-item:hover:not(:disabled) { background: rgba(232, 112, 30, .14); color: var(--bone); }
+.gc-item.lethal { color: var(--red); }
+.gc-item.lethal:hover:not(:disabled) { background: rgba(226, 58, 46, .16); }
+.gc-item:disabled { cursor: not-allowed; color: var(--gunmetal); }
+.gc-why { color: var(--warn); font-size: 8.5px; letter-spacing: .06em; }
+.gc-item:disabled .gc-why { color: var(--ash); }
+
+/* ---------- capture plate on the unit card ----------
+   The face is the first thing on the card, because it is the thing the rest of the card is about. */
+.up-top { display: flex; gap: 10px; align-items: flex-start; }
+.up-top-rows { flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.up-mug {
+  flex: none; width: 76px; height: 94px;
+  border: 1px solid var(--gunmetal);
+  background: #0d0f13;
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
+}
+.up-mug canvas { display: block; }
+/* Platforms are machines: they get their glyph where a person gets a face. */
+.up-mug.hardware { border-color: var(--red-dim); }
+.up-mug .c2-glyph { width: 40px; height: 40px; color: var(--red); }

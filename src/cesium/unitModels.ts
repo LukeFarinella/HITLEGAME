@@ -320,6 +320,33 @@ function navalMesh(): ModelMesh {
 /** Aft mount, behind the superstructure. */
 const NAVAL_HARDPOINT: Hardpoint = { x: 0, y: -20, z: 8 };
 
+/**
+ * Interceptor — a flying wing. A single swept triangle with a thin spine, nothing else: it is the
+ * one platform defined entirely by its planform, because from above that is all you ever see of it.
+ * ~70 m span before scale.
+ */
+function interceptorMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  const span = 35; // half-span
+  const nose = 30;
+  const tail = -14;
+  const th = 2.2; // half-thickness at the spine
+
+  // Upper and lower surfaces, each a pair of triangles from the nose to the swept trailing edge.
+  for (const side of [1, -1]) {
+    const tip: V = [side * span, tail + 6, 0];
+    m.tri([0, nose, th], [0, tail, th], tip);
+    m.tri([0, tail, -th], [0, nose, -th], tip);
+  }
+  // Spine, giving it a readable thickness edge-on.
+  m.box(0, (nose + tail) / 2, 0, 3.4, nose - tail, th * 2);
+  m.box(0, tail + 3, th + 1.6, 2.4, 9, 3.2); // hardpoint nub, dorsal
+  return m.build();
+}
+
+/** Dorsal spine mount. */
+const INTERCEPTOR_HARDPOINT: Hardpoint = { x: 0, y: -11, z: 5 };
+
 /** Dorsal mount on the disc, just off the dome. */
 const DISC_HARDPOINT: Hardpoint = { x: 0, y: 0, z: 22 };
 
@@ -332,19 +359,22 @@ export type UnitKind =
   | 'spider'
   | 'biped'
   | 'walker'
-  | 'naval';
+  | 'naval'
+  | 'interceptor';
 
 /** Every kind, in one place — iterate this instead of re-listing the literals. */
 export const UNIT_KINDS: UnitKind[] = [
   'land', 'sea', 'air', 'foot',
-  'drone', 'spider', 'biped', 'walker', 'naval',
+  'drone', 'spider', 'biped', 'walker', 'naval', 'interceptor',
 ];
 
 /**
  * The player-controlled kinds. These are hero units — one of each at most, purchased, ordered
  * directly and carrying gear — as opposed to the ambient population the sim spawns in thousands.
  */
-export const PLATFORM_KINDS: UnitKind[] = ['drone', 'spider', 'biped', 'walker', 'naval'];
+export const PLATFORM_KINDS: UnitKind[] = [
+  'drone', 'spider', 'biped', 'walker', 'naval', 'interceptor',
+];
 
 export const UNIT_MESHES: Record<UnitKind, ModelMesh> = {
   land: vehicleMesh(),
@@ -356,6 +386,7 @@ export const UNIT_MESHES: Record<UnitKind, ModelMesh> = {
   biped: bipedMesh(),
   walker: walkerMesh(),
   naval: navalMesh(),
+  interceptor: interceptorMesh(),
 };
 
 /** Per-kind display scale so each reads at theater zoom without being absurd up close. */
@@ -372,6 +403,7 @@ export const UNIT_SCALE: Record<UnitKind, number> = {
   biped: 3.4,
   walker: 3,
   naval: 3, // ~180 m — reads as a ship against the 78 m ground vehicles
+  interceptor: 3, // ~210 m span, between a ground vehicle and the disc
 };
 
 /**
@@ -442,6 +474,17 @@ const PLATFORM_ICONS: Partial<Record<UnitKind, HTMLCanvasElement>> = {
     g.fill();
     g.stroke();
   }),
+  // Interceptor: the planform, which is the whole identity.
+  interceptor: iconCanvas((g) => {
+    g.beginPath();
+    g.moveTo(0, -19);
+    g.lineTo(18, 14);
+    g.lineTo(0, 7);
+    g.lineTo(-18, 14);
+    g.closePath();
+    g.fill();
+    g.stroke();
+  }),
   // Naval: a hull seen from above, with outriggers.
   naval: iconCanvas((g) => {
     g.beginPath();
@@ -481,4 +524,5 @@ export const HARDPOINTS: Partial<Record<UnitKind, Hardpoint>> = {
   biped: BIPED_HARDPOINT,
   walker: WALKER_HARDPOINT,
   naval: NAVAL_HARDPOINT,
+  interceptor: INTERCEPTOR_HARDPOINT,
 };
