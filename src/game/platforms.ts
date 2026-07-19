@@ -12,7 +12,7 @@ import type { UnitKind } from '../cesium/unitModels';
  * entry plus one `hasCapability` check at the point it matters.
  */
 
-export type PlatformId = UnitKind & ('drone' | 'spider' | 'biped' | 'walker');
+export type PlatformId = UnitKind & ('drone' | 'spider' | 'biped' | 'walker' | 'naval');
 
 /** What a piece of gear grants. The scene asks for these by name. */
 export type Capability = 'laser' | 'wide-sensor' | 'deep-scan' | 'detain';
@@ -103,6 +103,24 @@ export const PLATFORMS: PlatformDef[] = [
     altM: 0,
   },
   {
+    id: 'naval',
+    name: 'LITTORAL DRONE',
+    blurb:
+      'Trimaran hull that works the coast and the crossings. The only platform that can hold station over water, where the ground platforms cannot follow.',
+    cost: 16_000,
+    maxCount: 2,
+    expansion: {
+      count: 1,
+      cost: 18_000,
+      name: 'SECOND HULL',
+      blurb: 'A second littoral drone, so both sides of a strait can be held at once.',
+    },
+    hardpoints: 2,
+    sensorM: BASE_SENSOR_M,
+    speed: 90,
+    altM: 0,
+  },
+  {
     id: 'walker',
     name: 'COLOSSUS SIEGE WALKER',
     blurb:
@@ -171,8 +189,9 @@ export const GEAR: GearDef[] = [
     cost: 6500,
     grants: 'detain',
     requiresAuth: 'detain',
-    // Ground platforms only — you cannot detain anyone from a disc at cruise altitude.
-    fits: ['spider', 'biped', 'walker'],
+    // Anything that can physically reach a person. Not the disc — you cannot take someone into
+    // custody from cruise altitude.
+    fits: ['spider', 'biped', 'walker', 'naval'],
   },
   {
     id: 'deep-scan',
@@ -181,7 +200,7 @@ export const GEAR: GearDef[] = [
       'Tightens assessment on contacts inside the envelope — fewer false readings to act on.',
     cost: 7500,
     grants: 'deep-scan',
-    fits: ['drone', 'biped', 'walker'],
+    fits: ['drone', 'biped', 'walker', 'naval'],
   },
 ];
 

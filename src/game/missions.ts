@@ -352,6 +352,23 @@ export class Missions {
     return { type: 'progress' };
   }
 
+  /**
+   * Fail the active tasking outright, regardless of counters. Used when the theater itself is lost
+   * — the obelisk network being destroyed ends the job whatever the ledger said.
+   */
+  failActive(): MissionEvent {
+    const def = this.activeDef();
+    if (!def || !this.active) {
+      this.emit({ type: 'progress' });
+      return { type: 'progress' };
+    }
+    progression.restore(this.active.restore, def.penalty);
+    this.active = null;
+    const e: MissionEvent = { type: 'failed', mission: def };
+    this.emit(e);
+    return e;
+  }
+
   // ---- persistence -----------------------------------------------------------------------------
 
   private save(): void {
@@ -380,6 +397,28 @@ export class Missions {
     } catch {
       // Corrupt save: start the chain over rather than half-restoring it.
     }
+  }
+
+  /**
+   * Dev sandbox only: put the chain in the state it would be in after clearing everything up to
+   * and including `id`, with the rewards, authorizations and tolerance those clearances carry — so
+   * a jumped-to campaign behaves like a played one rather than an inconsistent half-state.
+   */
+  devCompleteThrough(id: string | null): void {
+    this.active = null;
+    this.completed.clear();
+    this.auths.clear();
+    tolerance.reset();
+    if (id !== null) {
+      for (const m of MISSIONS) {
+        this.completed.add(m.id);
+        if (m.grants) this.auths.add(m.grants);
+        tolerance.advance(m.toleranceGain);
+        progression.award(m.reward);
+        if (m.id === id) break;
+      }
+    }
+    this.emit({ type: 'progress' });
   }
 
   reset(): void {

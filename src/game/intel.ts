@@ -13,9 +13,9 @@ import type { UnitState } from '../cesium/units';
  *   ASSESSMENT — correlates strongly with the truth, but carries a false-positive tail. Roughly one
  *     in five units reading as a high-confidence threat is actually clean, so a player who marks on
  *     the number alone lands around 80% valid — survivable, but not a pass.
- *   RECORD — the infractions. Skewed by true state (an infected unit is likelier to carry severe
- *     charges), so it disambiguates the tail: a high assessment with nothing worse than an unreturned
- *     shopping cart is the false positive. Reading both beats reading either.
+ *   RECORD — the infractions. Skewed by true state, so it disambiguates the tail. It is also the
+ *     channel that lies hardest: PROTECTED units are company assets and carry the heaviest sheets
+ *     of anyone, so a severe record on its own means very little.
  */
 
 // ---- infractions -------------------------------------------------------------------------------
@@ -28,12 +28,12 @@ export interface Infraction {
 }
 
 /**
- * The charge catalog, ordered by severity. Kept to flat charge-sheet nouns — this is a targeting
- * console, and the register it's written in is the point: the interface reduces a person to a list
- * of entries, and an operator to someone reading it.
+ * The charge catalog, ordered by severity.
  *
- * At most 32 entries: a unit's record is a bitmask in one int, which is what makes carrying this
- * for 23,000 units free.
+ * Tier 1 is deliberately petty to the point of absurd. A system that files "stood on the left of
+ * the escalator" in the same ledger as a homicide is making a claim about itself, and the operator
+ * reads both on the same card in the same typeface — which is the entire joke and the entire point.
+ * The severe tiers stay flat charge-sheet nouns; the register is doing the work, not the detail.
  */
 export const INFRACTIONS: Infraction[] = [
   // 1 — petty
@@ -45,6 +45,20 @@ export const INFRACTIONS: Infraction[] = [
   { label: 'PUBLIC INTOXICATION', severity: 1 },
   { label: 'LITTERING', severity: 1 },
   { label: 'UNPAID PARKING CITATION', severity: 1 },
+  { label: 'IGNORED THREE CALLS FROM MOTHER', severity: 1 },
+  { label: 'LIBRARY BOOK 400 DAYS OVERDUE', severity: 1 },
+  { label: 'REPLIED ALL TO ENTIRE DIRECTORY', severity: 1 },
+  { label: 'STOOD ON THE LEFT OF THE ESCALATOR', severity: 1 },
+  { label: 'MICROWAVED FISH IN SHARED KITCHEN', severity: 1 },
+  { label: 'OCCUPIED TWO PARKING SPACES', severity: 1 },
+  { label: 'DECLINED INVITE WITHOUT COMMENT', severity: 1 },
+  { label: 'QUEUE JUMPING', severity: 1 },
+  { label: 'UNSORTED RECYCLING', severity: 1 },
+  { label: 'AUDIO PLAYED WITHOUT HEADPHONES', severity: 1 },
+  { label: 'FAILURE TO SIGNAL', severity: 1 },
+  { label: 'RETURNED HIRE VEHICLE UNFUELLED', severity: 1 },
+  { label: 'SPOILERS POSTED WITHOUT WARNING', severity: 1 },
+  { label: 'LEFT VOICEMAIL EXCEEDING 90 SECONDS', severity: 1 },
   // 2 — moderate
   { label: 'PETTY THEFT', severity: 2 },
   { label: 'VANDALISM', severity: 2 },
@@ -52,38 +66,57 @@ export const INFRACTIONS: Infraction[] = [
   { label: 'UNLICENSED FIREARM', severity: 2 },
   { label: 'DRIVING UNDER INFLUENCE', severity: 2 },
   { label: 'HARASSMENT', severity: 2 },
+  { label: 'BENEFIT FRAUD', severity: 2 },
+  { label: 'TAX EVASION', severity: 2 },
+  { label: 'FORGED CREDENTIALS', severity: 2 },
+  { label: 'OBSTRUCTING AN OFFICER', severity: 2 },
+  { label: 'UNLICENSED BROADCAST', severity: 2 },
   // 3 — severe
   { label: 'ASSAULT', severity: 3 },
   { label: 'ARMED ROBBERY', severity: 3 },
   { label: 'ARSON', severity: 3 },
   { label: 'TRAFFICKING', severity: 3 },
+  { label: 'EXTORTION', severity: 3 },
+  { label: 'WEAPONS DEALING', severity: 3 },
+  { label: 'ABDUCTION', severity: 3 },
   // 4 — critical
   { label: 'AGGRAVATED ASSAULT', severity: 4 },
   { label: 'SEXUAL ASSAULT', severity: 4 },
   { label: 'HOMICIDE', severity: 4 },
   { label: 'TERRORISTIC ACTIVITY', severity: 4 },
+  { label: 'MASS CASUALTY PLOT', severity: 4 },
+  { label: 'ORGANISED INSURGENCY', severity: 4 },
 ];
 
+/**
+ * A unit's record: catalog indices, worst first.
+ *
+ * This used to be a bitmask in one int, which was free but capped the catalog at 31 entries — and
+ * the catalog is now larger than that. A short array per unit costs a little more memory across
+ * ~24,000 units and removes the ceiling entirely.
+ */
+export type Record_ = number[];
+
 /** Index ranges per severity, so a roll can target a tier without scanning the catalog. */
-const BY_SEVERITY: Record<Severity, number[]> = { 1: [], 2: [], 3: [], 4: [] };
+const BY_SEVERITY: globalThis.Record<Severity, number[]> = { 1: [], 2: [], 3: [], 4: [] };
 for (let i = 0; i < INFRACTIONS.length; i++) BY_SEVERITY[INFRACTIONS[i].severity].push(i);
 
 /**
- * How many charges a unit carries, and how severe, per true state.
+ * How many charges a unit carries beyond its guaranteed petty one, and how severe.
  *
- * Protected units draw from the same range as everyone else — being inoculated says nothing about
- * a person's record, and a clean-looking protected unit with a severe charge is exactly the kind of
- * call the operator is being asked to make.
+ * PROTECTED is the outlier and deliberately so: company assets carry the heaviest sheets on the
+ * board. They are the trap — maximally guilty-looking, actually working for you — and the reason
+ * a severe record alone can never be enough to act on.
  */
-const RECORD_PROFILE: Record<UnitState, { maxCharges: number; weights: [number, number, number, number] }> = {
-  //                                             sev1  sev2  sev3  sev4
-  normal: { maxCharges: 2, weights: [0.74, 0.19, 0.06, 0.01] },
-  protected: { maxCharges: 3, weights: [0.6, 0.24, 0.11, 0.05] },
-  infected: { maxCharges: 4, weights: [0.24, 0.26, 0.28, 0.22] },
+const RECORD_PROFILE: globalThis.Record<
+  UnitState,
+  { extra: number; weights: [number, number, number, number] }
+> = {
+  //                                        sev1  sev2  sev3  sev4
+  normal: { extra: 2, weights: [0.7, 0.22, 0.07, 0.01] },
+  protected: { extra: 4, weights: [0.05, 0.15, 0.38, 0.42] },
+  infected: { extra: 4, weights: [0.22, 0.26, 0.28, 0.24] },
 };
-
-/** Chance a unit of each state has any record at all. */
-const HAS_RECORD: Record<UnitState, number> = { normal: 0.34, protected: 0.45, infected: 0.88 };
 
 function pickSeverity(weights: [number, number, number, number]): Severity {
   const r = Math.random();
@@ -95,36 +128,38 @@ function pickSeverity(weights: [number, number, number, number]): Severity {
   return 1;
 }
 
+function pickFrom(tier: number[]): number {
+  return tier[Math.floor(Math.random() * tier.length)];
+}
+
 /**
- * Roll a unit's criminal record as a bitmask over {@link INFRACTIONS}. Rolled once when the unit
- * spawns and never revised: a record is history, and history doesn't change when someone's
- * infection status does.
+ * Roll a unit's record. Rolled once when the unit spawns and never revised: a record is history,
+ * and history doesn't change when someone's infection status does.
+ *
+ * EVERYONE has a sheet. There is no such thing as a clean citizen here — the file always has
+ * something in it, even if what it has is an overdue library book, because a system that files
+ * everyone is the premise. The guaranteed entry is always petty; severity comes from what's
+ * stacked on top.
  */
-export function rollRecord(state: UnitState): number {
-  if (Math.random() > HAS_RECORD[state]) return 0;
+export function rollRecord(state: UnitState): Record_ {
   const profile = RECORD_PROFILE[state];
-  const n = 1 + Math.floor(Math.random() * profile.maxCharges);
-  let mask = 0;
-  for (let k = 0; k < n; k++) {
-    const tier = BY_SEVERITY[pickSeverity(profile.weights)];
-    mask |= 1 << tier[Math.floor(Math.random() * tier.length)];
-  }
-  return mask;
+  const out = new Set<number>([pickFrom(BY_SEVERITY[1])]);
+  const n = Math.floor(Math.random() * (profile.extra + 1));
+  for (let k = 0; k < n; k++) out.add(pickFrom(BY_SEVERITY[pickSeverity(profile.weights)]));
+  return [...out].sort((a, b) => INFRACTIONS[b].severity - INFRACTIONS[a].severity);
 }
 
-/** Decode a record bitmask into charges, worst first. */
-export function readRecord(mask: number): Infraction[] {
-  if (!mask) return [];
-  const out: Infraction[] = [];
-  for (let i = 0; i < INFRACTIONS.length; i++) if (mask & (1 << i)) out.push(INFRACTIONS[i]);
-  return out.sort((a, b) => b.severity - a.severity);
+/** Decode a record into charges, worst first. */
+export function readRecord(rec: Record_): Infraction[] {
+  return rec.map((i) => INFRACTIONS[i]).filter(Boolean);
 }
 
-/** The worst severity on a record, or 0 for a clean one. Drives the card's accent colour. */
-export function worstSeverity(mask: number): 0 | Severity {
+/** The worst severity on a record. Every unit has at least a 1. */
+export function worstSeverity(rec: Record_): 0 | Severity {
   let worst: 0 | Severity = 0;
-  for (let i = 0; i < INFRACTIONS.length; i++) {
-    if (mask & (1 << i) && INFRACTIONS[i].severity > worst) worst = INFRACTIONS[i].severity;
+  for (const i of rec) {
+    const s = INFRACTIONS[i]?.severity;
+    if (s && s > worst) worst = s;
   }
   return worst;
 }
@@ -172,7 +207,7 @@ export function assessBand(assess: number): 'threat' | 'suspect' | 'clear' {
   return assess >= ASSESS_SUSPECT ? 'suspect' : 'clear';
 }
 
-export const BAND_LABEL: Record<'threat' | 'suspect' | 'clear', string> = {
+export const BAND_LABEL: globalThis.Record<'threat' | 'suspect' | 'clear', string> = {
   threat: 'THREAT',
   suspect: 'SUSPECT',
   clear: 'CLEAR',

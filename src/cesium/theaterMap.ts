@@ -322,6 +322,14 @@ export interface TheaterMap {
   water: Cesium.Primitive;
   /** Sample the baked (already shore-snapped) grid — used to drape borders/grid lines. */
   heightAt(lon: number, lat: number): number;
+  /**
+   * Signed distance to the coastline in metres, positive on land, negative at sea.
+   *
+   * The same field the terrain and water shaders clip against, so navigation agrees with what is
+   * drawn to the pixel. Shipping follows it: a boat holding a fixed negative value is holding a
+   * fixed distance offshore, whatever shape the coast is.
+   */
+  shoreDistance(lon: number, lat: number): number;
   /** Frees the distance-field textures. The primitives are owned by the scene. */
   destroyMaterials(): void;
   bbox: [number, number, number, number];
@@ -571,6 +579,7 @@ export async function buildTheaterMap(
     primitive,
     water,
     heightAt: samplerFor(heights, N, bbox),
+    shoreDistance: shoreAt,
     destroyMaterials() {
       terrainMaterial.destroy();
       waterMaterial.destroy();

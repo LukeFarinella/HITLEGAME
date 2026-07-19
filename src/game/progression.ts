@@ -101,8 +101,11 @@ export const ASSETS: Asset[] = [
   },
 ];
 
-/** The state the campaign opens with. FIPS 53 = Washington. */
-export const HOME_STATE = '53';
+/**
+ * The campaign no longer opens anywhere in particular — the operator picks their own ground from
+ * the ten headline states before the first sortie. Until they have, `homeState` is null and the
+ * start window is what the game shows.
+ */
 
 /**
  * Starting officers. Enough to take the whole map and commission everything with room to spare —
@@ -125,6 +128,8 @@ export interface Saved {
   loadouts: Record<string, Loadout>;
   /** Units fielded per platform type. */
   counts: Record<string, number>;
+  /** FIPS of the state the campaign was founded in, or null if not yet chosen. */
+  homeState: string | null;
   /** Case-strength thresholds the marking automation works to, per order kind. */
   autoThresholds: Record<string, number>;
 }
@@ -133,6 +138,8 @@ export class Progression {
   private _officers = START_OFFICERS;
   private assets = new Set<AssetId>();
   private tiers = new Map<string, Tier>();
+  /** The state this campaign was founded in. Null until the operator has chosen. */
+  private _homeState: string | null = null;
   /** Fitted gear per platform TYPE — every unit of a type carries the same loadout. */
   private loadouts = new Map<PlatformId, Loadout>();
   /** How many units of each platform are fielded. */
@@ -167,6 +174,27 @@ export class Progression {
     return this.assets.has(id);
   }
 
+  get homeState(): string | null {
+    return this._homeState;
+  }
+
+  /**
+   * Found the campaign in a state: it becomes home, unlocked at downtown tier, and the opening
+   * arachnid is fielded. Only valid once, and only before anything else has been taken.
+   */
+  chooseHome(fips: string): boolean {
+    if (this._homeState) return false;
+    this._homeState = fips;
+    this.tiers.set(fips, 1);
+    const spider = PLATFORM_BY_ID.get('spider');
+    if (spider) {
+      this.counts.set('spider', 1);
+      if (!this.loadouts.has('spider')) this.loadouts.set('spider', emptyLoadout(spider));
+    }
+    this.changed();
+    return true;
+  }
+
   tierOf(state: StateTerritory | string): Tier {
     const id = typeof state === 'string' ? state : state.id;
     return this.tiers.get(id) ?? 0;
@@ -182,9 +210,38 @@ export class Progression {
     return () => this.listeners.delete(fn);
   }
 
+  private batching = 0;
+  private dirty = false;
+
   private changed(): void {
+    if (this.batching > 0) {
+      this.dirty = true;
+      return;
+    }
     this.save();
     for (const fn of this.listeners) fn();
+  }
+
+  /**
+   * Run a group of purchases as one transaction.
+   *
+   * Every purchase normally saves and notifies, and one of those listeners rebuilds the orbit heat
+   * field from all 115k sites — so a bulk operation (taking all 52 states to proliferation is 156
+   * purchases) paid for that rebuild 156 times and blocked for three seconds. Batching collapses it
+   * to a single save and a single notify at the end.
+   */
+  batch(fn: () => void): void {
+    this.batching++;
+    try {
+      fn();
+    } finally {
+      this.batching--;
+      if (this.batching === 0 && this.dirty) {
+        this.dirty = false;
+        this.save();
+        for (const l of this.listeners) l();
+      }
+    }
   }
 
   // ---- purchases -------------------------------------------------------------------------------
@@ -484,6 +541,7 @@ export class Progression {
       // quietly track every hardpoint change made after it was taken.
       loadouts: Object.fromEntries([...this.loadouts].map(([id, l]) => [id, [...l]])),
       counts: Object.fromEntries(this.counts),
+      homeState: this._homeState,
       autoThresholds: Object.fromEntries(this.autoThresholds),
     };
   }
@@ -497,6 +555,7 @@ export class Progression {
       Object.entries(snap.loadouts ?? {}).map(([id, l]) => [id as PlatformId, [...l]]),
     );
     this.counts = new Map(Object.entries(snap.counts ?? {}) as [PlatformId, number][]);
+    this._homeState = snap.homeState ?? null;
     for (const [k, v] of Object.entries(snap.autoThresholds ?? {})) this.autoThresholds.set(k, v);
     this.changed();
   }
@@ -504,6 +563,12 @@ export class Progression {
   /** Straight award, for mission completion. */
   award(amount: number): void {
     this._officers += amount;
+    this.changed();
+  }
+
+  /** Dev sandbox only. */
+  setOfficers(n: number): void {
+    this._officers = Math.max(0, Math.round(n));
     this.changed();
   }
 
@@ -525,10 +590,7 @@ export class Progression {
     } catch {
       saved = undefined;
     }
-    if (!saved) {
-      this.grantOpeningPosition();
-      return;
-    }
+    if (!saved) return; // nothing granted until a home state is chosen
     this._officers = typeof saved.officers === 'number' ? saved.officers : START_OFFICERS;
     for (const id of saved.assets ?? []) this.assets.add(id);
     for (const [id, tier] of Object.entries(saved.tiers ?? {})) this.tiers.set(id, tier);
@@ -547,21 +609,7 @@ export class Progression {
       }
       this.loadouts.set(id as PlatformId, slots);
     }
-    if (this.tiers.size === 0) this.tiers.set(HOME_STATE, 1);
-  }
-
-  /**
-   * What a fresh campaign starts holding: Washington's downtown site, and one arachnid scout in
-   * the field. Starting with a platform rather than nothing means the theater has something to be
-   * commanded with on the very first sortie.
-   */
-  private grantOpeningPosition(): void {
-    this.tiers.set(HOME_STATE, 1);
-    const spider = PLATFORM_BY_ID.get('spider');
-    if (spider) {
-      this.counts.set('spider', 1);
-      this.loadouts.set('spider', emptyLoadout(spider));
-    }
+    this._homeState = saved.homeState ?? null;
   }
 
   /** Wipe the campaign back to its opening position. Wired to the dev panel. */
@@ -575,7 +623,8 @@ export class Progression {
       ['investigate', 0.7],
       ['execute', 0.85],
     ]);
-    this.grantOpeningPosition();
+    // Back to the very beginning: no ground, no platform, and the start window again.
+    this._homeState = null;
     this.changed();
   }
 }

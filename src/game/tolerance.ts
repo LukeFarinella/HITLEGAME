@@ -1,4 +1,4 @@
-import { worstSeverity } from './intel';
+import { worstSeverity, type Record_ } from './intel';
 
 /**
  * What the public will put up with.
@@ -23,7 +23,7 @@ export const TOLERANCE_START = 0.28;
  * the record is what a person has actually done. Weighted so a critical charge can't carry a contact
  * the sensors think is clean, and a hot reading can't carry one with nothing on file.
  */
-export function caseStrength(assess: number, record: number): number {
+export function caseStrength(assess: number, record: Record_): number {
   return 0.55 * assess + 0.45 * (worstSeverity(record) / 4);
 }
 
@@ -53,7 +53,7 @@ class PublicTolerance {
   }
 
   /** Whether a contact's case clears the bar. `override` is EMERGENCY POWERS. */
-  clears(assess: number, record: number, override = false): boolean {
+  clears(assess: number, record: Record_, override = false): boolean {
     return override || caseStrength(assess, record) >= this.threshold;
   }
 
@@ -68,6 +68,13 @@ class PublicTolerance {
   onChange(fn: () => void): () => void {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
+  }
+
+  /** Dev sandbox only: jump straight to a level so any point in the campaign can be inspected. */
+  setLevel(v: number): void {
+    this.value = Math.min(1, Math.max(0, v));
+    this.save();
+    for (const fn of this.listeners) fn();
   }
 
   reset(): void {

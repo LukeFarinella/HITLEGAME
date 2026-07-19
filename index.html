@@ -133,8 +133,37 @@
             <span>Keep off crossing streets</span>
           </label>
           <button class="dev-regen" id="dev-regen" type="button">↻ REGENERATE CITY</button>
+          <p class="dev-note">Adjustments rebuild the current theater's skyline. Enter a theater to see them.</p>
+
+          <!-- Sandbox: jump the campaign to any point so every stage can be played without
+               grinding to it. Everything here writes real state, not a preview. -->
+          <div class="dev-sect">SANDBOX</div>
+          <label class="dev-row" for="dev-tolerance">
+            <span class="dev-k">Public tolerance <span class="dev-v" id="dev-tolerance-val">—</span></span>
+            <input type="range" id="dev-tolerance" min="0" max="100" step="1" value="28" />
+          </label>
+          <label class="dev-row" for="dev-resistance">
+            <span class="dev-k">Resistance <span class="dev-v" id="dev-resistance-val">—</span></span>
+            <input type="range" id="dev-resistance" min="0" max="100" step="1" value="0" />
+          </label>
+          <label class="dev-row" for="dev-officers">
+            <span class="dev-k">Officers <span class="dev-v" id="dev-officers-val">—</span></span>
+            <input type="range" id="dev-officers" min="0" max="1000000" step="5000" value="250000" />
+          </label>
+
+          <div class="dev-k">Chain cleared through</div>
+          <div class="dev-chain" id="dev-chain"></div>
+
+          <div class="dev-k">Grant</div>
+          <div class="dev-grants">
+            <button class="dev-mini" id="dev-grant-territory" type="button">ALL TERRITORY</button>
+            <button class="dev-mini" id="dev-grant-platforms" type="button">ALL PLATFORMS</button>
+            <button class="dev-mini" id="dev-grant-gear" type="button">ALL GEAR</button>
+            <button class="dev-mini" id="dev-grant-network" type="button">ALL NETWORK</button>
+          </div>
+
           <button class="dev-regen" id="dev-reset" type="button">↺ RESET CAMPAIGN</button>
-          <p class="dev-note">Adjustments rebuild the current theater's skyline. Enter a theater to see them. Reset returns the campaign to Washington downtown with full starting officers.</p>
+          <p class="dev-note">Reset clears everything, including the founding choice.</p>
         </div>
       </div>
     </div>

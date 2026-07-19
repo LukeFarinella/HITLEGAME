@@ -11,7 +11,7 @@ import {
 import { PLATFORM_BY_ID, type PlatformId } from '../game/platforms';
 import type { RoadNet, RoadClass } from './roads';
 import type { SensorField } from './sensors';
-import { assessBand, rollAssessment, rollRecord } from '../game/intel';
+import { assessBand, rollAssessment, rollRecord, type Record_ } from '../game/intel';
 import type { MarkKind } from '../game/missions';
 import { caseStrength, tolerance } from '../game/tolerance';
 
@@ -127,6 +127,7 @@ const SPEED: Record<UnitKind, number> = {
   spider: PLATFORM_BY_ID.get('spider')!.speed,
   biped: PLATFORM_BY_ID.get('biped')!.speed,
   walker: PLATFORM_BY_ID.get('walker')!.speed,
+  naval: PLATFORM_BY_ID.get('naval')!.speed,
 };
 /**
  * Height above the sampled ground, metres. Land/foot clear the road ribbon (draped at +12) so
@@ -142,6 +143,7 @@ const RIDE_HEIGHT: Record<UnitKind, number> = {
   spider: 2,
   biped: 2,
   walker: 2,
+  naval: 1, // floats on the water plane, like the ambient shipping
 };
 
 /**
@@ -154,6 +156,37 @@ const ARRIVE_M = 120;
 
 /** March speed for a contact being routed into coverage by the delivery pass. */
 const DELIVERY_SPEED = 55;
+
+/**
+ * How far offshore coastal shipping runs, and how hard it corrects back to that line.
+ *
+ * Boats navigate on the theater map's shoreline distance field rather than on sampled elevation:
+ * the field is signed, continuous, and already ~6 m precise near the coast, so "hold 100 m off the
+ * beach" is literally "hold shoreDistance at -100" and the shape of the coastline comes for free.
+ */
+const COAST_STANDOFF_M = 100;
+/** Cross-track error, in metres, that produces a full correction toward the line. */
+const COAST_CORRECTION_M = 130;
+/** How far ahead a boat looks for a coast that turns faster than it can correct. */
+const COAST_PROBE_M = 110;
+/** Inside this distance of its destination a ferry docks and runs the leg back. */
+const FERRY_ARRIVE_M = 700;
+
+/** Shortest-arc blend between two bearings. */
+function blendAngle(a: number, b: number, t: number): number {
+  let d = ((b - a + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+  return a + d * t;
+}
+
+/**
+ * Spare instance slots kept in the FOOT batch beyond the ambient population.
+ *
+ * Hidden pockets and siege attackers are both foot units appended after the ambient field, and an
+ * instanced batch silently drops anything past its capacity — so sizing the batch to exactly the
+ * ambient count made every pocket and every attacker invisible while remaining perfectly present
+ * in the model. Sized for the worst case: 10 pockets at full resistance, plus the attacker.
+ */
+export const FOOT_SPAWN_HEADROOM = 1200;
 
 /**
  * Camera distance past which the 24 px platform icons take over from the meshes. Set just above
@@ -326,8 +359,8 @@ interface Unit {
   state: UnitState;
   /** Displayed infection likelihood, 0–1. Re-rolled when `state` changes. See game/intel.ts. */
   assess: number;
-  /** Bitmask of infractions over the intel catalog. Rolled at spawn, never revised. */
-  record: number;
+  /** Infraction indices over the intel catalog, worst first. Rolled at spawn, never revised. */
+  record: Record_;
   lon: number;
   lat: number;
   heading: number;
@@ -358,6 +391,13 @@ interface Unit {
   dir?: 1 | -1;
   // sea/air: free wander
   turn?: number; // radians/sec bias
+  /**
+   * Sea behaviour. Coastal shipping hugs the shoreline at a fixed standoff; ferries run a fixed
+   * leg between two ports and turn around at each end.
+   */
+  sea?:
+    | { mode: 'coastal'; /** +1 runs the coast one way round the landmass, -1 the other. */ side: 1 | -1; standoffM: number }
+    | { mode: 'ferry'; a: [number, number]; b: [number, number]; toB: boolean };
   // drone: commanded destination (RMB order); absent once it arrives and holds station
   tlon?: number;
   tlat?: number;
@@ -366,7 +406,7 @@ interface Unit {
 /** Callsign prefix per kind. */
 const CALLSIGN: Record<UnitKind, string> = {
   land: 'CV', sea: 'SV', air: 'AV', foot: 'FT',
-  drone: 'GORGON', spider: 'ARC', biped: 'MAR', walker: 'COL',
+  drone: 'GORGON', spider: 'ARC', biped: 'MAR', walker: 'COL', naval: 'LIT',
 };
 /** Human label per kind, for the panel. */
 export const KIND_LABEL: Record<UnitKind, string> = {
@@ -378,6 +418,7 @@ export const KIND_LABEL: Record<UnitKind, string> = {
   spider: 'ARACHNID SCOUT',
   biped: 'MARSHAL BIPED',
   walker: 'COLOSSUS SIEGE WALKER',
+  naval: 'LITTORAL DRONE',
 };
 
 /** Metres/second per kind (mirrors SPEED) surfaced for the panel. */
@@ -399,8 +440,12 @@ export interface SelectionInfo {
    * that's ACTUALLY standing rather than the one the current tasking would issue.
    */
   markedKind: MarkKind | null;
-  /** How many of the selection clear BOTH gates and can actually be ordered against. */
+  /** How many of the selection can be ordered against — i.e. are under sensor contact. */
   orderableCount: number;
+  /** Of those, how many fall below the public-tolerance bar and would harden the ground. */
+  belowToleranceCount: number;
+  /** Worst shortfall in the selection, for sizing the warning. */
+  worstShortfall: number;
   /** How many of the selection are still inside their rescind window. */
   pendingCount: number;
   /** Shortest countdown left across the selection, seconds. 0 when nothing is pending. */
@@ -418,8 +463,8 @@ export interface SelectionInfo {
     kind: UnitKind;
     /** Displayed infection likelihood, 0–1 — NOT the true state, which the card never shows. */
     assess: number;
-    /** Infraction bitmask, for the card's charge sheet. */
-    record: number;
+    /** Infraction indices, for the card's charge sheet. */
+    record: Record_;
     lon: number;
     lat: number;
     heading: number;
@@ -441,6 +486,9 @@ export interface SelectionInfo {
 export interface Execution {
   index: number;
   id: string;
+  /** Where it landed, for the crowd reaction. */
+  lon: number;
+  lat: number;
   from: Cesium.Cartesian3;
   to: Cesium.Cartesian3;
   valid: boolean;
@@ -517,6 +565,11 @@ export interface UnitFieldOptions {
   air: number;
   foot: number;
   /**
+   * Ports for ferry routes: water points just off populated coast. Empty in a landlocked theater,
+   * in which case only coastal shipping is spawned.
+   */
+  ports?: [number, number][];
+  /**
    * Which player platforms are fielded, and where each starts. One of each at most — these are
    * hero units, and they're deliberately given separate positions so they aren't stacked on the
    * theater centre where they can't be told apart or clicked individually.
@@ -531,9 +584,10 @@ export class UnitField {
   private center: { lon: number; lat: number };
   private radiusM: number;
   private heightAt: (lon: number, lat: number) => number;
+  private shoreAt: (lon: number, lat: number) => number;
   private scratch = new Cesium.Cartesian3();
   private nextId: Record<UnitKind, number> = {
-    land: 0, sea: 0, air: 0, foot: 0, drone: 0, spider: 0, biped: 0, walker: 0,
+    land: 0, sea: 0, air: 0, foot: 0, drone: 0, spider: 0, biped: 0, walker: 0, naval: 0,
   };
   /** Obelisk coverage test, used both to seed infection and to steer it toward the dark. */
   private isCovered?: (lon: number, lat: number) => boolean;
@@ -577,10 +631,14 @@ export class UnitField {
     net: RoadNet | undefined,
     counts: UnitFieldOptions,
     isCovered?: (lon: number, lat: number) => boolean,
+    /** Signed distance to the coast, positive on land. Shipping navigates on this. */
+    shoreAt?: (lon: number, lat: number) => number,
   ) {
     this.center = center;
     this.radiusM = radiusM;
     this.heightAt = heightAt;
+    // Fall back to elevation when no field is supplied: crude, but it keeps boats off the beach.
+    this.shoreAt = shoreAt ?? ((lon, lat) => -heightAt(lon, lat));
     this.isCovered = isCovered;
     if (net && net.roads.length) this.graph = new RoadGraph(net, isCovered);
 
@@ -592,19 +650,22 @@ export class UnitField {
       land: new InstancedModelBatch(UNIT_MESHES.land, counts.land, bounds, true),
       sea: new InstancedModelBatch(UNIT_MESHES.sea, counts.sea, bounds, true),
       air: new InstancedModelBatch(UNIT_MESHES.air, counts.air, bounds, true),
-      foot: new InstancedModelBatch(UNIT_MESHES.foot, counts.foot, bounds, true),
+      foot: new InstancedModelBatch(UNIT_MESHES.foot, counts.foot + FOOT_SPAWN_HEADROOM, bounds, true),
       drone: new InstancedModelBatch(UNIT_MESHES.drone, PLATFORM_BY_ID.get('drone')!.maxCount, bounds, true),
       spider: new InstancedModelBatch(UNIT_MESHES.spider, PLATFORM_BY_ID.get('spider')!.maxCount, bounds, true),
       biped: new InstancedModelBatch(UNIT_MESHES.biped, PLATFORM_BY_ID.get('biped')!.maxCount, bounds, true),
       walker: new InstancedModelBatch(UNIT_MESHES.walker, PLATFORM_BY_ID.get('walker')!.maxCount, bounds, true),
+      naval: new InstancedModelBatch(UNIT_MESHES.naval, PLATFORM_BY_ID.get('naval')!.maxCount, bounds, true),
     };
 
     // Vehicles favour freeways heavily (constant motorway flow); pedestrians stay on surface streets.
     this.spawnRoadUnits('land', counts.land, 0.45);
     this.spawnRoadUnits('foot', counts.foot, 0);
-    this.spawnWaterUnits(counts.sea);
+    this.spawnWaterUnits(counts.sea, counts.ports ?? []);
     this.spawnAirUnits(counts.air);
+    this.footCapacity = counts.foot + FOOT_SPAWN_HEADROOM;
     for (const p of counts.platforms) this.spawnPlatform(p.id, p.lon, p.lat);
+    for (const u of this.units) if (u.state === 'protected') this.protectedAtSpawn++;
     this.ecef = new Float64Array(this.units.length * 3);
     this.buildPlatformVisuals();
   }
@@ -630,7 +691,7 @@ export class UnitField {
   }
 
   /** Everything a spawning unit needs: its true state, plus the two things C2 gets to see. */
-  private rollIntel(lon: number, lat: number): { state: UnitState; assess: number; record: number } {
+  private rollIntel(lon: number, lat: number): { state: UnitState; assess: number; record: Record_ } {
     const state = this.rollState(lon, lat);
     return { state, assess: rollAssessment(state), record: rollRecord(state) };
   }
@@ -664,11 +725,58 @@ export class UnitField {
     };
   }
 
-  private spawnWaterUnits(n: number): void {
+  /**
+   * Sea traffic is two populations, not one wandering mass.
+   *
+   * COASTAL shipping hugs the shoreline at a fixed standoff, which is what makes a coast read as a
+   * coast from altitude — a line of traffic tracing it. FERRIES run fixed legs between ports, so
+   * the water between populated landmasses has something crossing it.
+   *
+   * A landlocked theater simply gets no shipping; the attempt budget runs out and that's correct.
+   */
+  private spawnWaterUnits(n: number, ports: [number, number][]): void {
+    if (n <= 0) return;
+    // Explicit quotas rather than a per-attempt coin flip. Coastal placement is picky — it needs a
+    // point inside a narrow band off the shore — so a shared loop retried its failures into the
+    // ferry branch and inverted the mix (measured 59% ferries against an intended 30%).
+    const ferryQuota = ports.length >= 2 ? Math.round(n * 0.3) : 0;
+    const coastalQuota = n - ferryQuota;
+
+    let ferries = 0;
     let tries = 0;
-    for (let i = 0; i < n && tries < n * 40; tries++) {
+    while (ferries < ferryQuota && tries < ferryQuota * 40) {
+      tries++;
+      {
+        const a = ports[Math.floor(Math.random() * ports.length)];
+        const b = ports[Math.floor(Math.random() * ports.length)];
+        if (a === b) continue;
+        // Enter the leg at a random point along it, so a route is populated rather than departing.
+        const t = Math.random();
+        const lon = a[0] + (b[0] - a[0]) * t;
+        const lat = a[1] + (b[1] - a[1]) * t;
+        if (this.shoreAt(lon, lat) > -20) continue; // this leg crosses land — try another pair
+        this.units.push({
+          id: this.mkId('sea'),
+          kind: 'sea',
+          ...this.rollIntel(lon, lat),
+          lon,
+          lat,
+          heading: bearing(lon, lat, b[0], b[1]),
+          mark: null,
+          sea: { mode: 'ferry', a, b, toB: true },
+        });
+        ferries++;
+      }
+    }
+
+    let coastal = 0;
+    tries = 0;
+    while (coastal < coastalQuota && tries < coastalQuota * 60) {
+      tries++;
       const p = this.randomInDisc();
-      if (this.heightAt(p.lon, p.lat) > -3) continue; // must be water
+      const d = this.shoreAt(p.lon, p.lat);
+      // The coastal band: at sea, but not out in deep water where there is no coast to follow.
+      if (d > -30 || d < -4000) continue;
       this.units.push({
         id: this.mkId('sea'),
         kind: 'sea',
@@ -677,10 +785,90 @@ export class UnitField {
         lat: p.lat,
         heading: Math.random() * Math.PI * 2,
         mark: null,
-        turn: 0,
+        sea: {
+          mode: 'coastal',
+          side: Math.random() < 0.5 ? 1 : -1,
+          // Spread the lanes a little so shipping isn't a single hairline.
+          standoffM: COAST_STANDOFF_M * (0.7 + Math.random() * 0.9),
+        },
       });
-      i++;
+      coastal++;
     }
+  }
+
+  /**
+   * Steer one boat.
+   *
+   * Coastal boats run a shore-following controller. The distance field gives cross-track error
+   * directly — how far off the intended standoff the boat is — and its gradient gives which way the
+   * coast runs, so the heading is simply "along the coast, blended toward the line". Ferries just
+   * run their leg and turn around.
+   */
+  private stepSea(u: Unit, dt: number): void {
+    const cfg = u.sea;
+    if (!cfg) return this.stepFree(u, dt);
+    const mLon = mPerLat * Math.cos(u.lat * DEG);
+    const step = SPEED.sea * dt;
+
+    if (cfg.mode === 'ferry') {
+      const t = cfg.toB ? cfg.b : cfg.a;
+      const dx = (t[0] - u.lon) * mLon;
+      const dy = (t[1] - u.lat) * mPerLat;
+      const dist = Math.hypot(dx, dy);
+      if (dist <= FERRY_ARRIVE_M) {
+        cfg.toB = !cfg.toB; // dock, then run it back
+        return;
+      }
+      u.heading = Math.atan2(dx, dy);
+      u.lon += (step * (dx / dist)) / mLon;
+      u.lat += (step * (dy / dist)) / mPerLat;
+      return;
+    }
+
+    // Numerical gradient of the shore field. It points inland, so its perpendicular runs along
+    // the coast — which is the heading a boat tracing the shoreline wants.
+    const e = 60; // metres
+    const dLon = e / mLon;
+    const dLat = e / mPerLat;
+    const here = this.shoreAt(u.lon, u.lat);
+    const gx = (this.shoreAt(u.lon + dLon, u.lat) - this.shoreAt(u.lon - dLon, u.lat)) / (2 * e);
+    const gy = (this.shoreAt(u.lon, u.lat + dLat) - this.shoreAt(u.lon, u.lat - dLat)) / (2 * e);
+    const gLen = Math.hypot(gx, gy);
+
+    if (gLen < 1e-6) {
+      // Flat field: open ocean with no coast in reach. Drift and let the disc bounce handle it.
+      u.heading += (Math.random() - 0.5) * 0.25;
+    } else {
+      const inland = Math.atan2(gx / gLen, gy / gLen); // bearing, x=east y=north
+      const along = inland + cfg.side * (Math.PI / 2);
+      // Target line is shoreDistance === -standoff; positive error means too close to land.
+      const err = here + cfg.standoffM;
+      const toward = err > 0 ? inland + Math.PI : inland; // out to sea, or back toward the coast
+      const w = Math.min(1, Math.abs(err) / COAST_CORRECTION_M) * 0.75;
+      u.heading = blendAngle(along, toward, w);
+    }
+
+    const nlon = u.lon + (step * Math.sin(u.heading)) / mLon;
+    const nlat = u.lat + (step * Math.cos(u.heading)) / mPerLat;
+
+    // Hard stop at the beach — never let a rounding error walk a boat onto land.
+    if (this.shoreAt(nlon, nlat) > -8) {
+      u.heading += Math.PI * (0.5 + Math.random() * 0.5);
+      return;
+    }
+    const dxc = (nlon - this.center.lon) * mLon;
+    const dyc = (nlat - this.center.lat) * mPerLat;
+    if (Math.hypot(dxc, dyc) > this.radiusM * 0.98) {
+      u.heading += Math.PI * (0.5 + Math.random() * 0.5);
+      return;
+    }
+    u.lon = nlon;
+    u.lat = nlat;
+
+    // Look ahead for a coast that turns faster than the controller can correct, and cut inside it.
+    const aLon = u.lon + (COAST_PROBE_M * Math.sin(u.heading)) / mLon;
+    const aLat = u.lat + (COAST_PROBE_M * Math.cos(u.heading)) / mPerLat;
+    if (this.shoreAt(aLon, aLat) > -10) u.heading += cfg.side * 0.4;
   }
 
   private spawnAirUnits(n: number): void {
@@ -709,7 +897,7 @@ export class UnitField {
       kind: id,
       state: 'protected', // friendly asset — never rolls infected
       assess: 0,
-      record: 0,
+      record: [],
       lon,
       lat,
       heading: 0,
@@ -753,6 +941,7 @@ export class UnitField {
       else if (u.deliver) this.stepDeliver(u, d);
       else if (u.kind === 'land' || u.kind === 'foot') this.stepRoad(u, d);
       else if (PLATFORM_KINDS.includes(u.kind)) this.stepPlatform(u, d);
+      else if (u.kind === 'sea') this.stepSea(u, d);
       else this.stepFree(u, d);
     }
     this.stepContagion(d);
@@ -891,6 +1080,14 @@ export class UnitField {
     u.lat += (step * (dy / dist)) / mPerLat;
   }
 
+  /** Foot instance slots still available beyond what the batch is already drawing. */
+  private footHeadroomLeft(): number {
+    let alive = 0;
+    for (const u of this.units) if (u.kind === 'foot' && !u.dead) alive++;
+    return Math.max(0, this.footCapacity - alive);
+  }
+  private footCapacity = 0;
+
   /**
    * Route one confirmed infected contact into sensor coverage.
    *
@@ -924,7 +1121,10 @@ export class UnitField {
    */
   spawnHiddenCluster(lon: number, lat: number, n: number, spreadM: number): number {
     const before = this.units.length;
-    for (let k = 0; k < n; k++) {
+    // Never spawn past what the batch can draw — an invisible pocket is worse than a smaller one.
+    const room = this.footHeadroomLeft();
+    const want = Math.min(n, room);
+    for (let k = 0; k < want; k++) {
       const a = Math.random() * Math.PI * 2;
       const r = Math.sqrt(Math.random()) * spreadM;
       const mLon = mPerLat * Math.cos(lat * DEG);
@@ -1005,10 +1205,15 @@ export class UnitField {
     return null;
   }
 
-  /** Order the currently selected platform to a ground point. False if none is selected. */
+  /**
+   * Order the currently selected platform to a point. False if none is selected — or if the order
+   * doesn't make sense for it: a littoral drone cannot be sent inland, and refusing outright is
+   * clearer than watching it swim up a valley.
+   */
   orderSelected(lon: number, lat: number): boolean {
     const sel = this.selectedPlatform();
     if (!sel) return false;
+    if (sel.kind === 'naval' && this.shoreAt(lon, lat) > -60) return false;
     const u = this.units[sel.index];
     u.tlon = lon;
     u.tlat = lat;
@@ -1072,13 +1277,25 @@ export class UnitField {
   /**
    * Whether an order can be issued against a contact at all.
    *
-   * Two independent gates, and both have to pass. SENSOR CONTACT is physical — C2 cannot task
-   * what it cannot see. PUBLIC TOLERANCE is political — early in the campaign nobody has agreed
-   * to any of this, so only a contact with an overwhelming case can be touched. The second gate
-   * is the one that moves over a campaign, and it is what the tolerance bar reports.
+   * Only ONE hard gate remains: sensor contact. C2 cannot task what it cannot see, and no amount of
+   * political will changes that.
+   *
+   * Public tolerance used to be a second wall here. It isn't any more — an operator may order
+   * against anyone they can see, however thin the case. What a thin case costs is RESISTANCE (see
+   * game/resistance.ts): the ground hardens, and hardened ground produces more attacks and bigger
+   * pockets. "You may not" became "you may, and here is the bill".
    */
   private isOrderable(u: Unit): boolean {
-    return this.isTracked(u) && tolerance.clears(u.assess, u.record, this.toleranceOverride);
+    return this.isTracked(u);
+  }
+
+  /**
+   * How far under the public-tolerance bar a contact's case falls, 0 when it clears. This is what
+   * the resistance meter is charged against.
+   */
+  private shortfall(u: Unit): number {
+    if (this.toleranceOverride) return 0;
+    return Math.max(0, tolerance.threshold - caseStrength(u.assess, u.record));
   }
 
   /** Set by the scene when EMERGENCY POWERS is held — the tolerance gate stops applying. */
@@ -1406,7 +1623,14 @@ export class UnitField {
     return best >= 0;
   }
 
-  /** Select every unit whose screen position falls inside a drag box. Returns the count. */
+  /**
+   * Select every unit whose screen position falls inside a drag box. Returns the count.
+   *
+   * FRIENDLY FIRST: if any of the player's own platforms fall in the box, the box selects only
+   * those. Dragging over a city to grab a walker would otherwise return four thousand civilians
+   * with the walker buried among them, and "select my units" is overwhelmingly what a box drag
+   * over your own hardware means.
+   */
   pickBox(scene: Cesium.Scene, x0: number, y0: number, x1: number, y1: number): number {
     const toWin = this.toWin();
     this.selection.clear();
@@ -1426,6 +1650,12 @@ export class UnitField {
       if (!win) continue;
       if (win.x >= lx && win.x <= hx && win.y >= ly && win.y <= hy) this.selection.add(i);
     }
+
+    const friendly = [...this.selection].filter((i) => PLATFORM_KINDS.includes(this.units[i].kind));
+    if (friendly.length) {
+      this.selection.clear();
+      for (const i of friendly) this.selection.add(i);
+    }
     return this.selection.size;
   }
 
@@ -1437,7 +1667,7 @@ export class UnitField {
   selected(): SelectionInfo | null {
     if (this.selection.size === 0) return null;
     const byKind: Record<UnitKind, number> = {
-      land: 0, sea: 0, air: 0, foot: 0, drone: 0, spider: 0, biped: 0, walker: 0,
+      land: 0, sea: 0, air: 0, foot: 0, drone: 0, spider: 0, biped: 0, walker: 0, naval: 0,
     };
     const byBand: Record<'clear' | 'suspect' | 'threat', number> = { clear: 0, suspect: 0, threat: 0 };
     let markedCount = 0;
@@ -1449,6 +1679,8 @@ export class UnitField {
     let mixedKinds = false;
     let pendingCount = 0;
     let orderableCount = 0;
+    let belowToleranceCount = 0;
+    let worstShortfall = 0;
     let pendingSeconds = Infinity;
     for (const i of this.selection) {
       const u = this.units[i];
@@ -1466,7 +1698,14 @@ export class UnitField {
         }
       }
       if (this.isTracked(u)) trackedCount++;
-      if (this.isOrderable(u)) orderableCount++;
+      if (this.isOrderable(u)) {
+        orderableCount++;
+        const under = this.shortfall(u);
+        if (under > 0) {
+          belowToleranceCount++;
+          if (under > worstShortfall) worstShortfall = under;
+        }
+      }
       one = u;
       oneIdx = i;
     }
@@ -1478,6 +1717,8 @@ export class UnitField {
       markedCount,
       markedKind: mixedKinds ? null : markedKind,
       orderableCount,
+      belowToleranceCount,
+      worstShortfall,
       pendingCount,
       pendingSeconds: pendingCount ? pendingSeconds : 0,
       trackedCount,
@@ -1536,10 +1777,14 @@ export class UnitField {
    * commits later in {@link advanceOrders} — so issuing an order has no consequence yet, and
    * rescinding one mid-countdown leaves no trace in the ledger.
    *
-   * Returns how many orders were issued or rescinded, for the caller's UI.
+   * Returns the count of orders issued or rescinded, the tolerance shortfall of each one issued
+   * below the bar (charged to resistance), and how many of them were PROTECTED — company assets,
+   * which cost real money to burn. The caller settles both bills.
    */
-  markSelected(kind: MarkKind, on: boolean): number {
+  markSelected(kind: MarkKind, on: boolean): { n: number; shortfalls: number[]; assets: number } {
     let n = 0;
+    let assets = 0;
+    const shortfalls: number[] = [];
     for (const i of this.selection) {
       const u = this.units[i];
       if (u.dead || !this.isOrderable(u)) continue;
@@ -1556,21 +1801,25 @@ export class UnitField {
       if (u.mark === kind) continue; // already standing — don't restart its countdown
       u.mark = kind;
       u.markTimer = ORDER_DELAY[kind];
+      const under = this.shortfall(u);
+      if (under > 0) shortfalls.push(under);
+      if (u.state === 'protected') assets++;
       n++;
     }
     this.rebuildMarks();
-    return n;
+    return { n, shortfalls, assets };
   }
 
   /**
    * Age every pending order and commit the ones whose window has closed.
    *
-   * Returns the verdict on each investigation that committed this tick, settled against the unit's
-   * true state at the moment it commits — not when it was ordered. Executions commit to ARMED here
-   * and are scored later, when a laser actually services them.
+   * Returns the verdict on each investigation that committed this tick — settled against the unit's
+   * true state at the moment it commits, not when it was ordered — along with where it happened, so
+   * the crowd standing there can react. Executions commit to ARMED here and are scored later, when
+   * a laser actually services them.
    */
-  advanceOrders(dt: number): boolean[] {
-    const verdicts: boolean[] = [];
+  advanceOrders(dt: number): { valid: boolean; lon: number; lat: number }[] {
+    const verdicts: { valid: boolean; lon: number; lat: number }[] = [];
     let changed = false;
     for (const i of this.markedIdx) {
       const u = this.units[i];
@@ -1579,7 +1828,9 @@ export class UnitField {
       if (u.markTimer > 0) continue;
       u.markTimer = undefined; // committed
       changed = true;
-      if (u.mark === 'investigate') verdicts.push(u.state === 'infected');
+      if (u.mark === 'investigate') {
+        verdicts.push({ valid: u.state === 'infected', lon: u.lon, lat: u.lat });
+      }
     }
     if (changed) this.refreshMarkStyles();
     return verdicts;
@@ -1600,6 +1851,9 @@ export class UnitField {
       const u = this.units[i];
       if (u.dead || u.mark || PLATFORM_KINDS.includes(u.kind)) continue;
       if (!this.isOrderable(u)) continue;
+      // Automation never operates below the public bar on its own — an unattended machine
+      // hardening the theater while the operator is elsewhere is not a thing to build.
+      if (this.shortfall(u) > 0) continue;
       const c = caseStrength(u.assess, u.record);
       if (c > bestCase) {
         bestCase = c;
@@ -1663,13 +1917,42 @@ export class UnitField {
       if (!from) continue;
 
       const to = new Cesium.Cartesian3(this.ecef[i * 3], this.ecef[i * 3 + 1], this.ecef[i * 3 + 2]);
-      out.push({ index: i, id: u.id, from, to, valid: u.state === 'infected' });
+      out.push({ index: i, id: u.id, lon: u.lon, lat: u.lat, from, to, valid: u.state === 'infected' });
       u.dead = true;
       u.mark = null;
       this.selection.delete(i);
     }
     if (out.length) this.rebuildMarks();
     return out;
+  }
+
+  /**
+   * World positions of contacts standing near a point — who a reaction plays over.
+   *
+   * Reads the cached positions from the last render, so it costs a sweep and no maths. Capped
+   * because a burst is a gesture, not a census: twenty faces reads as a street reacting, two
+   * hundred reads as noise.
+   */
+  bystandersNear(lon: number, lat: number, radiusM: number, max = 14): Cesium.Cartesian3[] {
+    const out: Cesium.Cartesian3[] = [];
+    const mLon = mPerLat * Math.cos(lat * DEG);
+    const r2 = radiusM * radiusM;
+    for (let i = 0; i < this.units.length && out.length < max; i++) {
+      const u = this.units[i];
+      if (u.dead || PLATFORM_KINDS.includes(u.kind)) continue;
+      const dx = (u.lon - lon) * mLon;
+      const dy = (u.lat - lat) * mPerLat;
+      if (dx * dx + dy * dy > r2) continue;
+      out.push(new Cesium.Cartesian3(this.ecef[i * 3], this.ecef[i * 3 + 1], this.ecef[i * 3 + 2]));
+    }
+    return out;
+  }
+
+  /** World positions of the player's own platforms — who a company reaction plays over. */
+  platformPositions(): Cesium.Cartesian3[] {
+    return this.platformUnits().map(
+      (u) => new Cesium.Cartesian3(this.ecef[u.index * 3], this.ecef[u.index * 3 + 1], this.ecef[u.index * 3 + 2]),
+    );
   }
 
   /** Live (undead) unit count, for the HUD. */
@@ -1764,6 +2047,21 @@ export class UnitField {
       }
     }
   }
+
+  /**
+   * How much of the protected network is still standing, 0–1.
+   *
+   * Protected units are company assets: inoculated, never hostile, and quietly worth something to
+   * the programme's standing. This is what that's measured against — burn them and the number
+   * falls, and so does what they were buying you.
+   */
+  assetNetworkIntact(): number {
+    if (!this.protectedAtSpawn) return 0;
+    let alive = 0;
+    for (const u of this.units) if (u.state === 'protected' && !u.dead) alive++;
+    return Math.min(1, alive / this.protectedAtSpawn);
+  }
+  private protectedAtSpawn = 0;
 
   /** Tally by TRUE state, for the HUD. Ground truth — the operator's panels never call this. */
   stateCounts(): Record<UnitState, number> {

@@ -2,6 +2,7 @@ import * as Cesium from 'cesium';
 import { SIEGE, type UnitField } from './units';
 import type { SensorField } from './sensors';
 import type { PlatformId } from '../game/platforms';
+import { resistance } from '../game/resistance';
 
 /**
  * The siege director: infected attacks against the obelisk net.
@@ -52,6 +53,12 @@ export interface SiegeHooks {
   /** Which platforms carry a detainment rig right now. */
   detainers(): PlatformId[];
   /**
+   * The state's home site and the radius it can take an attacker inside, or null if the theater
+   * has no home base or custody authority hasn't been granted. The T-frame is a garrison, not just
+   * a taller obelisk — this is what it's for.
+   */
+  homeGarrison(): { lon: number; lat: number; rangeM: number } | null;
+  /**
    * A point `minM`–`maxM` from (lon,lat) that no obelisk watches and isn't at sea, or null if the
    * target sits in coverage so dense there's nowhere dark to come from.
    */
@@ -75,10 +82,15 @@ export class SiegeDirector {
     private hooks: SiegeHooks,
   ) {}
 
-  /** How long between attacks, given how much there is to attack. */
+  /**
+   * How long between attacks: a function of how much there is to attack, divided by how hard the
+   * ground has been worked. A theater operated entirely within public consent is attacked at the
+   * base rate; one worked past it is attacked up to four times as often.
+   */
   private interval(): number {
     const n = Math.max(1, this.sensors.obeliskCount);
-    return Math.min(ATTACK_INTERVAL_MAX, Math.max(ATTACK_INTERVAL_MIN, ATTACK_INTERVAL_SCALE / n));
+    const base = Math.min(ATTACK_INTERVAL_MAX, Math.max(ATTACK_INTERVAL_MIN, ATTACK_INTERVAL_SCALE / n));
+    return Math.max(8, base / resistance.pressure);
   }
 
   /** True between launching an attacker and that attacker leaving the board, however it leaves. */
@@ -108,10 +120,18 @@ export class SiegeDirector {
       return;
     }
 
-    // A detainment rig takes the attacker the moment it's inside the platform's envelope. Checked
-    // before the assault clock so a rig that arrives on the last second still saves the site.
+    // Either a detainment rig on a platform, or the home garrison, takes the attacker the moment
+    // it's in reach. Checked before the assault clock so an intercept on the last second still
+    // saves the site.
+    const garrison = this.hooks.homeGarrison();
+    const inGarrison =
+      garrison !== null &&
+      Math.hypot(
+        (attacker.lon - garrison.lon) * 111_320 * Math.cos((garrison.lat * Math.PI) / 180),
+        (attacker.lat - garrison.lat) * 111_320,
+      ) <= garrison.rangeM;
     const detainer = this.units.detainableBy(this.hooks.detainers());
-    if (detainer) {
+    if (detainer || inGarrison) {
       this.launched = false;
       this.units.clearAttacker();
       this.timer = this.interval();

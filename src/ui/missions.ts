@@ -1,6 +1,7 @@
 import { MISSIONS, missions, type MissionDef } from '../game/missions';
 import { icon } from './icons';
 import { tolerance, toleranceLabel } from '../game/tolerance';
+import { resistance, resistanceLabel } from '../game/resistance';
 
 /**
  * The tasking panel: the mission chain on the right rail of the theater-select screen, mirroring
@@ -23,7 +24,24 @@ function toleranceBar(): string {
     `<div class="c2-bar-row tolerance"><span class="c2-bar-k">PUBLIC</span>` +
     `<span class="c2-bar thin"><i class="tol" style="width:${pct}%"></i></span>` +
     `<span class="c2-bar-v">${pct}%</span></div>` +
-    `<div class="c2-tol-note">${toleranceLabel(tolerance.level)} · ORDERS NEED ${Math.round(tolerance.threshold * 100)}% CASE</div>`
+    `<div class="c2-tol-note">${toleranceLabel(tolerance.level)} · ORDERS NEED ${Math.round(tolerance.threshold * 100)}% CASE</div>` +
+    resistanceBar()
+  );
+}
+
+/**
+ * The resistance readout, directly under tolerance because the two are a pair: tolerance is what
+ * the public will accept, resistance is what it costs when you go past it. Rising resistance means
+ * more attacks on the net and more hiding out in unwatched ground.
+ */
+function resistanceBar(): string {
+  const pct = Math.round(resistance.level * 100);
+  const mult = resistance.pressure;
+  return (
+    `<div class="c2-bar-row tolerance"><span class="c2-bar-k">GROUND</span>` +
+    `<span class="c2-bar thin"><i class="res" style="width:${pct}%"></i></span>` +
+    `<span class="c2-bar-v">${pct}%</span></div>` +
+    `<div class="c2-tol-note">${resistanceLabel(resistance.level)} · ${mult.toFixed(1)}× ATTACKS &amp; CELLS</div>`
   );
 }
 
@@ -51,6 +69,7 @@ export class MissionPanel {
     });
 
     tolerance.onChange(() => this.render());
+    resistance.onChange(() => this.render());
 
     missions.onChange((e) => {
       if (e.type === 'complete') {

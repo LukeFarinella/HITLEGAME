@@ -288,19 +288,63 @@ function walkerMesh(): ModelMesh {
 /** Forward-most of the four spine mounts; the rest sit behind it at 32 m intervals. */
 const WALKER_HARDPOINT: Hardpoint = { x: 0, y: 46, z: 142 };
 
+/**
+ * Naval drone — a low trimaran hull. Wide enough to read as a boat from above rather than as a
+ * sliver, and deliberately flat: it sits ON the water plane, so anything tall would look beached.
+ * ~60 m before scale.
+ */
+function navalMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  const L = 30; // half-length
+  const W = 5; // main hull half-width
+  const D = 3.4; // depth
+
+  // Centre hull, tapering to a point at the bow.
+  m.box(0, -4, D / 2, W * 2, (L - 8) * 2, D);
+  m.tri([W, L - 12, 0], [0, L, D / 2], [W, L - 12, D]);
+  m.tri([-W, L - 12, D], [0, L, D / 2], [-W, L - 12, 0]);
+  m.tri([W, L - 12, D], [0, L, D / 2], [-W, L - 12, D]);
+  m.tri([-W, L - 12, 0], [0, L, D / 2], [W, L - 12, 0]);
+
+  // Outriggers, set back and outboard — the trimaran read.
+  for (const side of [1, -1]) {
+    m.strut([side * 13, -18, D * 0.4], [side * 11, L - 16, D * 0.4], 1.5, 0.9);
+    m.strut([side * 5, -2, D * 0.8], [side * 13, -2, D * 0.6], 1.1); // cross beam
+  }
+
+  m.box(0, -12, D + 2.2, 7, 11, 4.4); // superstructure
+  m.box(0, -20, D + 3.4, 3, 4, 2.6); // hardpoint nub, aft
+  return m.build();
+}
+
+/** Aft mount, behind the superstructure. */
+const NAVAL_HARDPOINT: Hardpoint = { x: 0, y: -20, z: 8 };
+
 /** Dorsal mount on the disc, just off the dome. */
 const DISC_HARDPOINT: Hardpoint = { x: 0, y: 0, z: 22 };
 
-export type UnitKind = 'land' | 'sea' | 'air' | 'foot' | 'drone' | 'spider' | 'biped' | 'walker';
+export type UnitKind =
+  | 'land'
+  | 'sea'
+  | 'air'
+  | 'foot'
+  | 'drone'
+  | 'spider'
+  | 'biped'
+  | 'walker'
+  | 'naval';
 
 /** Every kind, in one place — iterate this instead of re-listing the literals. */
-export const UNIT_KINDS: UnitKind[] = ['land', 'sea', 'air', 'foot', 'drone', 'spider', 'biped', 'walker'];
+export const UNIT_KINDS: UnitKind[] = [
+  'land', 'sea', 'air', 'foot',
+  'drone', 'spider', 'biped', 'walker', 'naval',
+];
 
 /**
  * The player-controlled kinds. These are hero units — one of each at most, purchased, ordered
  * directly and carrying gear — as opposed to the ambient population the sim spawns in thousands.
  */
-export const PLATFORM_KINDS: UnitKind[] = ['drone', 'spider', 'biped', 'walker'];
+export const PLATFORM_KINDS: UnitKind[] = ['drone', 'spider', 'biped', 'walker', 'naval'];
 
 export const UNIT_MESHES: Record<UnitKind, ModelMesh> = {
   land: vehicleMesh(),
@@ -311,6 +355,7 @@ export const UNIT_MESHES: Record<UnitKind, ModelMesh> = {
   spider: spiderMesh(),
   biped: bipedMesh(),
   walker: walkerMesh(),
+  naval: navalMesh(),
 };
 
 /** Per-kind display scale so each reads at theater zoom without being absurd up close. */
@@ -326,6 +371,7 @@ export const UNIT_SCALE: Record<UnitKind, number> = {
   spider: 3,
   biped: 3.4,
   walker: 3,
+  naval: 3, // ~180 m — reads as a ship against the 78 m ground vehicles
 };
 
 /**
@@ -396,6 +442,24 @@ const PLATFORM_ICONS: Partial<Record<UnitKind, HTMLCanvasElement>> = {
     g.fill();
     g.stroke();
   }),
+  // Naval: a hull seen from above, with outriggers.
+  naval: iconCanvas((g) => {
+    g.beginPath();
+    g.moveTo(0, -19);
+    g.lineTo(6, -4);
+    g.lineTo(6, 15);
+    g.lineTo(-6, 15);
+    g.lineTo(-6, -4);
+    g.closePath();
+    g.fill();
+    g.stroke();
+    g.beginPath();
+    g.moveTo(-14, -2); g.lineTo(-14, 11);
+    g.moveTo(14, -2); g.lineTo(14, 11);
+    g.moveTo(-14, 4); g.lineTo(-6, 4);
+    g.moveTo(14, 4); g.lineTo(6, 4);
+    g.stroke();
+  }),
   // Colossus: four heavy legs off a square hull.
   walker: iconCanvas((g) => {
     legs(g, 4, 9, 20, Math.PI / 4);
@@ -416,4 +480,5 @@ export const HARDPOINTS: Partial<Record<UnitKind, Hardpoint>> = {
   spider: SPIDER_HARDPOINT,
   biped: BIPED_HARDPOINT,
   walker: WALKER_HARDPOINT,
+  naval: NAVAL_HARDPOINT,
 };
