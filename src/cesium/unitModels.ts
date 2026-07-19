@@ -328,6 +328,88 @@ export const UNIT_SCALE: Record<UnitKind, number> = {
   walker: 3,
 };
 
+/**
+ * Map icons for the platforms — 24 px on screen, so a hero unit stays findable once its mesh has
+ * gone sub-pixel at theater zoom.
+ *
+ * Drawn at 2x and displayed at 24 so they stay crisp on retina. Each is the platform's silhouette
+ * from above rather than an abstract symbol: a disc, and three walkers distinguished by leg count,
+ * which is the one thing that separates them at a glance.
+ */
+const ICON_PX = 48;
+
+function iconCanvas(draw: (g: CanvasRenderingContext2D) => void): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = ICON_PX;
+  c.height = ICON_PX;
+  const g = c.getContext('2d')!;
+  g.translate(ICON_PX / 2, ICON_PX / 2);
+  g.strokeStyle = '#E23A2E';
+  g.fillStyle = 'rgba(11, 12, 14, 0.72)';
+  g.lineWidth = 2.5;
+  g.lineJoin = 'round';
+  g.lineCap = 'round';
+  draw(g);
+  return c;
+}
+
+/** Radial legs from a body of radius `r0` out to `r1`, `n` of them. */
+function legs(g: CanvasRenderingContext2D, n: number, r0: number, r1: number, phase = 0) {
+  g.beginPath();
+  for (let i = 0; i < n; i++) {
+    const a = phase + (i / n) * Math.PI * 2;
+    g.moveTo(Math.cos(a) * r0, Math.sin(a) * r0);
+    g.lineTo(Math.cos(a) * r1, Math.sin(a) * r1);
+  }
+  g.stroke();
+}
+
+const PLATFORM_ICONS: Partial<Record<UnitKind, HTMLCanvasElement>> = {
+  // Disc: concentric rings, no legs.
+  drone: iconCanvas((g) => {
+    g.beginPath();
+    g.arc(0, 0, 17, 0, Math.PI * 2);
+    g.fill();
+    g.stroke();
+    g.beginPath();
+    g.arc(0, 0, 7, 0, Math.PI * 2);
+    g.stroke();
+  }),
+  // Arachnid: six legs off a small body.
+  spider: iconCanvas((g) => {
+    legs(g, 6, 6, 19, Math.PI / 6);
+    g.beginPath();
+    g.arc(0, 0, 7, 0, Math.PI * 2);
+    g.fill();
+    g.stroke();
+  }),
+  // Biped: two legs, drawn as a standing figure rather than a plan view — it's the tall one.
+  biped: iconCanvas((g) => {
+    g.beginPath();
+    g.moveTo(-7, 18);
+    g.lineTo(-4, 2);
+    g.moveTo(7, 18);
+    g.lineTo(4, 2);
+    g.stroke();
+    g.beginPath();
+    g.rect(-9, -16, 18, 18);
+    g.fill();
+    g.stroke();
+  }),
+  // Colossus: four heavy legs off a square hull.
+  walker: iconCanvas((g) => {
+    legs(g, 4, 9, 20, Math.PI / 4);
+    g.beginPath();
+    g.rect(-10, -10, 20, 20);
+    g.fill();
+    g.stroke();
+  }),
+};
+
+export function platformIcon(kind: UnitKind): HTMLCanvasElement | undefined {
+  return PLATFORM_ICONS[kind];
+}
+
 /** Where gear installs on each platform. Only platform kinds have one. */
 export const HARDPOINTS: Partial<Record<UnitKind, Hardpoint>> = {
   drone: DISC_HARDPOINT,

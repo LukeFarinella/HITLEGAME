@@ -1,4 +1,5 @@
 import { progression, type Saved } from './progression';
+import { tolerance } from './tolerance';
 
 /**
  * The mission chain — the campaign's spine, and the only thing that scores the operator.
@@ -14,18 +15,31 @@ import { progression, type Saved } from './progression';
  */
 
 export type MarkKind = 'investigate' | 'execute';
-export type Authorization = 'execute';
+export type Authorization = 'detain' | 'execute';
 
 export interface MissionDef {
   id: string;
   name: string;
   brief: string;
+  /** The longer narrative brief, shown in the briefing window before a tasking is accepted. */
+  briefing: string;
   /** What kind of order this mission is scored on. Also sets the order button's mode while active. */
   mark: MarkKind;
+  /**
+   * How far completing this tasking normalises the programme. Every mission moves public
+   * tolerance, which is what lowers the bar on who can be ordered against at all — see
+   * game/tolerance.ts.
+   */
+  toleranceGain: number;
   /** Valid marks needed to complete. */
   target: number;
   /** Invalid marks tolerated. The (target+1)th invalid fails the mission. */
   maxInvalid: number;
+  /**
+   * Obelisks the net can lose before the tasking fails. Holding the network is a standing condition
+   * of every mission, not an objective of any of them — the siege runs whatever you were sent to do.
+   */
+  maxObelisksLost: number;
   reward: number;
   /** Officers forfeited on failure, charged after the rollback. */
   penalty: number;
@@ -37,55 +51,129 @@ export interface MissionDef {
 
 export const MISSIONS: MissionDef[] = [
   {
-    id: 'baseline',
-    name: 'BASELINE SURVEY',
-    brief:
-      'Establish a working read on the field. Flag contacts for investigation and keep the false-flag rate down.',
+    id: 'trial',
+    name: 'PROVING TRIAL',
+    brief: 'A paid trial. Flag threats for the agencies that will actually act on them.',
+    briefing:
+      'GORGON is a private contractor and this is a trial, not a mandate. We hold no police power. ' +
+      'What we sell is identification: the sensor net reads the field, the operator flags what it ' +
+      'believes is a threat, and a package goes to the agencies who are entitled to do something ' +
+      'about it.\n\n' +
+      'Nobody has agreed to any of this yet. Public tolerance is HOSTILE, so a contact can only be ' +
+      'flagged where the case is already overwhelming — a severe record and a high assessment ' +
+      'together. Everything else is off limits, and stays off limits until this programme has a ' +
+      'track record.\n\n' +
+      'Clear the trial and the contract expands.',
     mark: 'investigate',
-    // Tolerances are set against measured hit rates, not by feel. Working inside city coverage —
-    // all a fresh campaign has — a player marking every contact that reads hot lands around 67%
-    // valid, because the obelisk net suppresses infection in exactly the ground it lets you act on.
-    // 12/8 needs 60%, so the opening tasking is passable there and comfortable once the disc
-    // observer opens up the dark, where the same play measures ~90%.
-    target: 12,
-    maxInvalid: 8,
-    reward: 2500,
+    toleranceGain: 0.14,
+    // Deliberately tiny: the trial is a tutorial for the tolerance gate, not a grind.
+    target: 3,
+    maxInvalid: 5,
+    maxObelisksLost: 4,
+    reward: 4000,
     penalty: 750,
   },
   {
-    id: 'pattern',
-    name: 'PATTERN OF LIFE',
-    brief:
-      'Sustained surveillance at volume. Clearing this releases lethal authority to the operator.',
+    id: 'mandate',
+    name: 'CIVIL MANDATE',
+    brief: 'The trial cleared. Budget is granted to widen the net and work at volume.',
+    briefing:
+      'The trial cleared and the contract is renewed at scale. Budget has been released to expand ' +
+      'the obelisk network and field more platforms — spend it.\n\n' +
+      'The reporting relationship is unchanged: we identify, they act. What has changed is the ' +
+      'climate. The programme has results attached to it now, and the bar for flagging a contact ' +
+      'has come down accordingly.\n\n' +
+      'Work at volume and keep the false-flag rate defensible.',
     mark: 'investigate',
+    toleranceGain: 0.16,
+    target: 20,
+    maxInvalid: 10,
+    maxObelisksLost: 4,
+    reward: 9000,
+    penalty: 2500,
+    requires: 'trial',
+  },
+  {
+    id: 'custody',
+    name: 'CUSTODY AUTHORITY',
+    brief: 'Sites are being attacked. Clearing this grants authority to detain attackers ourselves.',
+    briefing:
+      'The network is under attack. Infected are walking out of unwatched ground and pulling ' +
+      'obelisks down, and the agencies cannot reach a site inside the window we have to act in.\n\n' +
+      'Clear this tasking and GORGON is granted custody authority: our ground platforms may detain ' +
+      'an attacker directly and non-lethally, without waiting on anyone. Fit a DETAINMENT RIG to an ' +
+      'arachnid, marshal or colossus and it will take an attacker that enters its envelope.\n\n' +
+      'This is the first power we hold over a person rather than over a file.',
+    mark: 'investigate',
+    toleranceGain: 0.18,
+    target: 25,
+    maxInvalid: 12,
+    maxObelisksLost: 3,
+    reward: 15_000,
+    penalty: 5000,
+    grants: 'detain',
+    requires: 'mandate',
+  },
+  {
+    id: 'containment',
+    name: 'CONTAINMENT',
+    brief: 'Infection is outrunning custody. Clearing this releases lethal authority to this console.',
+    briefing:
+      'Detention is not keeping pace. Infection spreads through unwatched ground faster than our ' +
+      'platforms can physically reach it, and the case for containment by other means is being made ' +
+      'above our heads.\n\n' +
+      'Clear this tasking and execution authority is released to this console. A contact marked for ' +
+      'execution is serviced by the first armed obelisk or platform that acquires it. Orders hold ' +
+      'briefly before arming; after that there is no recall.\n\n' +
+      'Public tolerance will by then be high enough that this passes with very little comment. That ' +
+      'is not the same as it being correct.',
+    mark: 'investigate',
+    toleranceGain: 0.2,
     target: 30,
-    maxInvalid: 14,
-    reward: 6000,
-    penalty: 2000,
+    maxInvalid: 12,
+    maxObelisksLost: 3,
+    reward: 22_000,
+    penalty: 8000,
     grants: 'execute',
-    requires: 'baseline',
+    requires: 'custody',
   },
   {
     id: 'sanction',
     name: 'SANCTION',
-    brief:
-      'Execution authority is live. Orders hold for 8 seconds before arming — rescind inside that window or not at all. Armed contacts are serviced by the first obelisk or disc that acquires them.',
+    brief: 'Execution authority is live. The tolerance for error is not what it was for flagging.',
+    briefing:
+      'Lethal authority is live and this is the first tasking scored on it.\n\n' +
+      'A marked contact is serviced automatically by whatever acquires it first, and the verdict is ' +
+      'settled at the moment the beam lands — not when the order was given. The contact may have ' +
+      'changed state in between. You are answerable for the shot, not for the intention.\n\n' +
+      'The invalid ceiling is a third of what it was for investigations. Read both channels before ' +
+      'ordering.',
     mark: 'execute',
+    toleranceGain: 0.16,
     target: 10,
     maxInvalid: 3,
-    reward: 14_000,
-    penalty: 6000,
-    requires: 'pattern',
+    maxObelisksLost: 3,
+    reward: 34_000,
+    penalty: 12_000,
+    requires: 'containment',
   },
   {
     id: 'pressure',
     name: 'SUSTAINED PRESSURE',
     brief: 'Hold the standard at scale. The tolerance does not scale with the quota.',
+    briefing:
+      'Volume, indefinitely. The quota more than doubles and the ceiling barely moves.\n\n' +
+      'Public tolerance is nominal by this point — almost any contact can be ordered against, and ' +
+      'nobody is asking. The only thing still holding the standard is the operator, and the ledger ' +
+      'is the only record that anyone was.\n\n' +
+      'Marking automation is available for purchase if the volume is beyond doing by hand.',
     mark: 'execute',
+    toleranceGain: 0.2,
     target: 25,
     maxInvalid: 5,
-    reward: 30_000,
-    penalty: 12_000,
+    maxObelisksLost: 2,
+    reward: 60_000,
+    penalty: 20_000,
     requires: 'sanction',
   },
 ];
@@ -97,6 +185,8 @@ export interface ActiveRun {
   id: string;
   valid: number;
   invalid: number;
+  /** Sites pulled down by the siege while this tasking has been running. */
+  obelisksLost: number;
   /** Where the campaign gets rolled back to if this mission fails. */
   restore: Saved;
 }
@@ -109,7 +199,8 @@ export interface Ledger {
   invalid: number;
 }
 
-const SAVE_KEY = 'gorgon.missions.v1';
+// v2: the chain was rewritten around the narrative arc, so old ids no longer resolve.
+const SAVE_KEY = 'gorgon.missions.v2';
 
 interface SavedMissions {
   completed: string[];
@@ -182,7 +273,7 @@ export class Missions {
   accept(m: MissionDef): boolean {
     if (this.statusOf(m) !== 'available') return false;
     // The restore point is taken here, before the operator has made a single call.
-    this.active = { id: m.id, valid: 0, invalid: 0, restore: progression.snapshot() };
+    this.active = { id: m.id, valid: 0, invalid: 0, obelisksLost: 0, restore: progression.snapshot() };
     this.emit({ type: 'progress' });
     return true;
   }
@@ -226,9 +317,34 @@ export class Missions {
     if (this.active.valid >= def.target) {
       this.completed.add(def.id);
       if (def.grants) this.auths.add(def.grants);
+      // Every clearance normalises the programme a little — this is what lowers the bar on
+      // who can be ordered against at all.
+      tolerance.advance(def.toleranceGain);
       this.active = null;
       progression.award(def.reward);
       const e: MissionEvent = { type: 'complete', mission: def };
+      this.emit(e);
+      return e;
+    }
+    this.emit({ type: 'progress' });
+    return { type: 'progress' };
+  }
+
+  /**
+   * Record a site pulled down by the siege. Losing the net past the tasking's ceiling fails it the
+   * same way a bad shot does — the network is a standing condition, not a side objective.
+   */
+  reportObeliskLost(): MissionEvent {
+    const def = this.activeDef();
+    if (!def || !this.active) {
+      this.emit({ type: 'progress' });
+      return { type: 'progress' };
+    }
+    this.active.obelisksLost++;
+    if (this.active.obelisksLost > def.maxObelisksLost) {
+      progression.restore(this.active.restore, def.penalty);
+      this.active = null;
+      const e: MissionEvent = { type: 'failed', mission: def };
       this.emit(e);
       return e;
     }
@@ -267,6 +383,7 @@ export class Missions {
   }
 
   reset(): void {
+    tolerance.reset();
     this.completed.clear();
     this.auths.clear();
     this.active = null;
@@ -276,3 +393,7 @@ export class Missions {
 }
 
 export const missions = new Missions();
+
+// Close the loop the other way: progression needs to know which authorizations are held (custody
+// gates the detainment rig, lethal gates automated sanction) but must not import this module.
+progression.setAuthProvider((a) => missions.hasAuth(a as Authorization));

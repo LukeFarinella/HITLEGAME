@@ -14,19 +14,24 @@ import {
   KIND_SPEED,
   PLATFORM_SENSOR,
   ORDER_DELAY,
+  SIEGE,
   INFECTED_FLEE,
   CONTAGION,
 } from './units';
 import { UNIT_KINDS, type UnitKind } from './unitModels';
 import { SensorField } from './sensors';
 import { progression, ASSETS } from '../game/progression';
-import { PLATFORMS, GEAR, PLATFORM_BY_ID, type PlatformId } from '../game/platforms';
-import { surveyTerritory, type Territory } from '../game/territory';
+import { PLATFORMS, GEAR, PLATFORM_BY_ID, BASE_SENSOR_M, type PlatformId } from '../game/platforms';
+import { surveyTerritory, clusterCentres, type Territory } from '../game/territory';
 import { missions, MISSIONS } from '../game/missions';
+import { tolerance, caseStrength, toleranceLabel } from '../game/tolerance';
 import { assessBand, BAND_LABEL, readRecord } from '../game/intel';
 import { Store } from '../ui/store';
+import { icon } from '../ui/icons';
+import { sound, bindInterfaceSounds } from '../ui/sound';
 import { MissionPanel } from '../ui/missions';
 import { LaserBeams } from './lasers';
+import { SiegeDirector, type SiegeEvent } from './siege';
 
 const RED = Cesium.Color.fromCssColorString('#E23A2E');
 const STEEL = Cesium.Color.fromCssColorString('#8A9AA8');
@@ -486,21 +491,133 @@ const UNIT_COUNTS = IS_MOBILE
 let unitField: UnitField | undefined;
 /** Directed-energy beams for the current theater. Built with the units, torn down with them. */
 let lasers: LaserBeams | undefined;
+/** Infected attacks against the obelisk net. Lives and dies with the theater. */
+let siege: SiegeDirector | undefined;
+
+/**
+ * Resolve one siege event: a site coming down costs the net its coverage and counts against the
+ * active tasking, and both of the ways to stop an attack report back here.
+ */
+function onSiegeEvent(e: SiegeEvent) {
+  if (e.type === 'inbound') {
+    sound.play('alert');
+    toast('⚠ OBELISK UNDER THREAT · ATTACKER INBOUND');
+    return;
+  }
+  if (e.type === 'stopped') {
+    sound.play('stopped');
+    toast(e.how === 'detained' ? 'ATTACKER DETAINED' : 'ATTACKER SERVICED');
+    return;
+  }
+  // A site fell. Strike it out of the field, which shrinks coverage everywhere it reached, and
+  // rebuild — the mask is what both the geometry and the sensor grid are derived from.
+  if (e.targetIndex >= 0) fallenObelisks.add(e.targetIndex);
+  const apex = siegeApex(e.targetLocal);
+  if (theaterCenter && theaterMap) {
+    addObeliskPyramids(theaterCenter.lon, theaterCenter.lat, theaterMap);
+    // The sensor field was just replaced, so the director needs the new one.
+    if (unitField) startSiege(unitField);
+  }
+  if (apex && siege) siege.markWreck(apex);
+  sound.play('lost');
+  toast(`◈ OBELISK LOST · ${fallenObelisks.size} DOWN THIS THEATER`);
+  missions.reportObeliskLost();
+  updateTaskingHud();
+}
+
+/** Apex of a site local to the current theater, captured before the field is rebuilt without it. */
+function siegeApex(local: number): Cesium.Cartesian3 | undefined {
+  const f = sensorField;
+  if (!f) return undefined;
+  const a = f.apexAt(local);
+  return a ? Cesium.Cartesian3.clone(a) : undefined;
+}
+
+/**
+ * Give each fielded platform its own city to start in.
+ *
+ * Spawning them all on the theater centre stacked them into one unclickable pile. The theater's own
+ * obelisk sites are a density map of where the cities are — that's exactly what the territory tiers
+ * are built on — so clustering them gives real downtowns to post platforms to, biggest city first.
+ * Falls back to the centre if a theater is too sparse to have distinguishable cities.
+ */
+function platformStations(center: { lon: number; lat: number }) {
+  // One entry per fielded UNIT, so four arachnids get four different cities rather than one.
+  const units = progression.fieldedUnits();
+  const sites = theaterSiteLonLat;
+  const cities = sites
+    ? clusterCentres(sites, { minCount: 6, separationM: 18_000, max: Math.max(6, units.length) })
+    : [];
+  return units.map((id, i) => {
+    const c = cities.length ? cities[i % cities.length] : center;
+    return { id, lon: c.lon, lat: c.lat };
+  });
+}
 
 function addUnits(center: { lon: number; lat: number }, map: TheaterMap, net: RoadNet | undefined) {
   removeUnits();
   // Pass obelisk coverage in: it seeds where infection concentrates and steers infected traffic
   // toward the unwatched gaps between cities.
   const covered = sensorField ? (lon: number, lat: number) => sensorField!.isCovered(lon, lat) : undefined;
-  const counts = { ...UNIT_COUNTS, platforms: progression.ownedPlatforms() };
+  const counts = { ...UNIT_COUNTS, platforms: platformStations(center) };
   const field = new UnitField(center, THEATER_RADIUS_M, map.heightAt, net, counts, covered);
   for (const k of UNIT_KINDS) scene.primitives.add(field.batches[k]);
   scene.primitives.add(field.marksLayer); // investigate + execution markers
   scene.primitives.add(field.droneRing); // platform sensor footprints
+  scene.primitives.add(field.platformIcons); // 24 px markers, shown when zoomed out
+  field.toleranceOverride = progression.has('emergency-powers');
+  seedHiddenPockets(field);
+  deliveryTimer = DELIVERY_INTERVAL_S;
   unitField = field;
   lasers = new LaserBeams();
   scene.primitives.add(lasers.collection);
+  startSiege(field);
   updateUnitHud();
+}
+
+/**
+ * Stand up the siege director for this theater. Needs the sensor field (to pick targets) and the
+ * unit field (to put an attacker on the board), so it's built with the units, after the obelisks.
+ */
+function startSiege(field: UnitField) {
+  stopSiege();
+  if (!sensorField) return;
+  const director = new SiegeDirector(field, sensorField, {
+    globalIndex: (local) => theaterSiteIndex?.[local] ?? -1,
+    detainers: () =>
+      progression.ownedPlatforms().filter((id) => progression.platformHas(id, 'detain')),
+    darkPointNear: (lon, lat, minM, maxM) => {
+      // Attackers come out of ground the net doesn't watch, which is also the ground where
+      // infection actually lives — so this is both a rule and a piece of fiction that holds.
+      for (let tries = 0; tries < 80; tries++) {
+        const a = Math.random() * Math.PI * 2;
+        const r = minM + Math.random() * (maxM - minM);
+        const p = destDeg(lat, lon, r, a);
+        if (sensorField && sensorField.isCovered(p.lon, p.lat)) continue;
+        if (theaterMap && theaterMap.heightAt(p.lon, p.lat) < 1) continue; // not out at sea
+        // Inside the theater disc, or it would walk in from off the edge of the map.
+        const c = theaterCenter;
+        if (c) {
+          const mLon = 111_320 * Math.cos((c.lat * Math.PI) / 180);
+          const dx = (p.lon - c.lon) * mLon;
+          const dy = (p.lat - c.lat) * 111_320;
+          if (Math.hypot(dx, dy) > THEATER_RADIUS_M * 0.92) continue;
+        }
+        return p;
+      }
+      return null;
+    },
+    on: onSiegeEvent,
+  });
+  scene.primitives.add(director.wrecks);
+  siege = director;
+}
+
+function stopSiege() {
+  if (siege) {
+    scene.primitives.remove(siege.wrecks); // remove() destroys the collection
+    siege = undefined;
+  }
 }
 
 function removeUnits() {
@@ -508,12 +625,14 @@ function removeUnits() {
     for (const k of UNIT_KINDS) scene.primitives.remove(unitField.batches[k]);
     scene.primitives.remove(unitField.marksLayer);
     scene.primitives.remove(unitField.droneRing);
+    scene.primitives.remove(unitField.platformIcons);
     unitField = undefined;
   }
   if (lasers) {
     scene.primitives.remove(lasers.collection); // remove() destroys the collection
     lasers = undefined;
   }
+  stopSiege();
 }
 
 function updateUnitHud() {
@@ -542,12 +661,92 @@ scene.preUpdate.addEventListener(() => {
     unitField.render(sensorField); // out-of-range units drawn faint
     // Orders age first: an investigation that commits this frame goes on the ledger, and an
     // execution that commits becomes eligible for the laser pass immediately below.
-    for (const valid of unitField.advanceOrders(dt)) missions.report('investigate', valid);
+    const committed = unitField.advanceOrders(dt);
+    if (committed.length) sound.play('commit');
+    for (const valid of committed) missions.report('investigate', valid);
     resolveExecutions();
+    runAutoMarking(dt);
+    runDelivery(dt);
+    siege?.update(dt);
+    updateSiegeHud();
+    rebuildRoster();
+    refreshRoster();
     updateUnitPanel(); // keep the selection panel + reticle tracking the live unit
   }
   lasers?.update(dt);
 });
+
+/**
+ * Every couple of minutes, walk one confirmed infected contact into the net.
+ *
+ * Infection concentrates in unwatched ground by design, which means a well-covered theater can go
+ * quiet — nothing orderable inside the coverage the operator is standing in. This keeps a trickle
+ * arriving so there is always something to work with, without removing the reason to go looking.
+ */
+const DELIVERY_INTERVAL_S = 120;
+let deliveryTimer = DELIVERY_INTERVAL_S;
+function runDelivery(dt: number) {
+  if (!unitField || !sensorField) return;
+  deliveryTimer -= dt;
+  if (deliveryTimer > 0) return;
+  deliveryTimer = DELIVERY_INTERVAL_S;
+  const site = sensorField.randomSite();
+  if (site) unitField.deliverInfected(site.lon, site.lat);
+}
+
+/**
+ * Hidden pockets of infected out in unwatched ground.
+ *
+ * Count scales inversely with how well the theater is covered: a fully proliferated state gets one
+ * pocket, a downtown-tier state gets several, because a sparse theater is mostly dark and needs
+ * more than one reason to be crossed.
+ */
+function seedHiddenPockets(field: UnitField) {
+  if (!theaterCenter || !theaterMap) return;
+  const sites = sensorField?.obeliskCount ?? 1;
+  const pockets = Math.max(1, Math.min(6, Math.round(600 / Math.max(1, sites))));
+  let placed = 0;
+  for (let p = 0; p < pockets; p++) {
+    for (let tries = 0; tries < 40; tries++) {
+      const a = Math.random() * Math.PI * 2;
+      const r = (0.25 + Math.random() * 0.65) * THEATER_RADIUS_M;
+      const pt = destDeg(theaterCenter.lat, theaterCenter.lon, r, a);
+      if (sensorField?.isCovered(pt.lon, pt.lat)) continue; // must be hidden
+      if (theaterMap.heightAt(pt.lon, pt.lat) < 1) continue; // not at sea
+      field.spawnHiddenCluster(pt.lon, pt.lat, 14 + Math.floor(Math.random() * 12), 900);
+      placed++;
+      break;
+    }
+  }
+  setText('g-pockets', String(placed));
+}
+
+/**
+ * Marking automation, once it's been commissioned.
+ *
+ * Rate-limited hard on purpose: the unit field could hand back a hundred qualifying contacts in a
+ * frame, and an automation that emptied the field into the ledger before the operator could look at
+ * it would be a different feature — and would blow the invalid ceiling on one bad threshold.
+ */
+const AUTO_INTERVAL_S = 2.5;
+let autoTimer = 0;
+function runAutoMarking(dt: number) {
+  if (!unitField) return;
+  const wantsExec = progression.has('auto-execute') && missions.hasAuth('execute');
+  const wantsInv = progression.has('auto-investigate');
+  if (!wantsExec && !wantsInv) return;
+
+  autoTimer -= dt;
+  if (autoTimer > 0) return;
+  autoTimer = AUTO_INTERVAL_S;
+
+  // Lethal automation takes precedence when both are running and a tasking calls for it.
+  const kind = wantsExec && missions.markKind() === 'execute' ? 'execute' : 'investigate';
+  if (kind === 'investigate' && !wantsInv) return;
+  if (unitField.autoMark(kind, progression.autoThreshold(kind))) {
+    sound.play(kind === 'execute' ? 'orderLethal' : 'order');
+  }
+}
 
 /**
  * Service any execution-marked contact an armed platform can currently see.
@@ -567,6 +766,7 @@ function resolveExecutions() {
     obeliskArmed ? (lon, lat) => sensorField!.servicingApex(lon, lat) : undefined,
     armed,
   );
+  if (shots.length) sound.play('laser');
   for (const s of shots) {
     lasers.fire(s.from, s.to);
     missions.report('execute', s.valid);
@@ -593,6 +793,28 @@ let obelisks: ObeliskField | undefined;
 let heatField: Cesium.Primitive | undefined;
 let obeliskPyramids: Cesium.Primitive | undefined;
 let obeliskFlare: Cesium.Primitive | undefined;
+/** The state's home site: a T-frame plus the ring that marks it as the base. */
+let homeFrame: Cesium.Primitive | undefined;
+let homeRing: Cesium.PolylineCollection | undefined;
+/** Tiny red site dots, shown once the obelisk geometry has gone sub-pixel. */
+let obeliskDots: Cesium.PointPrimitiveCollection | undefined;
+/** Home-base rings on the orbit globe, one per held state. */
+let orbitHomeRings: Cesium.PolylineCollection | undefined;
+
+/** Camera distance past which the site dots take over from the geometry. Matches the platform icons. */
+const SITE_DOT_FROM_M = 9000;
+
+/** A small circle of positions around a point, for the home-base rings. */
+function ringPositions(lon: number, lat: number, radiusM: number, height: number, segments = 48) {
+  const dLat = radiusM / 111_320;
+  const dLon = radiusM / (111_320 * Math.max(0.15, Math.cos((lat * Math.PI) / 180)));
+  const pts: Cesium.Cartesian3[] = [];
+  for (let i = 0; i <= segments; i++) {
+    const a = (i / segments) * Math.PI * 2;
+    pts.push(Cesium.Cartesian3.fromDegrees(lon + dLon * Math.cos(a), lat + dLat * Math.sin(a), height));
+  }
+  return pts;
+}
 
 // ---- campaign ownership ----
 // The obelisk field is 115k sites, but the player only fields the ones inside territory they hold,
@@ -606,8 +828,10 @@ let store: Store | undefined;
  * Each obelisk watches a disc of this radius. Dense in cities, so metro units read as "seen" and
  * units out in the country render faint. Mutable: OBELISK SENSOR UPRATE buys the wider figure.
  */
-let sensorRangeM = 750;
-const SENSOR_RANGE_BASE = 750;
+let sensorRangeM = BASE_SENSOR_M;
+// Platforms share this base (see BASE_SENSOR_M) — a bare platform watches the same disc a fixed
+// site does, and gear is what extends it.
+const SENSOR_RANGE_BASE = BASE_SENSOR_M;
 const SENSOR_RANGE_UPRATED = 1200;
 
 let sensorField: SensorField | undefined;
@@ -631,6 +855,7 @@ function applyOwnership(rebuildScene: boolean): void {
   // Each platform's live sensor radius comes from its catalog entry plus whatever is on its
   // hardpoints, so fitting a wide-aperture pod widens the disc the sim actually tests against.
   for (const p of PLATFORMS) PLATFORM_SENSOR[p.id] = progression.sensorRangeOf(p.id);
+  if (unitField) unitField.toleranceOverride = progression.has('emergency-powers');
 
   if (obelisks && territory) obeliskMask = progression.obeliskMask(territory, obelisks.count);
 
@@ -640,6 +865,7 @@ function applyOwnership(rebuildScene: boolean): void {
   if (!rebuildScene || !changed) return;
 
   rebuildHeatField();
+  rebuildOrbitHomeRings();
   // A live theater has to re-lay its obelisks, and the sensor net + units are derived from them.
   if (mode === 'theater' && theaterMap && theaterCenter) {
     addObeliskPyramids(theaterCenter.lon, theaterCenter.lat, theaterMap);
@@ -690,6 +916,29 @@ void loadObelisks()
     setText('g-obelisks', 'ERR');
   });
 
+/**
+ * Sites pulled down by the siege in the CURRENT theater. Global obelisk indices.
+ *
+ * Deliberately not persisted and cleared on every theater entry: the net is rebuilt whenever a
+ * theater is chosen, so losses are a pressure to manage within a sortie rather than permanent
+ * damage to the campaign's territory.
+ */
+let fallenObelisks = new Set<number>();
+/** Global obelisk index for each site in the current theater, indexed as the sensor field sees them. */
+let theaterSiteIndex: Int32Array | undefined;
+/** Flat [lon,lat,...] of this theater's sites — the density map platforms are stationed from. */
+let theaterSiteLonLat: Float64Array | undefined;
+
+/** Ownership mask minus anything the siege has already destroyed here. */
+function liveObeliskMask(): Uint8Array | undefined {
+  if (!obelisks) return undefined;
+  const base = obeliskMask;
+  if (!fallenObelisks.size) return base;
+  const mask = base ? base.slice() : new Uint8Array(obelisks.count).fill(1);
+  for (const i of fallenObelisks) mask[i] = 0;
+  return mask;
+}
+
 function addObeliskPyramids(lon: number, lat: number, map: TheaterMap) {
   if (!obelisks) return;
   removeObeliskPyramids();
@@ -701,14 +950,49 @@ function addObeliskPyramids(lon: number, lat: number, map: TheaterMap) {
     RIM_FADE_START,
     FLARE_PX,
     FLARE_INTENSITY,
-    obeliskMask,
+    liveObeliskMask(),
+    // The state this theater sits in decides which site is the base.
+    theaterCenter ? territory?.stateAt(theaterCenter.lon, theaterCenter.lat)?.downtown : undefined,
   );
   if (!built) {
     setText('g-obelisks', '0 IN THEATER');
+    theaterSiteIndex = undefined;
+    theaterSiteLonLat = undefined;
     return;
   }
   obeliskPyramids = scene.primitives.add(built.primitive);
   obeliskFlare = scene.primitives.add(built.flare);
+  theaterSiteIndex = built.indices;
+  theaterSiteLonLat = built.lonLat;
+
+  if (built.home) {
+    homeFrame = scene.primitives.add(built.home.primitive);
+    // A ring on the ground marks which site is the base, since the T-frame reads as shape and this
+    // reads as position — you can find it from across the theater.
+    const ring = scene.primitives.add(new Cesium.PolylineCollection()) as Cesium.PolylineCollection;
+    homeRing = ring;
+    for (const r of [900, 1400]) {
+      ring.add({
+        positions: ringPositions(built.home.lon, built.home.lat, r, map.heightAt(built.home.lon, built.home.lat) + 30),
+        width: 2,
+        material: Cesium.Material.fromType('Color', { color: RED.withAlpha(r === 900 ? 0.85 : 0.4) }),
+      });
+    }
+  }
+
+  // Tiny site dots for when the obelisks themselves have gone sub-pixel.
+  const dots = new Cesium.PointPrimitiveCollection();
+  const cond = new Cesium.DistanceDisplayCondition(SITE_DOT_FROM_M, Number.MAX_VALUE);
+  for (let i = 0; i < built.count; i++) {
+    dots.add({
+      position: new Cesium.Cartesian3(built.apex[i * 3], built.apex[i * 3 + 1], built.apex[i * 3 + 2]),
+      color: RED,
+      pixelSize: 3,
+      distanceDisplayCondition: cond,
+      disableDepthTestDistance: 1e12,
+    });
+  }
+  obeliskDots = scene.primitives.add(dots);
   setText('g-obelisks', `${built.count} IN THEATER`);
 
   // Sensor network: range rings + coverage/threat grids driving unit opacity and the red alert glow.
@@ -731,6 +1015,44 @@ function removeObeliskPyramids() {
     scene.primitives.remove(sensorField.glow); // remove() destroys the collection
     sensorField = undefined;
   }
+  if (homeFrame) {
+    scene.primitives.remove(homeFrame);
+    homeFrame = undefined;
+  }
+  if (homeRing) {
+    scene.primitives.remove(homeRing);
+    homeRing = undefined;
+  }
+  if (obeliskDots) {
+    scene.primitives.remove(obeliskDots);
+    obeliskDots = undefined;
+  }
+}
+
+/**
+ * Home-base rings on the orbit globe — one at each held state's first site.
+ *
+ * The downtown obelisk a state is unlocked with IS its base, so marking it in the select view makes
+ * the campaign map read as a set of footholds rather than an undifferentiated heat smear.
+ */
+function rebuildOrbitHomeRings() {
+  if (orbitHomeRings) {
+    scene.primitives.remove(orbitHomeRings);
+    orbitHomeRings = undefined;
+  }
+  if (!territory || !obelisks) return;
+  const col = new Cesium.PolylineCollection();
+  for (const st of territory.states) {
+    if (!progression.isUnlocked(st)) continue;
+    const i = st.downtown;
+    col.add({
+      positions: ringPositions(obelisks.lon[i], obelisks.lat[i], 45_000, 2000, 40),
+      width: 2,
+      material: Cesium.Material.fromType('Color', { color: RED.withAlpha(0.9) }),
+    });
+  }
+  col.show = mode === 'globe';
+  orbitHomeRings = scene.primitives.add(col);
 }
 
 // ---- rim bokeh (theater mode) ----
@@ -906,7 +1228,7 @@ function endMarquee() {
   marqueeActive = false;
 }
 
-const BAND_HEX: Record<string, string> = { clear: '#EDEFF2', suspect: '#F2C13B', threat: '#E23A2E' };
+const BAND_HEX: Record<string, string> = { clear: '#EDEFF2', suspect: '#4F9E7A', threat: '#F2C13B' };
 const KIND_ABBR: Record<UnitKind, string> = {
   land: 'CV', sea: 'SV', air: 'AV', foot: 'FT',
   drone: 'DISC', spider: 'ARC', biped: 'MAR', walker: 'COL',
@@ -914,7 +1236,7 @@ const KIND_ABBR: Record<UnitKind, string> = {
 const BAND_ABBR: Record<string, string> = { clear: 'CLR', suspect: 'SUS', threat: 'THR' };
 const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
 const MARK_HEX = '#F2A83B';
-const DRONE_HEX = '#6FD3E8';
+const DRONE_HEX = '#E23A2E';
 
 function hideUnitPanel() {
   if (panelEl) (panelEl as HTMLElement).hidden = true;
@@ -958,6 +1280,31 @@ function renderCharges(record: number) {
           })(),
         ]),
   );
+}
+
+/**
+ * Case strength against the public-tolerance line: a bar for the contact's own case, and a tick
+ * marking where the bar currently has to be reached. This is what makes "why can't I mark this?"
+ * answerable at a glance.
+ */
+function renderCase(one: { caseStrength: number; clearsTolerance: boolean } | null) {
+  const row = el('up-case');
+  if (!row) return;
+  if (!one) {
+    (row as HTMLElement).hidden = true;
+    return;
+  }
+  (row as HTMLElement).hidden = false;
+  const pct = Math.round(one.caseStrength * 100);
+  const fill = row.querySelector('i') as HTMLElement | null;
+  const tick = row.querySelector('u') as HTMLElement | null;
+  const label = row.querySelector('.v') as HTMLElement | null;
+  if (fill) {
+    fill.style.width = `${pct}%`;
+    fill.classList.toggle('clears', one.clearsTolerance);
+  }
+  if (tick) tick.style.left = `${Math.round(tolerance.threshold * 100)}%`;
+  if (label) label.textContent = `CASE ${pct}% / ${Math.round(tolerance.threshold * 100)}%`;
 }
 
 /**
@@ -1055,6 +1402,7 @@ function updateUnitPanel() {
       const fill = bar.firstElementChild as HTMLElement | null;
       if (fill) fill.style.width = `${pct}%`;
     }
+    renderCase(isPlatform ? null : one);
     renderCharges(isPlatform ? -1 : one.record);
     renderOrder(one.mark, one.markTimer);
     if (dot) (dot as HTMLElement).style.color = isPlatform ? DRONE_HEX : BAND_HEX[band];
@@ -1068,7 +1416,7 @@ function updateUnitPanel() {
     if (senEl) {
       if (isPlatform) {
         // For a platform the sensor row is its own envelope and what's currently inside it.
-        const st = unitField.platformStatus(one.kind as PlatformId);
+        const st = unitField.platformStatus(one.index);
         const km = ((st?.rangeM ?? 0) / 1000).toFixed(1);
         senEl.textContent = st ? `${km} KM · ${st.seen} SEEN · ${st.infected} INF` : `${km} KM`;
         senEl.className = 'v sensor-tracked';
@@ -1104,7 +1452,11 @@ function updateUnitPanel() {
   const mk = el('up-mark') as HTMLButtonElement | null;
   if (mk) {
     const st = unitField.markState();
-    const canAct = sel.trackedCount > 0;
+    // Two gates, two different messages: no sensor contact is physical, below tolerance is
+    // political, and telling them apart is the difference between "move a platform" and
+    // "this contact is off limits until the programme is further along".
+    const canAct = sel.orderableCount > 0;
+    const blockedByTolerance = sel.trackedCount > 0 && sel.orderableCount === 0;
     // Which order the button issues follows the ACTIVE tasking — lethal authority isn't left
     // switched on between missions just because it's been granted.
     const kind = missions.markKind();
@@ -1117,7 +1469,9 @@ function updateUnitPanel() {
     const secs = Math.max(0, sel.pendingSeconds).toFixed(1);
     mk.disabled = !canAct;
     mk.textContent = !canAct
-      ? '◈ NO SENSOR CONTACT'
+      ? blockedByTolerance
+        ? '◈ BELOW PUBLIC TOLERANCE'
+        : '◈ NO SENSOR CONTACT'
       : pending
         ? `◈ RESCIND · ${secs}S`
         : st === 'all'
@@ -1239,15 +1593,106 @@ function updateTaskingHud() {
   }
   setText('gt-valid', `${run.valid} / ${def.target}`);
   setText('gt-invalid', `${run.invalid} / ${def.maxInvalid}`);
+  setText('gt-lost', `${run.obelisksLost} / ${def.maxObelisksLost}`);
   const vb = el('gt-valid-bar');
   if (vb) (vb as HTMLElement).style.width = `${Math.min(100, (run.valid / def.target) * 100)}%`;
+  // Both failure bars fill against ceiling+1, since it's the one PAST the ceiling that fails.
   const ib = el('gt-invalid-bar');
-  // Against maxInvalid+1, since it's the one PAST the ceiling that fails the tasking.
   if (ib) (ib as HTMLElement).style.width = `${Math.min(100, (run.invalid / (def.maxInvalid + 1)) * 100)}%`;
+  const lb = el('gt-lost-bar');
+  if (lb) {
+    (lb as HTMLElement).style.width =
+      `${Math.min(100, (run.obelisksLost / (def.maxObelisksLost + 1)) * 100)}%`;
+  }
+}
+
+/**
+ * The siege alert. Driven every frame while an attacker is on the board, because the two numbers
+ * that matter — how far out it still is, and how long the site has left — both move continuously.
+ */
+function updateSiegeHud() {
+  const box = el('g-siege');
+  if (!box) return;
+  const a = siege?.inbound();
+  if (mode !== 'theater' || !a) {
+    (box as HTMLElement).hidden = true;
+    return;
+  }
+  (box as HTMLElement).hidden = false;
+  const inContact = a.rangeM <= 0;
+  setText('gs-title', inContact ? 'SITE UNDER ASSAULT' : 'ATTACKER INBOUND');
+  box.classList.toggle('contact', inContact);
+  // Until something acquires it the attacker is a rumour, which is the point of spawning it dark.
+  setText('gs-contact', a.tracked ? a.id : 'UNTRACKED');
+  setText('gs-range', inContact ? 'IN CONTACT' : `${(a.rangeM / 1000).toFixed(1)} KM`);
+  const bar = el('gs-bar');
+  if (bar) {
+    (bar as HTMLElement).style.width = `${Math.min(100, (a.assaultS / SIEGE.assaultS) * 100)}%`;
+  }
 }
 
 // Every mission event can move the reminder, and mode changes decide whether it shows at all.
 missions.onChange(() => updateTaskingHud());
+
+/**
+ * The platform roster: one small card per fielded unit, top left, theater only.
+ *
+ * Platforms are stationed in different cities and are sub-pixel from altitude, so hunting for one
+ * on the map to click it is the wrong interaction. The roster is the handle — icon, callsign, and
+ * whether it's moving — and clicking a card selects that machine.
+ *
+ * Rebuilt only when the fleet changes; the per-frame refresh just repaints state.
+ */
+let rosterSignature = '';
+function rebuildRoster() {
+  const box = el('g-roster');
+  if (!box) return;
+  if (mode !== 'theater' || !unitField) {
+    (box as HTMLElement).hidden = true;
+    rosterSignature = '';
+    return;
+  }
+  const units = unitField.platformUnits();
+  const sig = units.map((u) => u.id).join(',');
+  if (sig === rosterSignature) return;
+  rosterSignature = sig;
+  (box as HTMLElement).hidden = units.length === 0;
+
+  box.replaceChildren(
+    ...units.map((u) => {
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'gr-card';
+      card.dataset.index = String(u.index);
+      card.innerHTML =
+        `<span class="gr-icon">${icon(u.kind)}</span>` +
+        `<span class="gr-body"><span class="gr-id">${u.id}</span>` +
+        `<span class="gr-state">—</span></span>`;
+      card.addEventListener('click', () => {
+        unitField?.selectIndexPublic(u.index);
+        updateUnitPanel();
+      });
+      return card;
+    }),
+  );
+}
+
+/** Repaint the roster's live bits — selection and whether each unit is under orders. */
+function refreshRoster() {
+  const box = el('g-roster');
+  if (!box || (box as HTMLElement).hidden || !unitField) return;
+  const sel = unitField.selectedPlatform();
+  for (const card of box.querySelectorAll<HTMLElement>('.gr-card')) {
+    const idx = Number(card.dataset.index);
+    card.classList.toggle('selected', sel?.index === idx);
+    const st = unitField.platformStatus(idx);
+    const stateEl = card.querySelector('.gr-state');
+    if (stateEl && st) {
+      stateEl.textContent = st.moving ? 'MOVING' : `${st.seen} SEEN`;
+      stateEl.className = `gr-state ${st.moving ? 'moving' : ''}`;
+    }
+  }
+}
 
 function updateChrome() {
   setText('g-mode', mode === 'globe' ? 'ORBITAL · SELECT THEATER' : 'THEATER · C2 ACTIVE');
@@ -1257,6 +1702,8 @@ function updateChrome() {
   if (exit) (exit as HTMLButtonElement).hidden = mode !== 'theater';
   el('globe-ui')?.classList.toggle('in-theater', mode === 'theater');
   updateTaskingHud();
+  updateSiegeHud();
+  rebuildRoster();
 }
 
 let theaterMap: TheaterMap | undefined;
@@ -1294,18 +1741,22 @@ function tryEnterTheater(carto: Cesium.Cartographic) {
   const lon = Cesium.Math.toDegrees(carto.longitude);
   const lat = Cesium.Math.toDegrees(carto.latitude);
   if (!territory) {
+    sound.play('denied');
     toast('TERRITORY SURVEY IN PROGRESS · STAND BY');
     return;
   }
   const st = territory.stateAt(lon, lat);
   if (!st) {
+    sound.play('denied');
     toast('OUTSIDE GORGON JURISDICTION');
     return;
   }
   if (!progression.isUnlocked(st)) {
+    sound.play('denied');
     toast(`${st.name.toUpperCase()} NOT HELD · UNLOCK UNDER TERRITORY`);
     return;
   }
+  sound.play('enter');
   enterTheater(carto);
 }
 
@@ -1314,10 +1765,13 @@ function enterTheater(carto: Cesium.Cartographic) {
   const lat = Cesium.Math.toDegrees(carto.latitude);
   mode = 'theater';
   theaterCenter = { lon, lat };
+  // The net is rebuilt whenever a theater is chosen, so sites lost to the last siege stand back up.
+  fallenObelisks = new Set();
   cursor.show = false;
   borderLines.show = false;
   grat.show = false;
   if (heatField) heatField.show = false; // the theater draws real obelisks instead
+  if (orbitHomeRings) orbitHomeRings.show = false;
   setVoid(true);
   updateChrome();
   // Apply immediately, NOT on flyTo completion: a flight that's interrupted (user grabs the
@@ -1432,6 +1886,7 @@ async function buildTheater(lon: number, lat: number, tok: number) {
 
 function exitTheater() {
   if (mode !== 'theater') return;
+  sound.play('exit');
   mode = 'globe';
   theaterToken++;
   restoreGlobeControls();
@@ -1456,6 +1911,7 @@ function exitTheater() {
   borderLines.show = true;
   grat.show = true;
   if (heatField) heatField.show = true;
+  if (orbitHomeRings) orbitHomeRings.show = true;
   setText('g-obelisks', territory ? String(progression.activeObelisks(territory)) : '—');
   clearUnits();
   setText('g-terrain', 'ORBIT · ELLIPSOID');
@@ -1573,8 +2029,8 @@ el('g-exit')?.addEventListener('click', exitTheater);
 // everything the scene derives from ownership is re-applied here in one place.
 store = new Store({
   // Ownership itself is re-applied by the progression subscription above; the store only needs to
-  // move the camera onto whatever the player just bought.
-  onPurchase: () => {},
+  // confirm the transaction and move the camera onto whatever the player just bought.
+  onPurchase: () => sound.play('purchase'),
   onFocusState: (s) => {
     if (mode !== 'globe') return;
     camera.flyTo({
@@ -1589,8 +2045,28 @@ store = new Store({
 // already watches — so this only has to surface the notice.
 new MissionPanel({
   onChange: () => {},
-  notify: (msg) => toast(msg),
+  notify: (msg) => {
+    sound.play(msg.startsWith('MISSION FAILED') ? 'failure' : 'success');
+    toast(msg);
+  },
 });
+
+// Hover and click cues for every button in the app, by delegation — see ui/sound.ts.
+bindInterfaceSounds();
+{
+  const btn = el('snd-toggle');
+  const paint = () => {
+    if (!btn) return;
+    btn.textContent = sound.enabled ? '♪' : '♪̸';
+    btn.classList.toggle('muted', !sound.enabled);
+    btn.setAttribute('aria-pressed', String(sound.enabled));
+  };
+  btn?.addEventListener('click', () => {
+    sound.setEnabled(!sound.enabled);
+    paint();
+  });
+  paint();
+}
 
 // ---- dev settings panel (⚙) ----
 // A small header panel for live-tuning the procedural city. Sliders write into `devSettings`; the
@@ -1675,7 +2151,8 @@ el('up-mark')?.addEventListener('click', () => {
   const on = unitField.markState() !== 'all'; // toggle: order all, or rescind if all are ordered
   // Nothing is logged here — every order starts on a rescind countdown and commits in the frame
   // loop once that window closes.
-  unitField.markSelected(kind, on);
+  const n = unitField.markSelected(kind, on);
+  if (n) sound.play(!on ? 'rescind' : kind === 'execute' ? 'orderLethal' : 'order');
   updateUnitPanel();
 });
 
@@ -1731,10 +2208,22 @@ if (import.meta.env.DEV) {
     get lasers() {
       return lasers;
     },
+    get siege() {
+      return siege;
+    },
+    get fallenObelisks() {
+      return fallenObelisks;
+    },
+    SIEGE,
     progression,
     missions,
+    tolerance,
+    caseStrength,
+    toleranceLabel,
     ASSETS,
     MISSIONS,
+    PLATFORMS,
+    GEAR,
     get territory() {
       return territory;
     },

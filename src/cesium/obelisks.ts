@@ -12,8 +12,14 @@ import * as Cesium from 'cesium';
  * Data is built by `tools/build-obelisks.mjs` into `public/obelisks.bin`.
  */
 
-/** Brand orange — the obelisk accent. Mirrors --orange in src/ui/theme.css. */
-export const ORANGE = Cesium.Color.fromCssColorString('#E8701E');
+/**
+ * Brand red — the company's colour, and now the obelisks' too.
+ *
+ * Red is reserved for GORGON's own hardware: obelisks, platforms, beams. The field it watches
+ * uses yellow for a suspected threat and green for an inoculated contact, so at a glance the map
+ * separates what the company OWNS from what it is looking at. Mirrors --red in src/ui/theme.css.
+ */
+export const ORANGE = Cesium.Color.fromCssColorString('#E23A2E');
 
 // --- obelisk dimensions ------------------------------------------------------------------------
 // Building-scale, not mountain-scale: ~6,000 of these land in a city theater, so they read as
@@ -248,8 +254,8 @@ in vec3 v_normalEC;
 in vec2 v_st;
 in float v_eye;
 
-const vec3 SHAFT_BASE = vec3(0.075, 0.055, 0.050);
-const vec3 SHAFT_TIP  = vec3(0.910, 0.439, 0.118);
+const vec3 SHAFT_BASE = vec3(0.080, 0.040, 0.038);
+const vec3 SHAFT_TIP  = vec3(0.886, 0.227, 0.180);
 
 void main() {
   vec3 grad = mix(SHAFT_BASE, SHAFT_TIP, pow(v_st.y, 1.4));
@@ -260,7 +266,7 @@ void main() {
   // The eye: a glowing lens on the face that looks along the heading.
   float band = smoothstep(0.045, 0.015, abs(v_st.y - 0.70));
   float lens = smoothstep(0.17, 0.06, abs(v_st.x - 0.5));
-  col = mix(col, vec3(1.0, 0.72, 0.32), v_eye * band * lens);
+  col = mix(col, vec3(1.0, 0.55, 0.48), v_eye * band * lens);
 
   // The tip the electrical attack will fire from.
   col += SHAFT_TIP * smoothstep(0.88, 1.0, v_st.y) * 0.75;
@@ -289,6 +295,12 @@ void main() {
   out_FragColor = vec4(u_color * exp(-d * d * 4.0) * u_intensity, 1.0);
 }`;
 
+/** How much larger the state's home site stands than an ordinary obelisk. */
+const HOME_SCALE = 2.6;
+/** The crossbar sits this far down from the apex, as a fraction of height. */
+const HOME_ARM_DROP = 0.22;
+const HOME_ARM_SPAN = 2.4; // arm half-length, in base widths
+
 export interface ObeliskPyramids {
   primitive: Cesium.Primitive;
   /** Additive apex flares — what carries the field at altitude. */
@@ -297,6 +309,14 @@ export interface ObeliskPyramids {
   /** In-theater obelisk sites: lon/lat pairs and matching apex ECEF (x,y,z) — for the sensor field. */
   lonLat: Float64Array;
   apex: Float64Array;
+  /** The home site's T-frame, if this theater contains one. Drawn as its own primitive. */
+  home?: { primitive: Cesium.Primitive; lon: number; lat: number; apex: Cesium.Cartesian3 };
+  /**
+   * The global obelisk index of each site, in the same order as `lonLat`/`apex`. The sensor field
+   * works in local indices; this is what maps one back to the campaign-wide field so a site
+   * destroyed in a siege can be struck out of the ownership mask.
+   */
+  indices: Int32Array;
 }
 
 /**
@@ -307,6 +327,118 @@ export interface ObeliskPyramids {
  * `mask` (1 = live) is the ownership filter — a state at DOWNTOWN tier fields one obelisk in its
  * theater, not the thousands the data holds. Same mask the orbit heat uses, so the two views agree.
  */
+/**
+ * The state's home site: the downtown obelisk it was first unlocked with.
+ *
+ * Built as a separate primitive because it is a different SHAPE, not just a bigger one — a T-frame
+ * rather than a pyramid, so the base reads as a distinct piece of infrastructure at a glance rather
+ * than as "one of these is slightly taller". Reuses the obelisk shader, so it takes the same brand
+ * gradient and the same eye-lens treatment for free.
+ */
+function buildHomeFrame(
+  lon: number,
+  lat: number,
+  heightAt: (lon: number, lat: number) => number,
+  heading: number,
+): { primitive: Cesium.Primitive; apex: Cesium.Cartesian3 } {
+  const h = OBELISK_HEIGHT_M * HOME_SCALE;
+  const w = (OBELISK_BASE_M * HOME_SCALE) / 2;
+  const armY = h * (1 - HOME_ARM_DROP);
+  const armSpan = OBELISK_BASE_M * HOME_SCALE * HOME_ARM_SPAN;
+  const armThick = w * 0.8;
+
+  const ground = heightAt(lon, lat) - OBELISK_SINK_M;
+  const origin = Cesium.Cartesian3.fromDegrees(lon, lat, ground);
+  const frame = Cesium.Transforms.eastNorthUpToFixedFrame(origin);
+  const rot = (heading * Math.PI) / 180;
+
+  const positions: number[] = [];
+  const sts: number[] = [];
+  const eyes: number[] = [];
+  const local = new Cesium.Cartesian3();
+  const world = new Cesium.Cartesian3();
+
+  /** A box in the site's local frame, rotated to its heading. */
+  const box = (cx: number, cy: number, cz: number, sx: number, sy: number, sz: number, eye: number) => {
+    const c: number[][] = [];
+    for (const dx of [-1, 1]) {
+      for (const dy of [-1, 1]) {
+        for (const dz of [-1, 1]) {
+          const x = cx + (dx * sx) / 2;
+          const y = cy + (dy * sy) / 2;
+          c.push([x * Math.cos(rot) - y * Math.sin(rot), x * Math.sin(rot) + y * Math.cos(rot), cz + (dz * sz) / 2]);
+        }
+      }
+    }
+    // corner order: (dx,dy,dz) -> index 4dx+2dy+dz with -1 => 0
+    const q = (a: number, b: number, cc: number, d: number) => {
+      for (const i of [a, b, cc, d]) {
+        Cesium.Cartesian3.fromElements(c[i][0], c[i][1], c[i][2], local);
+        Cesium.Matrix4.multiplyByPoint(frame, local, world);
+        positions.push(world.x, world.y, world.z);
+        // st.y drives the shaft gradient; feed it the true height so the frame ramps like a shaft.
+        sts.push(0.5, Math.min(1, c[i][2] / h));
+        eyes.push(eye);
+      }
+    };
+    q(0, 2, 3, 1); q(4, 5, 7, 6); q(0, 1, 5, 4);
+    q(2, 6, 7, 3); q(1, 3, 7, 5); q(0, 4, 6, 2);
+  };
+
+  box(0, 0, h / 2, w * 2, w * 2, h, 0);            // shaft
+  box(0, 0, armY, armSpan, armThick, armThick, 1); // crossbar — carries the eye lens
+
+  // Two triangles per quad, all quads sequential.
+  const quadCount = positions.length / 12;
+  const indices = new Uint32Array(quadCount * 6);
+  for (let i = 0; i < quadCount; i++) {
+    const b = i * 4;
+    indices.set([b, b + 1, b + 2, b, b + 2, b + 3], i * 6);
+  }
+
+  const geometry = new Cesium.Geometry({
+    attributes: {
+      position: new Cesium.GeometryAttribute({
+        componentDatatype: Cesium.ComponentDatatype.DOUBLE,
+        componentsPerAttribute: 3,
+        values: new Float64Array(positions),
+      }),
+      st: new Cesium.GeometryAttribute({
+        componentDatatype: Cesium.ComponentDatatype.FLOAT,
+        componentsPerAttribute: 2,
+        values: new Float32Array(sts),
+      }),
+      eye: new Cesium.GeometryAttribute({
+        componentDatatype: Cesium.ComponentDatatype.FLOAT,
+        componentsPerAttribute: 1,
+        values: new Float32Array(eyes),
+      }),
+    } as unknown as Cesium.GeometryAttributes,
+    indices,
+    primitiveType: Cesium.PrimitiveType.TRIANGLES,
+    boundingSphere: Cesium.BoundingSphere.fromVertices(positions),
+  });
+  Cesium.GeometryPipeline.computeNormal(geometry);
+
+  Cesium.Cartesian3.fromElements(0, 0, h, local);
+  const apex = Cesium.Matrix4.multiplyByPoint(frame, local, new Cesium.Cartesian3());
+
+  return {
+    apex,
+    primitive: new Cesium.Primitive({
+      geometryInstances: new Cesium.GeometryInstance({ geometry }),
+      appearance: new Cesium.Appearance({
+        vertexShaderSource: OBELISK_VS,
+        fragmentShaderSource: OBELISK_FS,
+        translucent: false,
+        closed: false,
+        renderState: { depthTest: { enabled: true }, cull: { enabled: false } },
+      }),
+      asynchronous: false,
+    }),
+  };
+}
+
 export function buildObeliskPyramids(
   field: ObeliskField,
   center: { lon: number; lat: number },
@@ -316,6 +448,8 @@ export function buildObeliskPyramids(
   flarePx: number,
   flareIntensity: number,
   mask?: Uint8Array,
+  /** Global index of this state's home site, if it falls in this theater. */
+  homeIndex?: number,
 ): ObeliskPyramids | undefined {
   const rLat = radiusM / 111_320;
   const rLon = rLat / Math.max(0.15, Math.cos((center.lat * Math.PI) / 180));
@@ -453,5 +587,18 @@ export function buildObeliskPyramids(
     u_intensity: flareIntensity,
   });
 
-  return { primitive, flare, count: n, lonLat, apex: apexes };
+  // The home site gets its own T-frame on top of the ordinary field — it stays in the sensor
+  // arrays (it is still a working obelisk) and simply renders differently.
+  let home: ObeliskPyramids['home'];
+  if (homeIndex !== undefined && homeIndex >= 0) {
+    const at = picked.indexOf(homeIndex);
+    if (at >= 0) {
+      const hLon = field.lon[homeIndex];
+      const hLat = field.lat[homeIndex];
+      const built = buildHomeFrame(hLon, hLat, heightAt, field.heading[homeIndex]);
+      home = { primitive: built.primitive, lon: hLon, lat: hLat, apex: built.apex };
+    }
+  }
+
+  return { primitive, flare, home, count: n, lonLat, apex: apexes, indices: Int32Array.from(picked) };
 }

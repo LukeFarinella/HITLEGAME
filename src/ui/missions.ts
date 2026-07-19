@@ -1,4 +1,6 @@
 import { MISSIONS, missions, type MissionDef } from '../game/missions';
+import { icon } from './icons';
+import { tolerance, toleranceLabel } from '../game/tolerance';
 
 /**
  * The tasking panel: the mission chain on the right rail of the theater-select screen, mirroring
@@ -10,6 +12,20 @@ import { MISSIONS, missions, type MissionDef } from '../game/missions';
  */
 
 const fmt = new Intl.NumberFormat('en-US');
+
+/**
+ * The public-tolerance readout: a thin bar sharing the valid/invalid stack, because it belongs to
+ * the same question — not "how am I doing" but "what am I allowed to do".
+ */
+function toleranceBar(): string {
+  const pct = Math.round(tolerance.level * 100);
+  return (
+    `<div class="c2-bar-row tolerance"><span class="c2-bar-k">PUBLIC</span>` +
+    `<span class="c2-bar thin"><i class="tol" style="width:${pct}%"></i></span>` +
+    `<span class="c2-bar-v">${pct}%</span></div>` +
+    `<div class="c2-tol-note">${toleranceLabel(tolerance.level)} · ORDERS NEED ${Math.round(tolerance.threshold * 100)}% CASE</div>`
+  );
+}
 
 export interface MissionHooks {
   /** A mission started, finished or failed — the scene re-reads authorizations and re-renders. */
@@ -33,6 +49,8 @@ export class MissionPanel {
     document.getElementById('c2-tasking-collapse')?.addEventListener('click', () => {
       this.root.classList.toggle('collapsed');
     });
+
+    tolerance.onChange(() => this.render());
 
     missions.onChange((e) => {
       if (e.type === 'complete') {
@@ -62,7 +80,10 @@ export class MissionPanel {
     const def = missions.activeDef();
     const run = missions.activeRun();
     if (!def || !run) {
-      this.activeEl.innerHTML = `<p class="c2-note">NO ACTIVE TASKING</p>`;
+      // The tolerance bar is campaign state, not tasking state — it stays up between jobs.
+      this.activeEl.innerHTML =
+        `<p class="c2-note">NO ACTIVE TASKING</p>` +
+        `<div class="c2-active c2-idle">${toleranceBar()}</div>`;
       return;
     }
 
@@ -74,14 +95,15 @@ export class MissionPanel {
     const wrap = document.createElement('div');
     wrap.className = 'c2-active';
     wrap.innerHTML =
-      `<div class="c2-active-head"><span class="c2-name">${def.name}</span>` +
+      `<div class="c2-active-head"><span class="c2-name">${icon(def.mark === 'execute' ? 'lethal' : 'surveil')}${def.name}</span>` +
       `<span class="c2-order order-${def.mark}">${def.mark === 'execute' ? 'LETHAL' : 'SURVEIL'}</span></div>` +
       `<div class="c2-bar-row"><span class="c2-bar-k">VALID</span>` +
       `<span class="c2-bar"><i class="ok" style="width:${validPct}%"></i></span>` +
       `<span class="c2-bar-v">${run.valid} / ${def.target}</span></div>` +
       `<div class="c2-bar-row"><span class="c2-bar-k">INVALID</span>` +
       `<span class="c2-bar"><i class="bad" style="width:${invalidPct}%"></i></span>` +
-      `<span class="c2-bar-v">${run.invalid} / ${def.maxInvalid}</span></div>`;
+      `<span class="c2-bar-v">${run.invalid} / ${def.maxInvalid}</span></div>` +
+      toleranceBar();
 
     const stand = document.createElement('button');
     stand.type = 'button';
@@ -107,6 +129,65 @@ export class MissionPanel {
     for (const m of MISSIONS) this.listEl.append(this.row(m));
   }
 
+  /**
+   * The briefing window. Opened from a mission's name or brief; carries the narrative that explains
+   * what the tasking is FOR, which the one-line summary in the list cannot.
+   */
+  private openBriefing(m: MissionDef): void {
+    const status = missions.statusOf(m);
+    const back = document.createElement('div');
+    back.className = 'c2-modal-back';
+
+    const box = document.createElement('div');
+    box.className = 'c2-modal';
+    box.innerHTML =
+      `<div class="c2-modal-head">` +
+      `<span class="c2-name">${icon(m.mark === 'execute' ? 'lethal' : 'surveil')}${m.name}</span>` +
+      `<span class="c2-order order-${m.mark}">${m.mark === 'execute' ? 'LETHAL' : 'SURVEIL'}</span>` +
+      `</div>` +
+      m.briefing
+        .split('\n\n')
+        .map((para) => `<p class="c2-modal-p">${para}</p>`)
+        .join('') +
+      `<div class="c2-modal-objectives">` +
+      `<div><span>OBJECTIVE</span><b>${m.target} valid ${m.mark === 'execute' ? 'executions' : 'investigations'}</b></div>` +
+      `<div><span>INVALID CEILING</span><b>${m.maxInvalid}</b></div>` +
+      `<div><span>SITES THE NET MAY LOSE</span><b>${m.maxObelisksLost}</b></div>` +
+      `<div><span>ON CLEARANCE</span><b>+${fmt.format(m.reward)} officers · +${Math.round(m.toleranceGain * 100)}% tolerance</b></div>` +
+      `<div><span>ON FAILURE</span><b>rollback · −${fmt.format(m.penalty)} officers</b></div>` +
+      (m.grants
+        ? `<div><span>GRANTS</span><b>${m.grants === 'execute' ? 'lethal authority' : 'custody authority'}</b></div>`
+        : '') +
+      `</div>`;
+
+    const actions = document.createElement('div');
+    actions.className = 'c2-modal-actions';
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'c2-buy standdown';
+    close.textContent = 'CLOSE';
+    close.addEventListener('click', () => back.remove());
+    actions.append(close);
+
+    if (status === 'available' && !missions.activeRun()) {
+      const accept = document.createElement('button');
+      accept.type = 'button';
+      accept.className = 'c2-buy';
+      accept.textContent = 'ACCEPT TASKING';
+      accept.addEventListener('click', () => {
+        missions.accept(m);
+        back.remove();
+      });
+      actions.append(accept);
+    }
+    box.append(actions);
+    back.append(box);
+    back.addEventListener('click', (e) => {
+      if (e.target === back) back.remove();
+    });
+    document.body.append(back);
+  }
+
   private row(m: MissionDef): HTMLElement {
     const status = missions.statusOf(m);
     const row = document.createElement('div');
@@ -115,14 +196,16 @@ export class MissionPanel {
     const head = document.createElement('div');
     head.className = 'c2-row-head';
     head.innerHTML =
-      `<span class="c2-name">${m.name}</span>` +
+      `<span class="c2-name">${icon(m.mark === 'execute' ? 'lethal' : 'surveil')}${m.name}</span>` +
       `<span class="c2-tier">${status.toUpperCase()}</span>`;
+    head.addEventListener('click', () => this.openBriefing(m));
     row.append(head);
 
     if (status !== 'locked') {
       const brief = document.createElement('p');
-      brief.className = 'c2-blurb';
+      brief.className = 'c2-blurb briefable';
       brief.textContent = m.brief;
+      brief.addEventListener('click', () => this.openBriefing(m));
       row.append(brief);
     }
 
@@ -165,8 +248,8 @@ export class MissionPanel {
       btn.disabled = true;
       btn.textContent = 'ANOTHER TASKING ACTIVE';
     } else {
-      btn.textContent = 'ACCEPT TASKING';
-      btn.addEventListener('click', () => missions.accept(m));
+      btn.textContent = 'READ BRIEFING';
+      btn.addEventListener('click', () => this.openBriefing(m));
     }
     row.append(btn);
     return row;

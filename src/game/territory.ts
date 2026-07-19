@@ -66,14 +66,39 @@ export interface StateTerritory {
   downtown: number;
   /** Mean of the state's obelisks — where the globe flies when the state is picked in the store. */
   center: { lon: number; lat: number };
+  /** 1–10 for the headline economies, which are sold individually. Undefined for the rest. */
+  gdpRank?: number;
   /** Officer costs, scaled to how many obelisks the state can eventually field. */
   costs: { unlock: number; city: number; full: number };
+}
+
+/**
+ * States are taken in blocks, not one at a time.
+ *
+ * Fifty individual unlocks is a lot of clicking for a decision that is really only interesting a
+ * handful of times, so the map is grouped: the ten biggest prizes on their own, and everything else
+ * split by where it is. A block is bought as a unit and upgrades as a unit.
+ */
+export interface Region {
+  id: string;
+  name: string;
+  blurb: string;
+  states: StateTerritory[];
+  /** Total sites the block can eventually field. */
+  obelisks: number;
+  cities: number;
 }
 
 export interface Territory {
   /** States holding at least one obelisk, alphabetical. */
   states: StateTerritory[];
   byId: Map<string, StateTerritory>;
+  /** The ten largest economies, in rank order. Sold one at a time. */
+  headline: StateTerritory[];
+  /** The purchasable blocks holding everything else, in the order they're offered. */
+  regions: Region[];
+  /** Which block a state belongs to. */
+  regionOf(stateId: string): Region | undefined;
   /** Which state a ground point falls in, or undefined for water / outside the survey. */
   stateAt(lon: number, lat: number): StateTerritory | undefined;
   /** The obelisk indices live at a given tier. */
@@ -84,6 +109,76 @@ export interface Territory {
 
 /** Costs land on clean multiples so the store reads like a price list, not a hash. */
 const round50 = (x: number) => Math.max(50, Math.round(x / 50) * 50);
+
+/**
+ * The ten largest state economies, by FIPS, in rank order — the headline territories.
+ *
+ * These are sold INDIVIDUALLY rather than in a block: they're the decisions worth making one at a
+ * time, and between them they carry most of the national network. Everything else is grouped, so
+ * the list stays about ten interesting choices instead of fifty repetitive ones.
+ *
+ * Ranking is by state GDP and is approximate — the bottom of this list (Washington, New Jersey,
+ * Georgia) reorders year to year, and it's a game-balance input rather than a cited figure.
+ */
+const GDP_TOP: { fips: string; rank: number }[] = [
+  { fips: '06', rank: 1 }, // California
+  { fips: '48', rank: 2 }, // Texas
+  { fips: '36', rank: 3 }, // New York
+  { fips: '12', rank: 4 }, // Florida
+  { fips: '17', rank: 5 }, // Illinois
+  { fips: '42', rank: 6 }, // Pennsylvania
+  { fips: '39', rank: 7 }, // Ohio
+  { fips: '13', rank: 8 }, // Georgia
+  { fips: '34', rank: 9 }, // New Jersey
+  { fips: '53', rank: 10 }, // Washington — where the campaign opens
+];
+const GDP_RANK = new Map(GDP_TOP.map((g) => [g.fips, g.rank]));
+
+/**
+ * Where the remainder splits. Both lines are drawn from the states' own centroids rather than a
+ * hardcoded roster, so the grouping survives the survey finding a different set of states.
+ * -100° is the conventional east/west divide; 37°N is roughly the Mason–Dixon extension.
+ */
+const WEST_OF = -100;
+const SOUTH_OF = 37;
+
+/**
+ * Group everything that ISN'T a headline state, by where it sits. The headline ten are sold one by
+ * one, so they never appear in a block.
+ */
+function buildRegions(states: StateTerritory[]): Region[] {
+  const buckets: Record<string, StateTerritory[]> = { west: [], south: [], north: [] };
+  for (const s of states) {
+    if (GDP_RANK.has(s.id)) continue; // sold individually
+    if (s.center.lon < WEST_OF) buckets.west.push(s);
+    else if (s.center.lat < SOUTH_OF) buckets.south.push(s);
+    else buckets.north.push(s);
+  }
+
+  const meta: { id: string; name: string; blurb: string }[] = [
+    {
+      id: 'west',
+      name: 'WESTERN BLOCK',
+      blurb: 'Remaining states west of the 100th meridian. Sparse, cheap, and mostly dark between cities.',
+    },
+    { id: 'south', name: 'SOUTHERN BLOCK', blurb: 'Remaining southern states and territories.' },
+    { id: 'north', name: 'NORTHERN BLOCK', blurb: 'Remaining northern and northeastern states.' },
+  ];
+
+  return meta
+    .map((m) => {
+      const members = buckets[m.id].sort((a, b) => a.name.localeCompare(b.name));
+      return {
+        id: m.id,
+        name: m.name,
+        blurb: m.blurb,
+        states: members,
+        obelisks: members.reduce((n, s) => n + s.all.length, 0),
+        cities: members.reduce((n, s) => n + s.cityReps.length, 0),
+      };
+    })
+    .filter((r) => r.states.length > 0);
+}
 
 interface Ring {
   x: number[];
@@ -201,6 +296,49 @@ function pickCities(indices: number[], lon: Float32Array, lat: Float32Array): nu
   return reps;
 }
 
+/**
+ * City centres from a loose bag of sites, densest first.
+ *
+ * The same greedy density-then-separation idea {@link pickCities} uses, but over arbitrary lon/lat
+ * pairs rather than the global obelisk field — so a theater can ask "where are the cities in here?"
+ * from the sites it actually built, and spread the player's platforms across them.
+ */
+export function clusterCentres(
+  lonLat: Float64Array,
+  opts: { cellDeg?: number; minCount?: number; separationM?: number; max?: number } = {},
+): { lon: number; lat: number }[] {
+  const cellDeg = opts.cellDeg ?? DENSITY_CELL;
+  const minCount = opts.minCount ?? 1;
+  const separationM = opts.separationM ?? CITY_SEPARATION_M;
+  const max = opts.max ?? 8;
+
+  const cells = new Map<string, { lon: number; lat: number; n: number }>();
+  for (let i = 0; i < lonLat.length; i += 2) {
+    const lon = lonLat[i];
+    const lat = lonLat[i + 1];
+    const key = `${Math.floor(lon / cellDeg)},${Math.floor(lat / cellDeg)}`;
+    const c = cells.get(key);
+    if (c) {
+      c.lon += lon;
+      c.lat += lat;
+      c.n++;
+    } else {
+      cells.set(key, { lon, lat, n: 1 });
+    }
+  }
+
+  const ranked = [...cells.values()].sort((a, b) => b.n - a.n);
+  const out: { lon: number; lat: number }[] = [];
+  for (const c of ranked) {
+    if (out.length >= max) break;
+    if (c.n < minCount && out.length > 0) break;
+    const p = { lon: c.lon / c.n, lat: c.lat / c.n };
+    if (out.some((q) => metres(p.lon, p.lat, q.lon, q.lat) < separationM)) continue;
+    out.push(p);
+  }
+  return out;
+}
+
 let surveyPromise: Promise<Territory> | null = null;
 
 /**
@@ -275,6 +413,7 @@ export function surveyTerritory(field: ObeliskField): Promise<Territory> {
         cityReps: Int32Array.from(reps),
         downtown: reps[0],
         center: { lon: cLon / n, lat: cLat / n },
+        gdpRank: GDP_RANK.get(meta[s].id),
         // Priced off how much the state can eventually field, so taking Wyoming is cheap and
         // taking California is a campaign.
         costs: {
@@ -288,10 +427,19 @@ export function surveyTerritory(field: ObeliskField): Promise<Territory> {
       byId.set(st.id, st);
     }
     states.sort((a, b) => a.name.localeCompare(b.name));
+    const headline = states
+      .filter((s) => s.gdpRank !== undefined)
+      .sort((a, b) => a.gdpRank! - b.gdpRank!);
+    const regions = buildRegions(states);
+    const regionByState = new Map<string, Region>();
+    for (const r of regions) for (const s of r.states) regionByState.set(s.id, r);
 
     return {
       states,
       byId,
+      headline,
+      regions,
+      regionOf: (stateId) => regionByState.get(stateId),
       totalObelisks,
       stateAt(lon, lat) {
         const v = cellAt(lon, lat);

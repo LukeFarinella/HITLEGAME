@@ -1,6 +1,8 @@
 import { ASSETS, progression, type Asset } from '../game/progression';
 import { GEAR, GEAR_BY_ID, PLATFORMS, gearFits, type PlatformDef, type PlatformId } from '../game/platforms';
-import { TIER_LABEL, type StateTerritory, type Territory } from '../game/territory';
+import { TIER_LABEL, type Region, type StateTerritory, type Territory } from '../game/territory';
+import { icon } from './icons';
+import { tolerance, toleranceLabel } from '../game/tolerance';
 
 /**
  * The command store: two tabbed floating panels on the theater-select screen.
@@ -14,6 +16,14 @@ import { TIER_LABEL, type StateTerritory, type Territory } from '../game/territo
  */
 
 const fmt = new Intl.NumberFormat('en-US');
+
+/** A hairline divider with a caption, to separate the two ways territory is sold. */
+function sectionLabel(text: string): HTMLElement {
+  const el = document.createElement('div');
+  el.className = 'c2-section';
+  el.textContent = text;
+  return el;
+}
 
 type Tab = 'platforms' | 'assets' | 'territory';
 
@@ -29,19 +39,18 @@ export class Store {
   private officersEl: HTMLElement;
   private sitesEl: HTMLElement;
   private bodyEl: HTMLElement;
-  private filterEl: HTMLInputElement;
   private tab: Tab = 'platforms';
   /** Which platform's hardpoints are expanded for fitting. */
   private fitting: PlatformId | null = null;
+  /** Which territory block has its member states expanded. */
+  private expanded: string | null = null;
   private territory?: Territory;
-  private filter = '';
 
   constructor(private hooks: StoreHooks) {
     this.root = document.getElementById('c2-store')!;
     this.officersEl = document.getElementById('c2-officers')!;
     this.sitesEl = document.getElementById('c2-sites')!;
     this.bodyEl = document.getElementById('c2-body')!;
-    this.filterEl = document.getElementById('c2-filter') as HTMLInputElement;
 
     for (const btn of this.root.querySelectorAll<HTMLButtonElement>('.c2-tab')) {
       btn.addEventListener('click', () => {
@@ -49,10 +58,6 @@ export class Store {
         this.render();
       });
     }
-    this.filterEl.addEventListener('input', () => {
-      this.filter = this.filterEl.value.trim().toLowerCase();
-      this.render();
-    });
     document.getElementById('c2-collapse')?.addEventListener('click', () => {
       this.root.classList.toggle('collapsed');
     });
@@ -78,9 +83,6 @@ export class Store {
     for (const btn of this.root.querySelectorAll<HTMLButtonElement>('.c2-tab')) {
       btn.classList.toggle('active', btn.dataset.tab === this.tab);
     }
-    // The filter only earns its space on the 50-row territory list.
-    this.filterEl.parentElement!.hidden = this.tab !== 'territory';
-
     this.bodyEl.replaceChildren(
       this.tab === 'platforms'
         ? this.renderPlatforms()
@@ -99,13 +101,19 @@ export class Store {
   }
 
   private platformRow(p: PlatformDef): HTMLElement {
-    const owned = progression.hasPlatform(p.id);
+    const count = progression.countOf(p.id);
+    const owned = count > 0;
     const row = document.createElement('div');
     row.className = `c2-row platform${owned ? ' owned' : ''}`;
 
     const head = document.createElement('div');
     head.className = 'c2-row-head';
-    head.innerHTML = `<span class="c2-name">${p.name}</span><span class="c2-cost">${fmt.format(p.cost)}</span>`;
+    // A fielded platform shows its strength instead of its price — the price is spent.
+    head.innerHTML =
+      `<span class="c2-name">${icon(p.id)}${p.name}</span>` +
+      (owned
+        ? `<span class="c2-count">${count}${p.maxCount > 1 ? ` / ${p.maxCount}` : ''}</span>`
+        : `<span class="c2-cost">${fmt.format(p.cost)}</span>`);
     row.append(head);
 
     const blurb = document.createElement('p');
@@ -115,28 +123,32 @@ export class Store {
 
     const meta = document.createElement('div');
     meta.className = 'c2-meta';
-    const range = owned ? progression.sensorRangeOf(p.id) : p.sensorM;
     meta.innerHTML =
-      `<span>${(range / 1000).toFixed(1)} KM SENSOR</span>` +
+      `<span>${(progression.sensorRangeOf(p.id) / 1000).toFixed(2)} KM SENSOR</span>` +
       `<span>${p.speed} M/S</span>` +
       `<span>${p.hardpoints} HP</span>`;
     row.append(meta);
 
     if (!owned) {
+      const blocker = progression.platformBlocker(p);
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'c2-buy';
-      const afford = progression.officers >= p.cost;
-      btn.disabled = !afford;
-      btn.textContent = afford ? 'COMMISSION' : `INSUFFICIENT · ${fmt.format(p.cost)}`;
-      if (afford) btn.addEventListener('click', () => {
-        if (progression.buyPlatform(p)) this.hooks.onPurchase();
-      });
+      if (blocker) {
+        btn.disabled = true;
+        btn.textContent =
+          blocker === 'INSUFFICIENT OFFICERS' ? `INSUFFICIENT · ${fmt.format(p.cost)}` : blocker;
+      } else {
+        btn.textContent = 'COMMISSION';
+        btn.addEventListener('click', () => {
+          if (progression.buyPlatform(p)) this.hooks.onPurchase();
+        });
+      }
       row.append(btn);
       return row;
     }
 
-    // Owned: show the hardpoints, each either fitted (with a strip control) or an open slot.
+    // Owned: hardpoints, then the fleet expansion if there is one left to buy.
     const loadout = progression.loadoutOf(p.id);
     const hp = document.createElement('div');
     hp.className = 'c2-hardpoints';
@@ -159,6 +171,13 @@ export class Store {
       hp.append(line);
     });
     row.append(hp);
+    // Gear is fitted per TYPE, so say so once rather than implying each unit is configured alone.
+    if (count > 1) {
+      const note = document.createElement('p');
+      note.className = 'c2-fleetnote';
+      note.textContent = `Loadout applies to all ${count}.`;
+      row.append(note);
+    }
 
     const fit = document.createElement('button');
     fit.type = 'button';
@@ -172,6 +191,33 @@ export class Store {
       this.render();
     });
     row.append(fit);
+
+    if (p.expansion && count < p.maxCount) {
+      const blocker = progression.expansionBlocker(p);
+      const exp = document.createElement('div');
+      exp.className = 'c2-expansion';
+      exp.innerHTML =
+        `<div class="c2-row-head"><span class="c2-name">${p.expansion.name}</span>` +
+        `<span class="c2-cost">${fmt.format(p.expansion.cost)}</span></div>` +
+        `<p class="c2-blurb">${p.expansion.blurb}</p>`;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'c2-buy';
+      if (blocker) {
+        btn.disabled = true;
+        btn.textContent =
+          blocker === 'INSUFFICIENT OFFICERS'
+            ? `INSUFFICIENT · ${fmt.format(p.expansion.cost)}`
+            : blocker;
+      } else {
+        btn.textContent = `COMMISSION +${p.expansion.count}`;
+        btn.addEventListener('click', () => {
+          if (progression.buyExpansion(p)) this.hooks.onPurchase();
+        });
+      }
+      exp.append(btn);
+      row.append(exp);
+    }
 
     if (open) row.append(this.armoury(p));
     return row;
@@ -187,7 +233,7 @@ export class Store {
       const item = document.createElement('div');
       item.className = 'c2-gear';
       item.innerHTML =
-        `<div class="c2-row-head"><span class="c2-name">${gear.name}</span>` +
+        `<div class="c2-row-head"><span class="c2-name">${icon(gear.id)}${gear.name}</span>` +
         `<span class="c2-cost">${fmt.format(gear.cost)}</span></div>` +
         `<p class="c2-blurb">${gear.blurb}</p>`;
       const btn = document.createElement('button');
@@ -215,6 +261,11 @@ export class Store {
 
   private renderAssets(): DocumentFragment {
     const frag = document.createDocumentFragment();
+    // What the network can be used FOR is capped by the climate, so say where it stands here too.
+    const note = document.createElement('div');
+    note.className = 'c2-section';
+    note.textContent = `PUBLIC TOLERANCE ${Math.round(tolerance.level * 100)}% · ${toleranceLabel(tolerance.level)}`;
+    frag.append(note);
     for (const a of ASSETS) frag.append(this.assetRow(a));
     return frag;
   }
@@ -230,7 +281,9 @@ export class Store {
 
     const head = document.createElement('div');
     head.className = 'c2-row-head';
-    head.innerHTML = `<span class="c2-name">${a.name}</span><span class="c2-cost">${fmt.format(a.cost)}</span>`;
+    head.innerHTML =
+      `<span class="c2-name">${icon(a.id)}${a.name}</span>` +
+      `<span class="c2-cost">${fmt.format(a.cost)}</span>`;
     row.append(head);
 
     const blurb = document.createElement('p');
@@ -252,6 +305,31 @@ export class Store {
       });
     }
     row.append(btn);
+
+    // Owned automation gets its working threshold, since the whole point is that the operator
+    // decides how strong a case has to be before the machine acts on it.
+    if (owned && (a.id === 'auto-investigate' || a.id === 'auto-execute')) {
+      const kind = a.id === 'auto-execute' ? 'execute' : 'investigate';
+      const wrap = document.createElement('div');
+      wrap.className = 'c2-autorow';
+      const label = document.createElement('label');
+      const cur = progression.autoThreshold(kind);
+      label.innerHTML = `<span>Acts at case</span><b>${Math.round(cur * 100)}%</b>`;
+      const slider = document.createElement('input');
+      slider.type = 'range';
+      slider.min = '0';
+      slider.max = '100';
+      slider.step = '1';
+      slider.value = String(Math.round(cur * 100));
+      slider.addEventListener('input', () => {
+        label.innerHTML = `<span>Acts at case</span><b>${slider.value}%</b>`;
+      });
+      slider.addEventListener('change', () => {
+        progression.setAutoThreshold(kind, parseInt(slider.value, 10) / 100);
+      });
+      wrap.append(label, slider);
+      row.append(wrap);
+    }
     return row;
   }
 
@@ -264,29 +342,16 @@ export class Store {
       frag.append(note);
       return frag;
     }
-
-    // Held ground floats to the top, most-developed first; the rest stays alphabetical so a
-    // specific state is easy to find by eye as well as by the filter.
-    const list = this.territory.states
-      .filter((s) => !this.filter || s.name.toLowerCase().includes(this.filter))
-      .sort((a, b) => {
-        const ta = progression.tierOf(a);
-        const tb = progression.tierOf(b);
-        if (ta !== tb) return tb - ta;
-        return a.name.localeCompare(b.name);
-      });
-
-    if (!list.length) {
-      const note = document.createElement('p');
-      note.className = 'c2-note';
-      note.textContent = 'NO MATCHING TERRITORY';
-      frag.append(note);
-      return frag;
-    }
-    for (const s of list) frag.append(this.stateRow(s));
+    // The ten largest economies one at a time, then everything else in blocks.
+    frag.append(sectionLabel('HEADLINE TERRITORIES'));
+    for (const s of this.territory.headline) frag.append(this.stateRow(s));
+    frag.append(sectionLabel('REMAINING BLOCKS'));
+    for (const r of this.territory.regions) frag.append(this.regionRow(r));
+    frag.append(this.countriesRow());
     return frag;
   }
 
+  /** One individually-bought headline state. */
   private stateRow(s: StateTerritory): HTMLElement {
     const tier = progression.tierOf(s);
     const next = progression.nextTierCost(s);
@@ -298,7 +363,7 @@ export class Store {
     const head = document.createElement('div');
     head.className = 'c2-row-head';
     head.innerHTML =
-      `<span class="c2-name">${s.name}</span>` +
+      `<span class="c2-name">${icon('state')}<span class="c2-rank">${s.gdpRank}</span>${s.name}</span>` +
       `<span class="c2-tier">${TIER_LABEL[tier]}</span>`;
     row.append(head);
 
@@ -309,7 +374,6 @@ export class Store {
       `<span>${fmt.format(s.cityReps.length)} CITIES</span>`;
     row.append(meta);
 
-    // Tier pips: a glance at how far a state is built out, without reading the label.
     const pips = document.createElement('div');
     pips.className = 'c2-pips';
     for (let t = 1; t <= 3; t++) {
@@ -341,9 +405,131 @@ export class Store {
     }
     row.append(btn);
 
-    // The row itself is a "show me" — clicking anywhere but the buy button flies the globe there.
+    // Clicking the row body flies the globe there.
     head.addEventListener('click', () => this.hooks.onFocusState(s));
     meta.addEventListener('click', () => this.hooks.onFocusState(s));
     return row;
   }
+
+  /** One purchasable block, expandable to the states inside it. */
+  private regionRow(r: Region): HTMLElement {
+    const tier = progression.tierOfRegion(r);
+    const next = progression.nextRegionTier(r);
+    let live = 0;
+    for (const s of r.states) {
+      const t = progression.tierOf(s);
+      if (t > 0) live += this.territory!.atTier(s, t).length;
+    }
+
+    const row = document.createElement('div');
+    row.className = `c2-row tier-${tier}`;
+
+    const head = document.createElement('div');
+    head.className = 'c2-row-head';
+    head.innerHTML =
+      `<span class="c2-name">${icon('block')}${r.name}</span>` +
+      `<span class="c2-tier">${TIER_LABEL[tier]}</span>`;
+    row.append(head);
+
+    const blurb = document.createElement('p');
+    blurb.className = 'c2-blurb';
+    blurb.textContent = r.blurb;
+    row.append(blurb);
+
+    const meta = document.createElement('div');
+    meta.className = 'c2-meta';
+    meta.innerHTML =
+      `<span>${fmt.format(live)} / ${fmt.format(r.obelisks)} SITES</span>` +
+      `<span>${r.states.length} STATES</span>` +
+      `<span>${fmt.format(r.cities)} CITIES</span>`;
+    row.append(meta);
+
+    // Tier pips: how far the block is built out, without reading the label.
+    const pips = document.createElement('div');
+    pips.className = 'c2-pips';
+    for (let t = 1; t <= 3; t++) {
+      const pip = document.createElement('i');
+      if (tier >= t) pip.className = 'on';
+      pips.append(pip);
+    }
+    row.append(pips);
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'c2-buy';
+    if (!next) {
+      btn.disabled = true;
+      btn.classList.add('done');
+      btn.textContent = 'FULLY PROLIFERATED';
+    } else {
+      const afford = progression.officers >= next.cost;
+      btn.disabled = !afford;
+      const verb = next.tier === 1 ? 'UNLOCK' : next.tier === 2 ? 'CITY NET' : 'PROLIFERATE';
+      // A block containing the campaign's free home state charges for the others only, so say how
+      // many are actually being bought when it isn't the whole block.
+      const scope = next.states < r.states.length ? ` ×${next.states}` : '';
+      btn.textContent = afford
+        ? `${verb}${scope} · ${fmt.format(next.cost)}`
+        : `INSUFFICIENT · ${fmt.format(next.cost)}`;
+      if (afford) {
+        btn.addEventListener('click', () => {
+          if (progression.buyRegionTier(r)) this.hooks.onPurchase();
+        });
+      }
+    }
+    row.append(btn);
+
+    // Expandable member list: the detail is still there when it's wanted, without fifty rows of it.
+    const open = this.expanded === r.id;
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'c2-expand';
+    toggle.textContent = open ? '▾ HIDE STATES' : `▸ ${r.states.length} STATES`;
+    toggle.addEventListener('click', () => {
+      this.expanded = open ? null : r.id;
+      this.render();
+    });
+    row.append(toggle);
+
+    if (open) {
+      const list = document.createElement('div');
+      list.className = 'c2-members';
+      for (const s of r.states) {
+        const t = progression.tierOf(s);
+        const line = document.createElement('div');
+        line.className = `c2-member tier-${t}`;
+        line.innerHTML =
+          `<span class="c2-member-n">${s.name}</span>` +
+          `<span class="c2-member-t">${TIER_LABEL[t]}</span>` +
+          `<span class="c2-member-s">${fmt.format(s.all.length)}</span>`;
+        line.addEventListener('click', () => this.hooks.onFocusState(s));
+        list.append(line);
+      }
+      row.append(list);
+    }
+    return row;
+  }
+
+  /**
+   * Beyond the states. Gated on holding all of them, and deliberately inert: the obelisk dataset
+   * this game runs on is US-only, so there are no sites anywhere else to sell yet.
+   */
+  private countriesRow(): HTMLElement {
+    const ready = this.territory ? progression.allTerritoryHeld(this.territory) : false;
+    const row = document.createElement('div');
+    row.className = 'c2-row pending';
+    row.innerHTML =
+      `<div class="c2-row-head"><span class="c2-name">${icon('foreign')}FOREIGN THEATERS</span>` +
+      `<span class="c2-tier">${ready ? 'AWAITING SURVEY' : 'LOCKED'}</span></div>` +
+      `<p class="c2-blurb">Country-by-country expansion opens once the national network is fully ` +
+      `proliferated. No site survey exists outside the United States yet.</p>`;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'c2-buy';
+    btn.disabled = true;
+    btn.textContent = ready ? 'NO SURVEY DATA' : 'REQUIRES ALL STATES';
+    row.append(btn);
+    return row;
+  }
+
 }

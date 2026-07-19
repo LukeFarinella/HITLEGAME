@@ -31,6 +31,9 @@
 
       <button id="g-exit" type="button" hidden>◀ WORLD MAP</button>
 
+      <!-- Fielded platform roster, theater only. One card per commissioned unit, click to select. -->
+      <div id="g-roster" hidden></div>
+
       <!-- Command store: tabbed purchase panels, theater-select screen only.
            Rows are generated in src/ui/store.ts — this is just the shell. -->
       <div id="c2-store">
@@ -52,9 +55,6 @@
           <button class="c2-tab active" type="button" data-tab="platforms">PLATFORMS</button>
           <button class="c2-tab" type="button" data-tab="assets">NETWORK</button>
           <button class="c2-tab" type="button" data-tab="territory">TERRITORY</button>
-        </div>
-        <div class="c2-filter-wrap">
-          <input id="c2-filter" type="text" placeholder="FILTER STATES" autocomplete="off" />
         </div>
         <div class="c2-body" id="c2-body"></div>
       </div>
@@ -90,7 +90,23 @@
           <span class="gt-bar"><i class="bad" id="gt-invalid-bar"></i></span>
           <span class="gt-v" id="gt-invalid">0 / 0</span>
         </div>
+        <div class="gt-row">
+          <span class="gt-k">Net</span>
+          <span class="gt-bar"><i class="bad" id="gt-lost-bar"></i></span>
+          <span class="gt-v" id="gt-lost">0 / 0</span>
+        </div>
       </div>
+
+      <!-- Siege alert: an attacker is walking at a site. Theater only, only while one is inbound. -->
+      <div id="g-siege" hidden>
+        <div class="gs-head"><span class="gs-dot"></span><span id="gs-title">ATTACKER INBOUND</span></div>
+        <div class="gs-row"><span class="gs-k">Contact</span><span class="gs-v" id="gs-contact">—</span></div>
+        <div class="gs-row"><span class="gs-k">Range</span><span class="gs-v" id="gs-range">—</span></div>
+        <div class="gs-bar"><i id="gs-bar"></i></div>
+      </div>
+
+      <!-- Audio toggle -->
+      <button id="snd-toggle" type="button" aria-label="Toggle sound" title="Toggle sound">♪</button>
 
       <!-- Dev settings -->
       <button id="dev-toggle" type="button" aria-label="Dev settings" title="Dev settings">⚙</button>
@@ -135,6 +151,8 @@
         <!-- Assessment, not ground truth: C2 sees a confidence, never the contagion sim's answer -->
         <div class="up-row"><span class="k">Assessment</span><span class="v" id="up-status">—</span></div>
         <div class="up-assess" id="up-assess-bar"><i></i></div>
+        <!-- Case strength vs the public-tolerance line: why a contact can or can't be ordered against -->
+        <div class="up-case" id="up-case" hidden><span class="bar"><i></i><u></u></span><span class="v">—</span></div>
         <div class="up-row"><span class="k">Position</span><span class="v" id="up-pos">—</span></div>
         <div class="up-row"><span class="k">Heading</span><span class="v" id="up-hdg">—</span></div>
         <div class="up-row"><span class="k">Sensor</span><span class="v" id="up-sensor">—</span></div>

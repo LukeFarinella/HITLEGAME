@@ -189,7 +189,65 @@ body:has(#globe-ui) #hint { display: none; }
   }
 }
 
+/* ---------- siege alert (theater) ----------
+   Sits under the tasking reminder. Red-edged and pulsing once the attacker is in contact, because
+   at that point there are 30 seconds to do something about it. */
+#g-siege {
+  position: absolute;
+  top: calc(206px + env(safe-area-inset-top, 0px));
+  right: calc(clamp(20px, 4vw, 44px) + 42px);
+  z-index: 61;
+  width: 224px;
+  pointer-events: none;
+  font-family: var(--mono);
+  border: 1px solid var(--red-dim); border-left: 2px solid var(--red);
+  background: rgba(30, 10, 8, .78); backdrop-filter: blur(6px);
+  padding: 8px 11px;
+  display: flex; flex-direction: column; gap: 6px;
+  animation: up-in .16s ease-out;
+}
+#g-siege[hidden] { display: none; }
+#g-siege.contact { border-color: var(--red); animation: siege-pulse 1.1s ease-in-out infinite; }
+@keyframes siege-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--red-glow); }
+  50% { box-shadow: 0 0 14px 2px var(--red-glow); }
+}
+@media (prefers-reduced-motion: reduce) { #g-siege.contact { animation: none; } }
+
+.gs-head { display: flex; align-items: center; gap: 7px; color: var(--bone); font-size: 10px; letter-spacing: .14em; }
+.gs-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--red); flex: none; box-shadow: 0 0 8px var(--red); }
+.gs-row { display: flex; justify-content: space-between; gap: 10px; font-size: 9.5px; letter-spacing: .08em; }
+.gs-k { color: var(--ash); text-transform: uppercase; }
+.gs-v { color: var(--bone); font-variant-numeric: tabular-nums; }
+.gs-bar { height: 3px; background: var(--gunmetal); position: relative; overflow: hidden; }
+.gs-bar i { position: absolute; inset: 0 auto 0 0; display: block; width: 0; background: var(--red); }
+
+@media (max-width: 500px) {
+  #g-siege { top: calc(240px + env(safe-area-inset-top, 0px)); right: 12px; width: 200px; }
+}
+
 /* ---------- dev settings (⚙) ---------- */
+/* Audio toggle, immediately left of the gear */
+#snd-toggle {
+  position: absolute;
+  top: calc(56px + env(safe-area-inset-top, 0px));
+  right: calc(clamp(20px, 4vw, 44px) + 38px);
+  z-index: 80;
+  pointer-events: auto;
+  width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; line-height: 1;
+  color: var(--steel);
+  background: rgba(11, 12, 14, .72);
+  border: 1px solid var(--gunmetal);
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+}
+#snd-toggle:hover { color: var(--bone); border-color: var(--steel); }
+#snd-toggle.muted { color: var(--gunmetal); }
+#snd-toggle:focus-visible { outline: 2px solid var(--steel); outline-offset: 2px; }
+@media (max-width: 500px) { #snd-toggle { right: calc(16px + 38px); } }
+
 #dev-toggle {
   position: absolute;
   top: calc(56px + env(safe-area-inset-top, 0px));
@@ -320,16 +378,45 @@ body:has(#globe-ui) #hint { display: none; }
 .c2-tab.active { color: var(--bone); border-bottom-color: var(--orange); background: rgba(232, 112, 30, .07); }
 .c2-tab:focus-visible { outline: 1px solid var(--orange); outline-offset: -3px; }
 
-.c2-filter-wrap { padding: 9px 12px 0; }
-.c2-filter-wrap[hidden] { display: none; }
-#c2-filter {
-  width: 100%;
-  font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase;
-  color: var(--bone); background: var(--graphite-2);
-  border: 1px solid var(--gunmetal); padding: 7px 9px;
+/* Section divider inside a tab (headline states vs remaining blocks) */
+.c2-section {
+  display: flex; align-items: center; gap: 8px;
+  color: var(--ash); font-size: 9px; letter-spacing: .2em;
+  margin-top: 3px;
 }
-#c2-filter::placeholder { color: var(--ash); letter-spacing: .12em; }
-#c2-filter:focus { outline: none; border-color: var(--orange); }
+.c2-section::after { content: ""; flex: 1; height: 1px; background: var(--gunmetal); }
+.c2-body > .c2-section:first-child { margin-top: 0; }
+
+/* GDP rank badge on a headline state */
+.c2-rank {
+  display: inline-block; min-width: 15px; margin-right: 7px;
+  color: var(--orange); font-size: 9px; text-align: center;
+  border: 1px solid rgba(232, 112, 30, .45); padding: 1px 0;
+}
+
+/* Territory blocks: the member states fold away, so the tab is four rows not fifty */
+.c2-expand {
+  width: 100%; pointer-events: auto; cursor: pointer;
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: .14em;
+  color: var(--ash); background: none; border: none;
+  border-top: 1px solid var(--gunmetal); padding: 6px 0 2px; text-align: left;
+}
+.c2-expand:hover { color: var(--bone); }
+.c2-members { display: flex; flex-direction: column; gap: 2px; padding-top: 4px; }
+.c2-member {
+  display: flex; align-items: baseline; gap: 8px; cursor: pointer;
+  font-size: 9.5px; letter-spacing: .06em;
+  border-left: 2px solid var(--gunmetal); padding: 2px 0 2px 7px;
+  color: var(--ash);
+}
+.c2-member:hover { color: var(--bone); border-left-color: var(--steel); }
+.c2-member.tier-1, .c2-member.tier-2 { border-left-color: var(--orange); color: var(--steel); }
+.c2-member.tier-3 { border-left-color: var(--ok); color: var(--steel); }
+.c2-member-n { flex: 1; }
+.c2-member-t { font-size: 8.5px; letter-spacing: .1em; }
+.c2-member.tier-1 .c2-member-t, .c2-member.tier-2 .c2-member-t { color: var(--orange); }
+.c2-member.tier-3 .c2-member-t { color: var(--ok); }
+.c2-member-s { font-variant-numeric: tabular-nums; width: 44px; text-align: right; }
 
 .c2-body { overflow-y: auto; padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 9px; }
 .c2-body::-webkit-scrollbar { width: 8px; }
@@ -344,8 +431,33 @@ body:has(#globe-ui) #hint { display: none; }
 .c2-row.tier-1, .c2-row.tier-2 { border-left: 2px solid var(--orange); }
 .c2-row.pending { opacity: .55; }
 .c2-row-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
-.c2-name { color: var(--bone); font-size: 11.5px; letter-spacing: .1em; text-transform: uppercase; }
+.c2-name {
+  color: var(--bone); font-size: 11.5px; letter-spacing: .1em; text-transform: uppercase;
+  display: inline-flex; align-items: center; gap: 7px;
+}
+/* Icons inherit the row's colour, so one glyph reads orange in the store, cyan on a fielded
+   platform and green when complete — without a second asset. */
+.c2-glyph { width: 15px; height: 15px; flex: none; color: var(--ash); }
+.c2-row.owned .c2-glyph, .c2-row.tier-3 .c2-glyph { color: var(--ok); }
+.c2-row.tier-1 .c2-glyph, .c2-row.tier-2 .c2-glyph { color: var(--orange); }
+.c2-row.mission.active .c2-glyph { color: var(--red); }
+.c2-row.mission.complete .c2-glyph { color: var(--ok); }
+.c2-gear .c2-glyph { width: 13px; height: 13px; }
+.c2-active .c2-glyph { color: var(--red); }
 .c2-cost { color: var(--orange); font-size: 11px; font-variant-numeric: tabular-nums; }
+/* Fleet strength on a platform that's already been paid for */
+.c2-count {
+  color: var(--sel, #6FD3E8); font-size: 11px; font-variant-numeric: tabular-nums;
+  border: 1px solid rgba(111, 211, 232, .35); padding: 1px 6px;
+}
+.c2-fleetnote { margin: 0; color: var(--ash); font-size: 9px; letter-spacing: .06em; }
+/* Fleet expansion, nested under the platform it grows */
+.c2-expansion {
+  display: flex; flex-direction: column; gap: 5px;
+  border-top: 1px solid var(--gunmetal); padding-top: 8px; margin-top: 2px;
+}
+.c2-expansion .c2-name { font-size: 10px; }
+.c2-expansion .c2-cost { font-size: 10px; }
 .c2-tier { color: var(--ash); font-size: 9.5px; letter-spacing: .14em; }
 .c2-row.tier-1 .c2-tier, .c2-row.tier-2 .c2-tier { color: var(--orange); }
 .c2-row.tier-3 .c2-tier { color: var(--ok); }
@@ -534,20 +646,20 @@ body:has(#globe-ui) #hint { display: none; }
 .up-row .k { color: var(--ash); }
 .up-row .v { color: var(--bone); font-variant-numeric: tabular-nums; text-align: right; }
 .up-row .v.state-normal { color: var(--bone); }
-.up-row .v.state-protected { color: #F2C13B; }
-.up-row .v.state-infected { color: var(--red); }
+.up-row .v.state-protected { color: var(--ok); }
+.up-row .v.state-infected { color: var(--warn); }
 .up-row .v.sensor-dark { color: var(--ash); }
 .up-row .v.sensor-tracked { color: var(--sel, #6FD3E8); }
 /* Assessment bands — the same three colours the field uses, keyed off the estimate not the truth */
 .up-row .v.band-clear { color: var(--bone); }
-.up-row .v.band-suspect { color: #F2C13B; }
-.up-row .v.band-threat { color: var(--red); }
+.up-row .v.band-suspect { color: var(--ok); }
+.up-row .v.band-threat { color: var(--warn); }
 
 /* Confidence bar under the assessment row: the number, read at a glance */
 .up-assess { height: 3px; background: var(--gunmetal); position: relative; margin: 1px 0 3px; }
 .up-assess i { position: absolute; inset: 0 auto 0 0; display: block; background: var(--bone); }
-.up-assess.band-suspect i { background: #F2C13B; }
-.up-assess.band-threat i { background: var(--red); }
+.up-assess.band-suspect i { background: var(--ok); }
+.up-assess.band-threat i { background: var(--warn); }
 .up-assess[hidden] { display: none; }
 
 /* Order countdown: the same bar shape as the assessment, draining as the rescind window closes */
@@ -671,4 +783,131 @@ body:has(#globe-ui) #hint { display: none; }
   }
 
   #loading .ll { font-size: 12px; }
+}
+
+/* ---------- public tolerance + briefing window ----------
+   The tolerance bar shares the valid/invalid stack because it answers the same kind of question:
+   not "how am I doing" but "what am I allowed to do at all". */
+.c2-bar.thin { height: 2px; }
+.c2-bar i.tol { background: var(--steel); }
+.c2-bar-row.tolerance { margin-top: 2px; }
+.c2-tol-note {
+  color: var(--ash); font-size: 8.5px; letter-spacing: .1em;
+  text-align: right; margin-top: -3px;
+}
+.c2-active.c2-idle { padding-top: 0; gap: 4px; }
+
+.c2-blurb.briefable { cursor: pointer; }
+.c2-blurb.briefable:hover { color: var(--steel); }
+.c2-row.mission .c2-row-head { cursor: pointer; }
+
+.c2-modal-back {
+  position: fixed; inset: 0; z-index: 300;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(5, 7, 12, .72); backdrop-filter: blur(3px);
+  pointer-events: auto;
+  animation: up-in .14s ease-out;
+}
+.c2-modal {
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(78vh, 700px); overflow-y: auto;
+  font-family: var(--mono);
+  background: rgba(11, 12, 14, .96);
+  border: 1px solid var(--gunmetal); border-left: 2px solid var(--red);
+  padding: 18px 20px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.c2-modal-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  border-bottom: 1px solid var(--gunmetal); padding-bottom: 11px;
+}
+.c2-modal-head .c2-name { font-size: 14px; letter-spacing: .14em; }
+.c2-modal-head .c2-glyph { width: 18px; height: 18px; color: var(--red); }
+/* Briefing prose is the one place in this interface that is not shouting in caps. */
+.c2-modal-p {
+  margin: 0; color: var(--steel); font-size: 11.5px; line-height: 1.65; letter-spacing: .01em;
+  text-transform: none;
+}
+.c2-modal-objectives {
+  display: flex; flex-direction: column; gap: 5px;
+  border-top: 1px solid var(--gunmetal); padding-top: 11px;
+}
+.c2-modal-objectives div { display: flex; justify-content: space-between; gap: 16px; font-size: 10px; }
+.c2-modal-objectives span { color: var(--ash); letter-spacing: .12em; }
+.c2-modal-objectives b { color: var(--bone); font-weight: 400; text-align: right; }
+.c2-modal-actions { display: flex; gap: 9px; }
+.c2-modal-actions .c2-buy { flex: 1; }
+
+/* Automation threshold slider, shown on an owned auto-marking asset */
+.c2-autorow { display: flex; flex-direction: column; gap: 5px; padding-top: 4px; }
+.c2-autorow label {
+  display: flex; justify-content: space-between; gap: 10px;
+  color: var(--ash); font-size: 9.5px; letter-spacing: .1em; text-transform: uppercase;
+}
+.c2-autorow b { color: var(--orange); font-weight: 400; font-variant-numeric: tabular-nums; }
+.c2-autorow input[type="range"] {
+  -webkit-appearance: none; appearance: none;
+  width: 100%; height: 3px; margin: 2px 0;
+  background: var(--gunmetal); border-radius: 2px; cursor: pointer;
+}
+.c2-autorow input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--orange); border: 2px solid var(--carbon);
+}
+.c2-autorow input[type="range"]::-moz-range-thumb {
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--orange); border: 2px solid var(--carbon);
+}
+
+/* Unit card: case strength against the tolerance bar */
+.up-case { display: flex; align-items: center; gap: 7px; margin: 1px 0 3px; }
+.up-case[hidden] { display: none; }
+.up-case .bar { flex: 1; height: 3px; background: var(--gunmetal); position: relative; }
+.up-case .bar i { position: absolute; inset: 0 auto 0 0; display: block; background: var(--steel); }
+.up-case .bar i.clears { background: var(--ok); }
+/* Where the public bar currently sits — the line a case has to reach. */
+.up-case .bar u { position: absolute; top: -2px; bottom: -2px; width: 1px; background: var(--red); }
+.up-case .v { color: var(--ash); font-size: 9px; letter-spacing: .08em; width: 74px; text-align: right; }
+
+/* ---------- fielded platform roster (theater, top left) ----------
+   Platforms sit in different cities and are sub-pixel from altitude, so hunting for one on the map
+   to click it is the wrong interaction. These cards are the handle. */
+#g-roster {
+  position: absolute;
+  top: calc(104px + env(safe-area-inset-top, 0px));
+  left: clamp(20px, 4vw, 44px);
+  z-index: 62;
+  pointer-events: auto;
+  display: flex; flex-direction: column; gap: 5px;
+  font-family: var(--mono);
+}
+#g-roster[hidden] { display: none; }
+.gr-card {
+  display: flex; align-items: center; gap: 8px;
+  width: 158px; padding: 6px 9px;
+  pointer-events: auto; cursor: pointer; text-align: left;
+  background: rgba(11, 12, 14, .74); backdrop-filter: blur(6px);
+  border: 1px solid var(--gunmetal); border-left: 2px solid var(--red);
+  font-family: var(--mono);
+}
+.gr-card:hover { border-color: var(--red); background: rgba(30, 10, 8, .8); }
+.gr-card.selected { background: var(--red-deep); border-color: var(--red); }
+.gr-card:focus-visible { outline: 2px solid var(--red); outline-offset: 2px; }
+.gr-icon { display: flex; flex: none; }
+.gr-icon .c2-glyph { width: 17px; height: 17px; color: var(--red); }
+.gr-card.selected .gr-icon .c2-glyph { color: var(--bone); }
+.gr-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.gr-id { color: var(--bone); font-size: 10px; letter-spacing: .1em; }
+.gr-state { color: var(--ash); font-size: 8.5px; letter-spacing: .1em; }
+.gr-state.moving { color: var(--red); }
+
+@media (max-width: 500px) {
+  /* On a phone the roster goes horizontal under the exit button and scrolls. */
+  #g-roster {
+    top: calc(100px + env(safe-area-inset-top, 0px));
+    left: 12px; right: 12px;
+    flex-direction: row; overflow-x: auto; gap: 6px;
+  }
+  .gr-card { width: auto; flex: none; }
 }

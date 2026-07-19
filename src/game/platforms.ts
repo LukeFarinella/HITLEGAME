@@ -15,14 +15,39 @@ import type { UnitKind } from '../cesium/unitModels';
 export type PlatformId = UnitKind & ('drone' | 'spider' | 'biped' | 'walker');
 
 /** What a piece of gear grants. The scene asks for these by name. */
-export type Capability = 'laser' | 'wide-sensor' | 'deep-scan';
+export type Capability = 'laser' | 'wide-sensor' | 'deep-scan' | 'detain';
+
+/**
+ * Base sensor radius for every platform — the same disc an obelisk watches.
+ *
+ * A platform sees no further than a fixed site by default. What it has over an obelisk is that it
+ * MOVES, and what extends its reach is gear: the wide-aperture pod is the upgrade that turns a
+ * platform into an area sensor rather than a walking obelisk.
+ */
+export const BASE_SENSOR_M = 750;
+
+/** Buying more of a platform you already field. */
+export interface Expansion {
+  /** How many additional units this adds. */
+  count: number;
+  cost: number;
+  name: string;
+  blurb: string;
+}
 
 export interface PlatformDef {
   id: PlatformId;
   name: string;
   blurb: string;
+  /** Cost of the first one. */
   cost: number;
-  /** Gear slots. Bigger platforms carry more. */
+  /** How many can be fielded at once. */
+  maxCount: number;
+  /** The one purchase that takes the fleet from 1 to {@link maxCount}, if there is one. */
+  expansion?: Expansion;
+  /** Must be fielded first — this is what makes a platform a late slot rather than just a dear one. */
+  requires?: PlatformId;
+  /** Gear slots. Bigger platforms carry more. Shared across every unit of the type. */
   hardpoints: number;
   /** Base sensor disc radius, metres, before any gear. */
   sensorM: number;
@@ -32,26 +57,31 @@ export interface PlatformDef {
   altM: number;
 }
 
+/**
+ * Listed in unlock order. The campaign opens fielding one arachnid and nothing else; the disc sits
+ * in the last slot behind the walker, because being the only airborne platform — and by far the
+ * fastest thing on the board — is the capstone capability rather than the entry one.
+ */
 export const PLATFORMS: PlatformDef[] = [
-  {
-    id: 'drone',
-    name: 'DISC OBSERVER',
-    blurb: 'High-altitude disc. Fastest repositioning on the board and the widest bare sensor.',
-    cost: 4000,
-    hardpoints: 2,
-    sensorM: 6000,
-    speed: 1000,
-    altM: 1800,
-  },
   {
     id: 'spider',
     name: 'ARACHNID SCOUT',
     blurb:
-      'Six-legged walker at infantry scale. Slips through the street grid and reads what an orbital sensor cannot.',
+      'Six-legged walker at infantry scale. Outruns traffic through the street grid and reads what an orbital sensor cannot.',
     cost: 3000,
+    maxCount: 4,
+    expansion: {
+      count: 3,
+      cost: 7500,
+      name: 'ARACHNID PICKET',
+      blurb: 'Three more scouts, for a picket line across the theater rather than a single set of eyes.',
+    },
     hardpoints: 1,
-    sensorM: 1400,
-    speed: 26,
+    sensorM: BASE_SENSOR_M,
+    // Faster than the traffic it moves through (ground vehicles run 80 m/s). A scout that can be
+    // outrun by the contacts it's watching can't reposition onto anything, which mattered more once
+    // platform sensors came down to an obelisk's 750 m — reach is now legwork, not aperture.
+    speed: 110,
     altM: 0,
   },
   {
@@ -60,8 +90,15 @@ export const PLATFORMS: PlatformDef[] = [
     blurb:
       'Digitigrade two-legged walker, twice the mass of a ground vehicle. Fast enough to chase and armed enough to matter.',
     cost: 9000,
+    maxCount: 2,
+    expansion: {
+      count: 1,
+      cost: 11_000,
+      name: 'SECOND MARSHAL',
+      blurb: 'A second biped, so the pair can cover opposite ends of a theater.',
+    },
     hardpoints: 2,
-    sensorM: 3200,
+    sensorM: BASE_SENSOR_M,
     speed: 70,
     altM: 0,
   },
@@ -71,10 +108,24 @@ export const PLATFORMS: PlatformDef[] = [
     blurb:
       'Four-legged siege platform spanning several city blocks. Slow, enormous, and carries four hardpoints.',
     cost: 42_000,
+    maxCount: 1,
     hardpoints: 4,
-    sensorM: 9000,
+    sensorM: BASE_SENSOR_M,
     speed: 14,
     altM: 0,
+  },
+  {
+    id: 'drone',
+    name: 'DISC OBSERVER',
+    blurb:
+      'High-altitude disc. The only airborne platform and the fastest thing on the board — it crosses a theater while a walker crosses a city.',
+    cost: 55_000,
+    maxCount: 1,
+    requires: 'walker',
+    hardpoints: 2,
+    sensorM: BASE_SENSOR_M,
+    speed: 1000,
+    altM: 1800,
   },
 ];
 
@@ -88,6 +139,11 @@ export interface GearDef {
   grants: Capability;
   /** Platforms this fits, or 'all'. */
   fits: PlatformId[] | 'all';
+  /**
+   * Standing authorization required before this can be bought at all. Custody is granted by
+   * the mission chain, not by money — the rig is useless without the power to use it.
+   */
+  requiresAuth?: 'detain' | 'execute';
 }
 
 export const GEAR: GearDef[] = [
@@ -106,6 +162,17 @@ export const GEAR: GearDef[] = [
     cost: 5500,
     grants: 'wide-sensor',
     fits: 'all',
+  },
+  {
+    id: 'detainer',
+    name: 'DETAINMENT RIG',
+    blurb:
+      'Takes obelisk attackers non-lethally inside the platform’s envelope. Needs no execution authority and never touches the ledger.',
+    cost: 6500,
+    grants: 'detain',
+    requiresAuth: 'detain',
+    // Ground platforms only — you cannot detain anyone from a disc at cruise altitude.
+    fits: ['spider', 'biped', 'walker'],
   },
   {
     id: 'deep-scan',

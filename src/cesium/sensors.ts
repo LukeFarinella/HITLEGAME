@@ -25,7 +25,7 @@ const CELL_FRACTION = 0.5;
 
 /** Faint ring drawn at each obelisk to show its range. Additive, so overlaps read as denser cover. */
 const RING_SEGMENTS = 40;
-const RING_COLOR = Cesium.Color.fromCssColorString('#6FA8B8'); // tactical cyan, kept very low alpha
+const RING_COLOR = Cesium.Color.fromCssColorString('#E23A2E'); // company red, kept very low alpha
 const RING_ALPHA = 0.16;
 const RING_LIFT = 25; // metres above the mesh
 
@@ -109,7 +109,8 @@ export class SensorField {
       this.glowPoints.push(
         this.glow.add({
           position: new Cesium.Cartesian3(apex[i * 3], apex[i * 3 + 1], apex[i * 3 + 2]),
-          color: Cesium.Color.fromCssColorString('#FF3B2E').withAlpha(0.85),
+          // Yellow: this is the obelisk reporting a suspected contact, not the company acting.
+          color: Cesium.Color.fromCssColorString('#F2C13B').withAlpha(0.85),
           pixelSize: 14,
           show: false,
           disableDepthTestDistance: Number.POSITIVE_INFINITY,
@@ -153,6 +154,28 @@ export class SensorField {
         }
       }
     }
+  }
+
+  /**
+   * A random site in this theater, for the siege director to aim an attacker at. The index is
+   * LOCAL to this field; the caller maps it back through ObeliskPyramids.indices to mark the
+   * obelisk destroyed in the campaign-wide ownership mask.
+   */
+  randomSite(): { local: number; lon: number; lat: number } | null {
+    if (!this.obeliskCount) return null;
+    const i = Math.floor(Math.random() * this.obeliskCount);
+    return { local: i, lon: this.obLon[i], lat: this.obLat[i] };
+  }
+
+  /** Apex of one site, by local index. Shared scratch — clone it if you need to keep it. */
+  apexAt(local: number): Cesium.Cartesian3 | undefined {
+    if (local < 0 || local >= this.obeliskCount) return undefined;
+    return Cesium.Cartesian3.fromElements(
+      this.apex[local * 3],
+      this.apex[local * 3 + 1],
+      this.apex[local * 3 + 2],
+      this.apexScratch,
+    );
   }
 
   /** Is a point inside any obelisk's range? */
