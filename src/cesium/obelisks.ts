@@ -183,20 +183,30 @@ function additivePoints(
   });
 }
 
+/**
+ * `mask` (1 = live) limits the splats to the sites the player actually holds, so orbit reads as a
+ * map of the campaign: held states glow, everything still to be taken sits dark. Undefined shows
+ * the whole field. Returns undefined when nothing is live — there is no valid zero-point primitive.
+ */
 export function createHeatField(
   field: ObeliskField,
   pointSize: number,
   intensity: number,
   dot: number,
-): Cesium.Primitive {
-  const n = field.count;
-  const positions = new Float64Array(n * 3);
+  mask?: Uint8Array,
+): Cesium.Primitive | undefined {
+  const live: number[] = [];
+  for (let i = 0; i < field.count; i++) if (!mask || mask[i]) live.push(i);
+  if (!live.length) return undefined;
+
+  const positions = new Float64Array(live.length * 3);
   const scratch = new Cesium.Cartesian3();
-  for (let i = 0; i < n; i++) {
+  for (let k = 0; k < live.length; k++) {
+    const i = live[k];
     Cesium.Cartesian3.fromDegrees(field.lon[i], field.lat[i], HEAT_LIFT_M, undefined, scratch);
-    positions[i * 3] = scratch.x;
-    positions[i * 3 + 1] = scratch.y;
-    positions[i * 3 + 2] = scratch.z;
+    positions[k * 3] = scratch.x;
+    positions[k * 3 + 1] = scratch.y;
+    positions[k * 3 + 2] = scratch.z;
   }
   return additivePoints(positions, HEAT_VS, HEAT_FS, {
     u_color: Cesium.Cartesian3.fromElements(ORANGE.red, ORANGE.green, ORANGE.blue),
@@ -293,6 +303,9 @@ export interface ObeliskPyramids {
  * Build every obelisk inside the theater disc as one merged primitive (one draw call).
  * `maxRadial` is in units of the theater radius; sites past it are dropped rather than faded,
  * since the terrain out there is already dissolving into black.
+ *
+ * `mask` (1 = live) is the ownership filter — a state at DOWNTOWN tier fields one obelisk in its
+ * theater, not the thousands the data holds. Same mask the orbit heat uses, so the two views agree.
  */
 export function buildObeliskPyramids(
   field: ObeliskField,
@@ -302,6 +315,7 @@ export function buildObeliskPyramids(
   maxRadial: number,
   flarePx: number,
   flareIntensity: number,
+  mask?: Uint8Array,
 ): ObeliskPyramids | undefined {
   const rLat = radiusM / 111_320;
   const rLon = rLat / Math.max(0.15, Math.cos((center.lat * Math.PI) / 180));
@@ -311,6 +325,7 @@ export function buildObeliskPyramids(
   // its keep here.
   const picked: number[] = [];
   for (let i = 0; i < field.count; i++) {
+    if (mask && !mask[i]) continue;
     const dLon = field.lon[i] - center.lon;
     if (dLon < -rLon || dLon > rLon) continue;
     const dLat = field.lat[i] - center.lat;

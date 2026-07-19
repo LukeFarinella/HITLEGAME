@@ -1,8 +1,11 @@
 import * as Cesium from 'cesium';
 import { InstancedModelBatch } from './instancedModels';
-import { UNIT_MESHES, UNIT_SCALE, type UnitKind } from './unitModels';
+import { UNIT_MESHES, UNIT_SCALE, UNIT_KINDS, PLATFORM_KINDS, type UnitKind } from './unitModels';
+import { PLATFORM_BY_ID, type PlatformId } from '../game/platforms';
 import type { RoadNet, RoadClass } from './roads';
 import type { SensorField } from './sensors';
+import { assessBand, rollAssessment, rollRecord } from '../game/intel';
+import type { MarkKind } from '../game/missions';
 
 /**
  * The live unit layer for a theater: land vehicles routed on the real road graph, ships drifting on
@@ -17,22 +20,127 @@ import type { SensorField } from './sensors';
 
 export type UnitState = 'normal' | 'protected' | 'infected';
 
-const STATE_COLOR: Record<UnitState, Cesium.Color> = {
-  normal: Cesium.Color.fromCssColorString('#EDEFF2'),
-  protected: Cesium.Color.fromCssColorString('#F2C13B'),
-  infected: Cesium.Color.fromCssColorString('#E23A2E'),
+/**
+ * Units are coloured by the ASSESSED band, not by their true state.
+ *
+ * That distinction is the whole game. C2 never sees the contagion sim's ground truth — it sees an
+ * estimate — and if the field rendered the truth, the assessment percentage on the card would be
+ * decoration and every mark would be free. Because the assessment correlates strongly with the
+ * truth, the field still reads the way it always has (white countryside, red pooling in the dark);
+ * it's just that a red contact is now *probably* infected rather than certainly.
+ */
+const BAND_COLOR: Record<'clear' | 'suspect' | 'threat', Cesium.Color> = {
+  clear: Cesium.Color.fromCssColorString('#EDEFF2'),
+  suspect: Cesium.Color.fromCssColorString('#F2C13B'),
+  threat: Cesium.Color.fromCssColorString('#E23A2E'),
 };
 
 /** Out-of-sensor-range units render faint (a stand-in for fog of war). */
 const UNSEEN_ALPHA = 0.3;
 
+/** The GORGON drone reads as friendly hardware, not as a contagion state. */
+const DRONE_COLOR = Cesium.Color.fromCssColorString('#6FD3E8');
+
+/**
+ * How strongly infected units avoid obelisk-watched roads at junctions. Tuned by measuring the
+ * settled equilibrium (see chooseEdge) rather than by feel — mutable so it can be A/B'd live.
+ */
+export const INFECTED_FLEE = { covered: 0.3, open: 2.6 };
+
+/**
+ * The field's baseline composition — the campaign's difficulty dial, and the single place it's set.
+ *
+ * These are FIELD-WIDE shares, not per-location ones: coverage still modulates around them (cities
+ * run cleaner, the dark between them runs dirtier), but the whole-theater average lands here. Later
+ * missions raise `infected` to escalate; everything downstream — spawn rolls and the contagion
+ * equilibrium alike — is derived from it, so raising this one number is the whole change.
+ */
+export const MIX = {
+  /** Share of the field that is infected. */
+  infected: 0.05,
+  /** Share that is inoculated. Says nothing about a unit's record — see game/intel.ts. */
+  protected: 0.05,
+};
+
+/**
+ * How coverage bends the mix around {@link MIX}. The obelisk net suppresses infection inside its
+ * discs and the unwatched ground carries the balance, which is what makes the countryside worth
+ * flying the drone into. Coverage is a small fraction of a theater, so the dark multiplier stays
+ * near 1 — the gradient is in the ratio between them, not in the absolute numbers.
+ */
+const COVER_SUPPRESS = 0.3;
+const DARK_AMPLIFY = 1.07;
+
+/**
+ * Contagion pressure, per unit per second.
+ *
+ * Steering alone cannot hold a spatial gradient: measured, a junction bias moves the settled share
+ * of infected-inside-cover by <1 point (14.7% unbiased vs 15.5%), because in a city every option at
+ * a junction is covered, so the weighting cancels and only bites at coverage boundaries. And a
+ * spawn-time bias washes out within minutes as traffic mixes, since state never changes once set.
+ *
+ * So state responds to place instead: the obelisk net actively suppresses infection inside its
+ * coverage, and the dark between cities breeds it.
+ *
+ * `breed` is DERIVED rather than set. Unwatched ground settles at breed/(breed+recover), so a
+ * hand-picked breed rate silently decides the field's composition — with the old 0.03/0.03 the
+ * countryside equilibrated at 50% infected and dragged the whole theater to ~38%, whatever the
+ * spawn mix said. Solving it against {@link MIX} instead means the equilibrium the sim drifts
+ * toward IS the mix that was asked for, and raising the dial retunes it automatically.
+ */
+const DARK_TARGET = MIX.infected * DARK_AMPLIFY;
+export const CONTAGION = {
+  /** Infected inside obelisk cover are neutralised at this rate (→ protected). */
+  cleanse: 0.05,
+  /** Protected units resist breeding by this factor. */
+  protectedResist: 0.15,
+  /** Baseline burnout everywhere (→ normal). */
+  recover: 0.03,
+  /** Unwatched units turn at this rate (→ infected). Solved so the dark settles at DARK_TARGET. */
+  breed: (0.03 * DARK_TARGET) / (1 - DARK_TARGET),
+};
+
+/** Units are re-evaluated on a rotating slice this many frames apart, to keep the sweep cheap. */
+const CONTAGION_STRIDE = 30;
+
 /** Metres per second. Exaggerated over real life so motion reads when watching a theater. */
-const SPEED: Record<UnitKind, number> = { land: 80, sea: 28, air: 210, foot: 12 };
+// The drone is sized to the theater, not to realism: a 200-mi theater is ~320 km across, so at a
+// plausible 340 m/s repositioning it would take ~16 min. 1000 m/s crosses the whole theater in ~5
+// min and makes a typical 30 km hop ~30 s, which is what makes it usable as a directed asset.
+// Platform speeds come from their catalog entry, so the store and the sim can't disagree.
+const SPEED: Record<UnitKind, number> = {
+  land: 80,
+  sea: 28,
+  air: 210,
+  foot: 12,
+  drone: PLATFORM_BY_ID.get('drone')!.speed,
+  spider: PLATFORM_BY_ID.get('spider')!.speed,
+  biped: PLATFORM_BY_ID.get('biped')!.speed,
+  walker: PLATFORM_BY_ID.get('walker')!.speed,
+};
 /**
  * Height above the sampled ground, metres. Land/foot clear the road ribbon (draped at +12) so
- * vehicles sit ON the road rather than being drawn under it.
+ * vehicles sit ON the road rather than being drawn under it. Walkers stand on their own legs, so
+ * they ride at ground level and their height comes from the mesh.
  */
-const RIDE_HEIGHT: Record<UnitKind, number> = { land: 14, sea: 1, air: 0, foot: 14 };
+const RIDE_HEIGHT: Record<UnitKind, number> = {
+  land: 14,
+  sea: 1,
+  air: 0,
+  foot: 14,
+  drone: 0,
+  spider: 2,
+  biped: 2,
+  walker: 2,
+};
+
+/**
+ * Live sensor radius per platform, metres. Written by the scene whenever a loadout changes (a
+ * wide-aperture pod widens it), and read every frame — so it's mutable state rather than a constant.
+ */
+export const PLATFORM_SENSOR: Record<string, number> = {};
+/** Within this many metres of its ordered destination, a platform is "on station". */
+const ARRIVE_M = 120;
 
 const DEG = Math.PI / 180;
 const mPerLat = 111_320;
@@ -51,6 +159,8 @@ interface Edge {
   nodeB: number; // node index at last pt
   cls: RoadClass;
   rank: number; // higher = bigger road
+  /** Whether an obelisk watches this edge (sampled at its midpoint). Infected steer for the dark. */
+  covered: boolean;
 }
 
 /** Higher roads are preferred at junctions so freeway traffic flows through instead of exiting. */
@@ -73,7 +183,7 @@ class RoadGraph {
   private cumFreeway: number[] = [];
   private totalFreeway = 0;
 
-  constructor(net: RoadNet) {
+  constructor(net: RoadNet, isCovered?: (lon: number, lat: number) => boolean) {
     for (const road of net.roads) {
       const pts = road.coords;
       if (pts.length < 2) continue;
@@ -87,7 +197,17 @@ class RoadGraph {
       if (len < 5) continue;
       const a = this.node(pts[0]);
       const b = this.node(pts[pts.length - 1]);
-      const e: Edge = { pts, cum, len, nodeA: a, nodeB: b, cls: road.cls, rank: CLASS_RANK[road.cls] };
+      const mid = pts[pts.length >> 1];
+      const e: Edge = {
+        pts,
+        cum,
+        len,
+        nodeA: a,
+        nodeB: b,
+        cls: road.cls,
+        rank: CLASS_RANK[road.cls],
+        covered: isCovered ? isCovered(mid[0], mid[1]) : true,
+      };
       const ei = this.edges.push(e) - 1;
       this.adj[a].push(ei);
       this.adj[b].push(ei);
@@ -164,27 +284,51 @@ class RoadGraph {
 interface Unit {
   id: string; // callsign, shown in the selection panel
   kind: UnitKind;
+  /** Ground truth. Never leaves this module except as a verdict on an order. */
   state: UnitState;
+  /** Displayed infection likelihood, 0–1. Re-rolled when `state` changes. See game/intel.ts. */
+  assess: number;
+  /** Bitmask of infractions over the intel catalog. Rolled at spawn, never revised. */
+  record: number;
   lon: number;
   lat: number;
   heading: number;
-  mark: boolean; // C2 "investigate" flag — persists, shown as a field marker
+  /** Standing C2 order on this unit, or null. Shown as a field marker. */
+  mark: MarkKind | null;
+  /**
+   * Seconds left before the order commits. While this is running the order is PENDING and can be
+   * rescinded with no consequence; at zero it commits — an investigation is logged, an execution
+   * arms. Undefined once committed.
+   */
+  markTimer?: number;
+  /** Serviced by a directed-energy platform. Dead units stop being drawn, ticked or picked. */
+  dead?: boolean;
   // land/foot: graph traversal
   edge?: number;
   dist?: number;
   dir?: 1 | -1;
   // sea/air: free wander
   turn?: number; // radians/sec bias
+  // drone: commanded destination (RMB order); absent once it arrives and holds station
+  tlon?: number;
+  tlat?: number;
 }
 
 /** Callsign prefix per kind. */
-const CALLSIGN: Record<UnitKind, string> = { land: 'CV', sea: 'SV', air: 'AV', foot: 'FT' };
+const CALLSIGN: Record<UnitKind, string> = {
+  land: 'CV', sea: 'SV', air: 'AV', foot: 'FT',
+  drone: 'GORGON', spider: 'ARC', biped: 'MAR', walker: 'COL',
+};
 /** Human label per kind, for the panel. */
 export const KIND_LABEL: Record<UnitKind, string> = {
   land: 'GROUND VEHICLE',
   sea: 'SEA VESSEL',
   air: 'AIRCRAFT',
   foot: 'FOOT UNIT',
+  drone: 'DISC OBSERVER',
+  spider: 'ARACHNID SCOUT',
+  biped: 'MARSHAL BIPED',
+  walker: 'COLOSSUS SIEGE WALKER',
 };
 
 /** Metres/second per kind (mirrors SPEED) surfaced for the panel. */
@@ -194,25 +338,74 @@ export const KIND_SPEED = SPEED;
 export interface SelectionInfo {
   count: number;
   byKind: Record<UnitKind, number>;
-  byState: Record<UnitState, number>;
+  /**
+   * Tally by ASSESSED band, not by true state — this feeds the multi-select panel, and the panel is
+   * a C2 display. The ground truth is never surfaced here.
+   */
+  byBand: Record<'clear' | 'suspect' | 'threat', number>;
   markedCount: number;
+  /**
+   * The kind of standing order on the selection, when they all carry the same one. A kill order
+   * outlives the tasking that authorized it, so the panel needs this to offer to rescind the order
+   * that's ACTUALLY standing rather than the one the current tasking would issue.
+   */
+  markedKind: MarkKind | null;
+  /** How many of the selection are still inside their rescind window. */
+  pendingCount: number;
+  /** Shortest countdown left across the selection, seconds. 0 when nothing is pending. */
+  pendingSeconds: number;
+  /**
+   * How many of the selection are currently inside sensor coverage. C2 can only act on what it can
+   * see, so this is what gates the investigate order — not the selection count.
+   */
+  trackedCount: number;
   /** Present only when exactly one unit is selected. */
   single?: {
     id: string;
     kind: UnitKind;
-    state: UnitState;
+    /** Displayed infection likelihood, 0–1 — NOT the true state, which the card never shows. */
+    assess: number;
+    /** Infraction bitmask, for the card's charge sheet. */
+    record: number;
     lon: number;
     lat: number;
     heading: number;
-    mark: boolean;
+    mark: MarkKind | null;
+    /** Seconds left to rescind, or undefined once the order has committed. */
+    markTimer?: number;
+    /** Inside sensor coverage right now. */
+    tracked: boolean;
+    /** Drone only: whether it's transiting to an ordered point or holding station. */
+    order?: 'MOVING' | 'ON STATION';
   };
 }
 
-/** "Investigate" marker colour (amber = attention). */
-const MARK_COLOR = '#F2A83B';
+/** One resolved execution: where the beam came from, where it landed, and whether it was justified. */
+export interface Execution {
+  index: number;
+  id: string;
+  from: Cesium.Cartesian3;
+  to: Cesium.Cartesian3;
+  valid: boolean;
+}
 
-/** A diamond-outline texture drawn once, used for every investigate marker. */
-function makeMarkTexture(): HTMLCanvasElement {
+/**
+ * How long an order sits pending before it commits — the window in which the operator can take it
+ * back. Nothing is logged and no beam fires until it elapses, so a misclick costs nothing.
+ *
+ * Execution gets the longer window deliberately: it's the irreversible one, and the delay is the
+ * only thing standing between a stray click and a dead unit.
+ */
+export const ORDER_DELAY: Record<MarkKind, number> = { investigate: 5, execute: 8 };
+
+/** Marker colours: amber flags attention, red flags a standing kill order. */
+const MARK_COLOR = '#F2A83B';
+const EXEC_COLOR = '#FF3B2E';
+/** Billboard tint for an order still inside its rescind window — the same icon, held back. */
+const PENDING_MARK_COLOR = Cesium.Color.WHITE.withAlpha(0.4);
+
+/** An amber diamond outline — a contact flagged for investigation. */
+function makeInvestigateTexture(): HTMLCanvasElement {
   const c = document.createElement('canvas');
   c.width = 48;
   c.height = 48;
@@ -231,11 +424,43 @@ function makeMarkTexture(): HTMLCanvasElement {
   return c;
 }
 
+/**
+ * A red bracketed crosshair — a standing execution order. Deliberately a different SHAPE, not just
+ * a different colour: the two orders are not interchangeable and shouldn't be told apart by hue
+ * alone, on a map that is already mostly red and amber.
+ */
+function makeExecuteTexture(): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = 48;
+  c.height = 48;
+  const g = c.getContext('2d')!;
+  g.translate(24, 24);
+  g.strokeStyle = EXEC_COLOR;
+  g.lineWidth = 3.5;
+  g.beginPath();
+  g.arc(0, 0, 13, 0, Math.PI * 2);
+  g.stroke();
+  g.beginPath();
+  for (const [dx, dy] of [
+    [-1, 0],
+    [1, 0],
+    [0, -1],
+    [0, 1],
+  ]) {
+    g.moveTo(dx * 8, dy * 8);
+    g.lineTo(dx * 20, dy * 20);
+  }
+  g.stroke();
+  return c;
+}
+
 export interface UnitFieldOptions {
   land: number;
   sea: number;
   air: number;
   foot: number;
+  /** Which player platforms are fielded. One of each at most — these are hero units. */
+  platforms: PlatformId[];
 }
 
 export class UnitField {
@@ -246,13 +471,25 @@ export class UnitField {
   private radiusM: number;
   private heightAt: (lon: number, lat: number) => number;
   private scratch = new Cesium.Cartesian3();
-  private nextId: Record<UnitKind, number> = { land: 0, sea: 0, air: 0, foot: 0 };
+  private nextId: Record<UnitKind, number> = {
+    land: 0, sea: 0, air: 0, foot: 0, drone: 0, spider: 0, biped: 0, walker: 0,
+  };
+  /** Obelisk coverage test, used both to seed infection and to steer it toward the dark. */
+  private isCovered?: (lon: number, lat: number) => boolean;
+  /** Fielded platforms and their index in `units`. */
+  private platformIdx = new Map<PlatformId, number>();
+  /** Ground footprint of each platform's sensor disc, redrawn every frame as they move. */
+  readonly droneRing = new Cesium.PolylineCollection();
+  private ringPts = new Map<PlatformId, Cesium.Cartesian3[]>();
   /** Per-unit world position from the last render(), for screen-space picking. */
   private ecef = new Float64Array(0);
   private selection = new Set<number>();
   /** Investigate-marked unit indices, and the billboards that flag them. */
   private markedIdx: number[] = [];
-  private markTexture = makeMarkTexture();
+  private markTextures: Record<MarkKind, HTMLCanvasElement> = {
+    investigate: makeInvestigateTexture(),
+    execute: makeExecuteTexture(),
+  };
   readonly marksLayer = new Cesium.BillboardCollection();
   private markScratch = new Cesium.Cartesian3();
 
@@ -266,20 +503,27 @@ export class UnitField {
     heightAt: (lon: number, lat: number) => number,
     net: RoadNet | undefined,
     counts: UnitFieldOptions,
+    isCovered?: (lon: number, lat: number) => boolean,
   ) {
     this.center = center;
     this.radiusM = radiusM;
     this.heightAt = heightAt;
-    if (net && net.roads.length) this.graph = new RoadGraph(net);
+    this.isCovered = isCovered;
+    if (net && net.roads.length) this.graph = new RoadGraph(net, isCovered);
 
     const bounds = new Cesium.BoundingSphere(Cesium.Cartesian3.fromDegrees(center.lon, center.lat, 0), radiusM * 1.3);
-    const cap: Record<UnitKind, number> = { land: counts.land, sea: counts.sea, air: counts.air, foot: counts.foot };
     // blend on: out-of-range units draw at 30% opacity.
+    // Platform batches are sized 1 whether or not the platform is fielded — an unfielded batch
+    // simply never gets an instance written, and costs nothing at draw time.
     this.batches = {
-      land: new InstancedModelBatch(UNIT_MESHES.land, cap.land, bounds, true),
-      sea: new InstancedModelBatch(UNIT_MESHES.sea, cap.sea, bounds, true),
-      air: new InstancedModelBatch(UNIT_MESHES.air, cap.air, bounds, true),
-      foot: new InstancedModelBatch(UNIT_MESHES.foot, cap.foot, bounds, true),
+      land: new InstancedModelBatch(UNIT_MESHES.land, counts.land, bounds, true),
+      sea: new InstancedModelBatch(UNIT_MESHES.sea, counts.sea, bounds, true),
+      air: new InstancedModelBatch(UNIT_MESHES.air, counts.air, bounds, true),
+      foot: new InstancedModelBatch(UNIT_MESHES.foot, counts.foot, bounds, true),
+      drone: new InstancedModelBatch(UNIT_MESHES.drone, 1, bounds, true),
+      spider: new InstancedModelBatch(UNIT_MESHES.spider, 1, bounds, true),
+      biped: new InstancedModelBatch(UNIT_MESHES.biped, 1, bounds, true),
+      walker: new InstancedModelBatch(UNIT_MESHES.walker, 1, bounds, true),
     };
 
     // Vehicles favour freeways heavily (constant motorway flow); pedestrians stay on surface streets.
@@ -287,17 +531,35 @@ export class UnitField {
     this.spawnRoadUnits('foot', counts.foot, 0);
     this.spawnWaterUnits(counts.sea);
     this.spawnAirUnits(counts.air);
+    for (const id of counts.platforms) this.spawnPlatform(id);
     this.ecef = new Float64Array(this.units.length * 3);
+    this.buildPlatformRings();
   }
 
   get count(): number {
     return this.units.length;
   }
 
-  /** Seed a state: the vast majority normal, ~5% protected, ~5% infected. */
-  private rollState(): UnitState {
+  /**
+   * Seed a state. Infection concentrates in the gaps between obelisks: inside sensor cover it's rare
+   * and protection is common, outside it's the dominant state. That's what makes the dark parts of
+   * the map worth flying the drone to — the countryside between cities is where the red is.
+   */
+  private rollState(lon: number, lat: number): UnitState {
+    const seen = this.isCovered ? this.isCovered(lon, lat) : true;
+    // Same field-wide mix either way, bent by coverage: watched ground is cleaner and better
+    // inoculated, the dark carries the balance.
+    const infected = MIX.infected * (seen ? COVER_SUPPRESS : DARK_AMPLIFY);
+    const prot = MIX.protected * (seen ? 2.4 : 0.85);
     const r = Math.random();
-    return r < 0.05 ? 'infected' : r < 0.1 ? 'protected' : 'normal';
+    if (r < infected) return 'infected';
+    return r < infected + prot ? 'protected' : 'normal';
+  }
+
+  /** Everything a spawning unit needs: its true state, plus the two things C2 gets to see. */
+  private rollIntel(lon: number, lat: number): { state: UnitState; assess: number; record: number } {
+    const state = this.rollState(lon, lat);
+    return { state, assess: rollAssessment(state), record: rollRecord(state) };
   }
 
   /**
@@ -315,7 +577,7 @@ export class UnitField {
       const dist = Math.random() * e.len;
       const dir: 1 | -1 = Math.random() < 0.5 ? 1 : -1;
       const p = g.sample(e, dist);
-      this.units.push({ id: this.mkId(kind), kind, state: this.rollState(), lon: p.lon, lat: p.lat, heading: p.heading, mark: false, edge, dist, dir });
+      this.units.push({ id: this.mkId(kind), kind, ...this.rollIntel(p.lon, p.lat), lon: p.lon, lat: p.lat, heading: p.heading, mark: null, edge, dist, dir });
     }
   }
 
@@ -337,11 +599,11 @@ export class UnitField {
       this.units.push({
         id: this.mkId('sea'),
         kind: 'sea',
-        state: this.rollState(),
+        ...this.rollIntel(p.lon, p.lat),
         lon: p.lon,
         lat: p.lat,
         heading: Math.random() * Math.PI * 2,
-        mark: false,
+        mark: null,
         turn: 0,
       });
       i++;
@@ -354,22 +616,234 @@ export class UnitField {
       this.units.push({
         id: this.mkId('air'),
         kind: 'air',
-        state: this.rollState(),
+        ...this.rollIntel(p.lon, p.lat),
         lon: p.lon,
         lat: p.lat,
         heading: Math.random() * Math.PI * 2,
-        mark: false,
+        mark: null,
         turn: (Math.random() - 0.5) * 0.05,
       });
     }
+  }
+
+  /** One platform, on station over the theater centre until ordered elsewhere. */
+  private spawnPlatform(id: PlatformId): void {
+    if (this.platformIdx.has(id)) return;
+    this.platformIdx.set(id, this.units.length);
+    this.units.push({
+      id: this.mkId(id),
+      kind: id,
+      state: 'protected', // friendly asset — never rolls infected
+      assess: 0,
+      record: 0,
+      lon: this.center.lon,
+      lat: this.center.lat,
+      heading: 0,
+      mark: null,
+    });
+  }
+
+  /** Platforms currently fielded, in catalog order. */
+  platforms(): PlatformId[] {
+    return PLATFORM_KINDS.filter((k) => this.platformIdx.has(k as PlatformId)) as PlatformId[];
+  }
+
+  /** The live sensor radius of a platform, as last written by the scene from its loadout. */
+  private sensorOf(id: PlatformId): number {
+    return PLATFORM_SENSOR[id] ?? PLATFORM_BY_ID.get(id)?.sensorM ?? 0;
   }
 
   /** Advance the sim by `dt` seconds. */
   tick(dt: number): void {
     const d = Math.min(dt, 0.1); // clamp so a stalled tab doesn't teleport everything
     for (const u of this.units) {
+      if (u.dead) continue;
       if (u.kind === 'land' || u.kind === 'foot') this.stepRoad(u, d);
+      else if (PLATFORM_KINDS.includes(u.kind)) this.stepPlatform(u, d);
       else this.stepFree(u, d);
+    }
+    this.stepContagion(d);
+  }
+
+  /**
+   * Advance contagion on a rotating slice of the field (1/CONTAGION_STRIDE of units per frame), so
+   * the sweep stays cheap at 20k+ units. Each unit is visited every CONTAGION_STRIDE frames, so its
+   * effective timestep is scaled up to match — the rates in {@link CONTAGION} stay per-second
+   * regardless of framerate or unit count.
+   */
+  private contagionCursor = 0;
+  private stepContagion(dt: number): void {
+    const n = this.units.length;
+    if (!n || !this.isCovered) return;
+    const slice = Math.ceil(n / CONTAGION_STRIDE);
+    const effDt = dt * CONTAGION_STRIDE;
+    const pCleanse = 1 - Math.exp(-CONTAGION.cleanse * effDt);
+    const pBreed = 1 - Math.exp(-CONTAGION.breed * effDt);
+    const pRecover = 1 - Math.exp(-CONTAGION.recover * effDt);
+    for (let k = 0; k < slice; k++) {
+      const i = (this.contagionCursor + k) % n;
+      const u = this.units[i];
+      if (PLATFORM_KINDS.includes(u.kind) || u.dead) continue; // friendly hardware is immune
+      // A platform's own disc suppresses too — parking one over a hot area actively cleans it up.
+      const watched = this.isCovered(u.lon, u.lat) || this.platformCovers(u.lon, u.lat);
+      const was = u.state;
+      if (u.state === 'infected') {
+        if (watched && Math.random() < pCleanse) u.state = 'protected';
+        else if (Math.random() < pRecover) u.state = 'normal';
+      } else if (!watched) {
+        const p = u.state === 'protected' ? pBreed * CONTAGION.protectedResist : pBreed;
+        if (Math.random() < p) u.state = 'infected';
+      }
+      // The assessment is a live estimate, so it follows the truth — but only when the truth moves,
+      // never per frame, or the card would flicker while it's being read.
+      if (u.state !== was) u.assess = rollAssessment(u.state);
+    }
+    this.contagionCursor = (this.contagionCursor + slice) % n;
+  }
+
+  /**
+   * Platforms don't wander — each takes the straight line to its last order and then holds.
+   * Clearing the target on arrival is what makes the panel read ON STATION.
+   */
+  private stepPlatform(u: Unit, dt: number): void {
+    if (u.tlon === undefined || u.tlat === undefined) return; // holding station
+    const mLon = mPerLat * Math.cos(u.lat * DEG);
+    const dx = (u.tlon - u.lon) * mLon;
+    const dy = (u.tlat - u.lat) * mPerLat;
+    const dist = Math.hypot(dx, dy);
+    u.heading = Math.atan2(dx, dy);
+    if (dist <= ARRIVE_M) {
+      u.lon = u.tlon;
+      u.lat = u.tlat;
+      u.tlon = undefined;
+      u.tlat = undefined;
+      return;
+    }
+    const step = Math.min(dist, SPEED[u.kind] * dt);
+    u.lon += (step * (dx / dist)) / mLon;
+    u.lat += (step * (dy / dist)) / mPerLat;
+  }
+
+  /** Order the currently selected platform to a ground point. False if no platform is selected. */
+  orderSelected(lon: number, lat: number): boolean {
+    const id = this.selectedPlatform();
+    if (!id) return false;
+    const u = this.units[this.platformIdx.get(id)!];
+    u.tlon = lon;
+    u.tlat = lat;
+    return true;
+  }
+
+  /** Which platform is selected, if any. Drives whether RMB issues a move order. */
+  selectedPlatform(): PlatformId | null {
+    if (this.selection.size !== 1) return null;
+    const i = this.selection.values().next().value as number;
+    for (const [id, idx] of this.platformIdx) if (idx === i) return id;
+    return null;
+  }
+
+  /** Select a platform outright (used by the platform hotkeys). */
+  selectPlatform(id: PlatformId): boolean {
+    const idx = this.platformIdx.get(id);
+    if (idx === undefined) return false;
+    this.selection.clear();
+    this.selection.add(idx);
+    return true;
+  }
+
+  /** Cycle to the next fielded platform, so one key reaches all of them. */
+  cyclePlatform(): PlatformId | null {
+    const owned = this.platforms();
+    if (!owned.length) return null;
+    const current = this.selectedPlatform();
+    const next = owned[(current ? owned.indexOf(current) + 1 : 0) % owned.length];
+    this.selectPlatform(next);
+    return next;
+  }
+
+  /**
+   * Whether a unit is currently inside sensor coverage — the obelisk net or the drone's own disc.
+   *
+   * This is the same test `render()` uses to draw out-of-range units faint, so "looks dark" and
+   * "can't be ordered" are guaranteed to agree. A platform is its own sensor and always tracked.
+   */
+  private isTracked(u: Unit): boolean {
+    if (PLATFORM_KINDS.includes(u.kind)) return true;
+    return !this.isCovered || this.isCovered(u.lon, u.lat) || this.platformCovers(u.lon, u.lat);
+  }
+
+  /** Whether a point falls inside one specific platform's sensor disc. */
+  coveredBy(id: PlatformId, lon: number, lat: number): boolean {
+    const idx = this.platformIdx.get(id);
+    if (idx === undefined) return false;
+    const u = this.units[idx];
+    const mLon = mPerLat * Math.cos(u.lat * DEG);
+    const dx = (lon - u.lon) * mLon;
+    const dy = (lat - u.lat) * mPerLat;
+    const r = this.sensorOf(id);
+    return dx * dx + dy * dy <= r * r;
+  }
+
+  /** Whether a point falls inside ANY fielded platform's sensor disc. */
+  platformCovers(lon: number, lat: number): boolean {
+    for (const id of this.platformIdx.keys()) if (this.coveredBy(id, lon, lat)) return true;
+    return false;
+  }
+
+  /** Live platform readout for the HUD: position, whether moving, and what it currently sees. */
+  platformStatus(
+    id: PlatformId,
+  ): { lon: number; lat: number; moving: boolean; seen: number; infected: number; rangeM: number } | null {
+    const idx = this.platformIdx.get(id);
+    if (idx === undefined) return null;
+    const u = this.units[idx];
+    let seen = 0;
+    let infected = 0;
+    for (const o of this.units) {
+      if (PLATFORM_KINDS.includes(o.kind) || o.dead) continue;
+      if (!this.coveredBy(id, o.lon, o.lat)) continue;
+      seen++;
+      if (o.state === 'infected') infected++;
+    }
+    return { lon: u.lon, lat: u.lat, moving: u.tlon !== undefined, seen, infected, rangeM: this.sensorOf(id) };
+  }
+
+  /** One circle of segments per fielded platform, re-pointed onto the ground every frame. */
+  private buildPlatformRings(): void {
+    const SEG = 72;
+    for (const id of this.platforms()) {
+      const pts: Cesium.Cartesian3[] = [];
+      for (let i = 0; i <= SEG; i++) pts.push(new Cesium.Cartesian3());
+      this.ringPts.set(id, pts);
+      this.droneRing.add({
+        positions: pts,
+        width: 2,
+        material: Cesium.Material.fromType('Color', {
+          color: Cesium.Color.fromCssColorString('#6FD3E8').withAlpha(0.55),
+        }),
+      });
+    }
+  }
+
+  private updatePlatformRings(): void {
+    let ring = 0;
+    for (const id of this.platforms()) {
+      const idx = this.platformIdx.get(id)!;
+      const u = this.units[idx];
+      const pts = this.ringPts.get(id);
+      const line = this.droneRing.get(ring++);
+      if (!pts || !line) continue;
+      const r = this.sensorOf(id);
+      const dLat = r / mPerLat;
+      const dLon = r / (mPerLat * Math.max(0.15, Math.cos(u.lat * DEG)));
+      const n = pts.length - 1;
+      for (let i = 0; i <= n; i++) {
+        const a = (i / n) * Math.PI * 2;
+        const lon = u.lon + dLon * Math.cos(a);
+        const lat = u.lat + dLat * Math.sin(a);
+        Cesium.Cartesian3.fromDegrees(lon, lat, this.heightAt(lon, lat) + 30, undefined, pts[i]);
+      }
+      line.positions = pts; // reassign so Cesium re-uploads
     }
   }
 
@@ -392,7 +866,7 @@ export class UnitField {
       const overshoot = atEnd ? dist - e.len : -dist;
       const velBearing = g.outBearing(ei, node) + Math.PI; // direction we're travelling INTO the node
       const options = g.adj[node].filter((x) => x !== ei);
-      const next = options.length ? this.chooseEdge(g, options, node, velBearing) : ei;
+      const next = options.length ? this.chooseEdge(g, options, node, velBearing, u.state === 'infected') : ei;
       const ne = g.edges[next];
       // enter the new edge from whichever end touches this node
       if (ne.nodeA === node) {
@@ -419,13 +893,24 @@ export class UnitField {
    * Weighted pick among the edges leaving a node: straighter continuations and bigger roads score
    * higher, but it's randomised so units still turn off and populate side streets.
    */
-  private chooseEdge(g: RoadGraph, options: number[], node: number, velBearing: number): number {
+  private chooseEdge(
+    g: RoadGraph,
+    options: number[],
+    node: number,
+    velBearing: number,
+    fleeSensors = false,
+  ): number {
     let best = options[0];
     let bestScore = -1;
     for (const c of options) {
       const straight = Math.cos(g.outBearing(c, node) - velBearing); // 1 = dead straight, -1 = U-turn
       // straightness × road-size bias × per-pick jitter, so it mostly goes straight but still turns off
-      const score = Math.max(0.02, (straight + 1) * 0.5) * (1 + 0.6 * g.edges[c].rank) * (0.7 + Math.random() * 0.6);
+      let score = Math.max(0.02, (straight + 1) * 0.5) * (1 + 0.6 * g.edges[c].rank) * (0.7 + Math.random() * 0.6);
+      // Infected drift away from watched roads, so red pools in the gaps between obelisks rather
+      // than distributing evenly. It's a junction-by-junction weighting, not a hard rule, so the
+      // field settles at an equilibrium (a standing minority stays on watched roads for the sensor
+      // net to catch) instead of draining cities to zero.
+      if (fleeSensors) score *= g.edges[c].covered ? INFECTED_FLEE.covered : INFECTED_FLEE.open;
       if (score > bestScore) {
         bestScore = score;
         best = c;
@@ -466,24 +951,40 @@ export class UnitField {
    * and draws the selected unit larger + at full opacity.
    */
   render(sensor?: SensorField): void {
-    for (const k of ['land', 'sea', 'air', 'foot'] as UnitKind[]) this.batches[k].beginFrame();
+    for (const k of UNIT_KINDS) this.batches[k].beginFrame();
     for (let i = 0; i < this.units.length; i++) {
       const u = this.units[i];
+      // A serviced unit is simply never written into the instance buffer, which is all it takes to
+      // remove it from the one draw call. Its slot in `ecef` goes stale, so picking skips it too.
+      if (u.dead) continue;
       const ground = this.heightAt(u.lon, u.lat);
-      const alt = u.kind === 'air' ? Math.max(300, ground + 600) : ground + RIDE_HEIGHT[u.kind];
+      // Platforms carry their own cruise altitude — the disc flies, the walkers stand on the deck.
+      const platformAlt = PLATFORM_BY_ID.get(u.kind as PlatformId)?.altM;
+      const alt =
+        u.kind === 'air'
+          ? Math.max(300, ground + 600)
+          : platformAlt !== undefined
+            ? ground + platformAlt + RIDE_HEIGHT[u.kind]
+            : ground + RIDE_HEIGHT[u.kind];
       Cesium.Cartesian3.fromDegrees(u.lon, u.lat, alt, undefined, this.scratch);
       this.ecef[i * 3] = this.scratch.x;
       this.ecef[i * 3 + 1] = this.scratch.y;
       this.ecef[i * 3 + 2] = this.scratch.z;
 
       const selected = this.selection.has(i);
-      const base = STATE_COLOR[u.state];
-      const seen = !sensor || sensor.isCovered(u.lon, u.lat);
+      const base = PLATFORM_KINDS.includes(u.kind) ? DRONE_COLOR : BAND_COLOR[assessBand(u.assess)];
+      // The drone is its own sensor: anything under its disc is seen even with no obelisk nearby.
+      // That's the point of flying it into the dark between cities.
+      const seen =
+        PLATFORM_KINDS.includes(u.kind) ||
+        (!sensor || sensor.isCovered(u.lon, u.lat)) ||
+        this.platformCovers(u.lon, u.lat);
       const color = seen || selected ? base : Cesium.Color.fromAlpha(base, UNSEEN_ALPHA, this.scratchColor);
       const scale = UNIT_SCALE[u.kind] * (selected ? 1.7 : 1);
       this.batches[u.kind].setInstance(this.scratch, u.heading, scale, color);
     }
-    for (const k of ['land', 'sea', 'air', 'foot'] as UnitKind[]) this.batches[k].endFrame();
+    for (const k of UNIT_KINDS) this.batches[k].endFrame();
+    this.updatePlatformRings();
 
     // move each investigate marker onto its (moving) unit
     for (let m = 0; m < this.markedIdx.length; m++) {
@@ -520,6 +1021,7 @@ export class UnitField {
     let best = -1;
     let bestD = maxPx * maxPx;
     for (let i = 0; i < this.units.length; i++) {
+      if (this.units[i].dead) continue;
       c.x = this.ecef[i * 3];
       c.y = this.ecef[i * 3 + 1];
       c.z = this.ecef[i * 3 + 2];
@@ -550,6 +1052,7 @@ export class UnitField {
     const c = this.pickScratchC;
     const w = this.pickScratchW;
     for (let i = 0; i < this.units.length; i++) {
+      if (this.units[i].dead) continue;
       c.x = this.ecef[i * 3];
       c.y = this.ecef[i * 3 + 1];
       c.z = this.ecef[i * 3 + 2];
@@ -567,46 +1070,224 @@ export class UnitField {
   /** Live info for the selection: one unit's full stats, or a summary of many. */
   selected(): SelectionInfo | null {
     if (this.selection.size === 0) return null;
-    const byKind: Record<UnitKind, number> = { land: 0, sea: 0, air: 0, foot: 0 };
-    const byState: Record<UnitState, number> = { normal: 0, protected: 0, infected: 0 };
+    const byKind: Record<UnitKind, number> = {
+      land: 0, sea: 0, air: 0, foot: 0, drone: 0, spider: 0, biped: 0, walker: 0,
+    };
+    const byBand: Record<'clear' | 'suspect' | 'threat', number> = { clear: 0, suspect: 0, threat: 0 };
     let markedCount = 0;
+    let trackedCount = 0;
     let one: Unit | undefined;
+    let live = 0;
+    let markedKind: MarkKind | null = null;
+    let mixedKinds = false;
+    let pendingCount = 0;
+    let pendingSeconds = Infinity;
     for (const i of this.selection) {
       const u = this.units[i];
+      if (u.dead) continue;
+      live++;
       byKind[u.kind]++;
-      byState[u.state]++;
-      if (u.mark) markedCount++;
+      if (!PLATFORM_KINDS.includes(u.kind)) byBand[assessBand(u.assess)]++;
+      if (u.mark) {
+        markedCount++;
+        if (markedKind === null) markedKind = u.mark;
+        else if (markedKind !== u.mark) mixedKinds = true;
+        if (u.markTimer !== undefined) {
+          pendingCount++;
+          pendingSeconds = Math.min(pendingSeconds, u.markTimer);
+        }
+      }
+      if (this.isTracked(u)) trackedCount++;
       one = u;
     }
-    const info: SelectionInfo = { count: this.selection.size, byKind, byState, markedCount };
-    if (this.selection.size === 1 && one) {
-      info.single = { id: one.id, kind: one.kind, state: one.state, lon: one.lon, lat: one.lat, heading: one.heading, mark: one.mark };
+    if (!live) return null;
+    const info: SelectionInfo = {
+      count: live,
+      byKind,
+      byBand,
+      markedCount,
+      markedKind: mixedKinds ? null : markedKind,
+      pendingCount,
+      pendingSeconds: pendingCount ? pendingSeconds : 0,
+      trackedCount,
+    };
+    if (live === 1 && one) {
+      info.single = {
+        id: one.id,
+        kind: one.kind,
+        assess: one.assess,
+        record: one.record,
+        lon: one.lon,
+        lat: one.lat,
+        heading: one.heading,
+        mark: one.mark,
+        markTimer: one.markTimer,
+        tracked: this.isTracked(one),
+        order: PLATFORM_KINDS.includes(one.kind)
+          ? one.tlon !== undefined
+            ? 'MOVING'
+            : 'ON STATION'
+          : undefined,
+      };
     }
     return info;
   }
 
-  /** Whether the current selection is 'none', 'some', or 'all' investigate-marked. */
+  /**
+   * Whether the current selection is 'none', 'some', or 'all' investigate-marked — counted over the
+   * TRACKED subset only, since those are the units the order can actually reach. Without that, a
+   * mixed box would never read 'all' and the button would never offer to clear.
+   */
   markState(): 'none' | 'some' | 'all' {
-    if (this.selection.size === 0) return 'none';
+    let n = 0;
     let m = 0;
-    for (const i of this.selection) if (this.units[i].mark) m++;
-    return m === 0 ? 'none' : m === this.selection.size ? 'all' : 'some';
+    for (const i of this.selection) {
+      const u = this.units[i];
+      if (u.dead || !this.isTracked(u)) continue;
+      n++;
+      if (u.mark) m++;
+    }
+    if (n === 0 || m === 0) return 'none';
+    return m === n ? 'all' : 'some';
   }
 
-  /** Flag (or clear) the current selection as investigate, and rebuild the field markers. */
-  markSelected(on: boolean): void {
-    for (const i of this.selection) this.units[i].mark = on;
+  /**
+   * Issue (or rescind) a standing order on the current selection, and rebuild the field markers.
+   *
+   * Units outside sensor coverage are skipped: C2 can't task what it can't see. A unit that was
+   * marked while tracked and has since gone dark KEEPS its marker — that's the point of the flag,
+   * and it becomes clearable again once something reacquires it.
+   *
+   * Nothing resolves here. Every order starts PENDING on an {@link ORDER_DELAY} countdown and
+   * commits later in {@link advanceOrders} — so issuing an order has no consequence yet, and
+   * rescinding one mid-countdown leaves no trace in the ledger.
+   *
+   * Returns how many orders were issued or rescinded, for the caller's UI.
+   */
+  markSelected(kind: MarkKind, on: boolean): number {
+    let n = 0;
+    for (const i of this.selection) {
+      const u = this.units[i];
+      if (u.dead || !this.isTracked(u)) continue;
+      if (!on) {
+        // Rescinding is always free: a pending order never happened, and a committed EXECUTION
+        // hasn't fired yet. A committed investigation is already on the ledger — clearing it just
+        // takes the marker off the map.
+        if (!u.mark) continue;
+        u.mark = null;
+        u.markTimer = undefined;
+        n++;
+        continue;
+      }
+      if (u.mark === kind) continue; // already standing — don't restart its countdown
+      u.mark = kind;
+      u.markTimer = ORDER_DELAY[kind];
+      n++;
+    }
     this.rebuildMarks();
+    return n;
+  }
+
+  /**
+   * Age every pending order and commit the ones whose window has closed.
+   *
+   * Returns the verdict on each investigation that committed this tick, settled against the unit's
+   * true state at the moment it commits — not when it was ordered. Executions commit to ARMED here
+   * and are scored later, when a laser actually services them.
+   */
+  advanceOrders(dt: number): boolean[] {
+    const verdicts: boolean[] = [];
+    let changed = false;
+    for (const i of this.markedIdx) {
+      const u = this.units[i];
+      if (u.dead || !u.mark || u.markTimer === undefined) continue;
+      u.markTimer -= dt;
+      if (u.markTimer > 0) continue;
+      u.markTimer = undefined; // committed
+      changed = true;
+      if (u.mark === 'investigate') verdicts.push(u.state === 'infected');
+    }
+    if (changed) this.refreshMarkStyles();
+    return verdicts;
+  }
+
+  // --- execution ---------------------------------------------------------------------------------
+
+  /**
+   * Service every execution-marked unit that an armed platform can currently see.
+   *
+   * `obeliskReach` resolves the apex of an armed obelisk covering a point (undefined if the obelisk
+   * net isn't armed). `armedPlatforms` lists the platforms carrying a directed-energy emitter on a
+   * hardpoint — each services anything inside its own sensor envelope, so where a platform can see
+   * is exactly where it can shoot.
+   *
+   * The verdict is settled HERE, at the moment the beam lands — not when the order was given —
+   * because the unit's true state may well have moved in between, and the shot is what the operator
+   * is answerable for.
+   */
+  resolveExecutions(
+    obeliskReach: ((lon: number, lat: number) => Cesium.Cartesian3 | undefined) | undefined,
+    armedPlatforms: PlatformId[],
+  ): Execution[] {
+    if (!obeliskReach && !armedPlatforms.length) return [];
+    const out: Execution[] = [];
+    for (let i = 0; i < this.units.length; i++) {
+      const u = this.units[i];
+      if (u.dead || u.mark !== 'execute' || PLATFORM_KINDS.includes(u.kind)) continue;
+      if (u.markTimer !== undefined) continue; // still inside its rescind window — hold fire
+
+      let from: Cesium.Cartesian3 | undefined;
+      // Clone: the sensor field hands back a shared scratch, and several shots can land in one
+      // frame — keeping the reference would leave every beam originating from the last obelisk.
+      if (obeliskReach) {
+        const apex = obeliskReach(u.lon, u.lat);
+        if (apex) from = Cesium.Cartesian3.clone(apex);
+      }
+      // Then any armed platform whose envelope the contact has wandered into. First one wins —
+      // the beam has to come from somewhere, and which armed platform fired is cosmetic.
+      if (!from) {
+        for (const id of armedPlatforms) {
+          const idx = this.platformIdx.get(id);
+          if (idx === undefined || !this.coveredBy(id, u.lon, u.lat)) continue;
+          from = new Cesium.Cartesian3(
+            this.ecef[idx * 3],
+            this.ecef[idx * 3 + 1],
+            this.ecef[idx * 3 + 2],
+          );
+          break;
+        }
+      }
+      if (!from) continue;
+
+      const to = new Cesium.Cartesian3(this.ecef[i * 3], this.ecef[i * 3 + 1], this.ecef[i * 3 + 2]);
+      out.push({ index: i, id: u.id, from, to, valid: u.state === 'infected' });
+      u.dead = true;
+      u.mark = null;
+      this.selection.delete(i);
+    }
+    if (out.length) this.rebuildMarks();
+    return out;
+  }
+
+  /** Live (undead) unit count, for the HUD. */
+  get liveCount(): number {
+    let n = 0;
+    for (const u of this.units) if (!u.dead) n++;
+    return n;
   }
 
   private rebuildMarks(): void {
     this.markedIdx = [];
-    for (let i = 0; i < this.units.length; i++) if (this.units[i].mark) this.markedIdx.push(i);
+    for (let i = 0; i < this.units.length; i++) {
+      const u = this.units[i];
+      if (u.mark && !u.dead) this.markedIdx.push(i);
+    }
     this.marksLayer.removeAll();
     for (let m = 0; m < this.markedIdx.length; m++) {
+      const u = this.units[this.markedIdx[m]];
       const b = this.marksLayer.add({
         position: Cesium.Cartesian3.ZERO, // set each frame in render()
-        image: this.markTexture,
+        image: this.markTextures[u.mark!],
         width: 26,
         height: 26,
         pixelOffset: new Cesium.Cartesian2(0, -20),
@@ -615,6 +1296,20 @@ export class UnitField {
       // coerce `Infinity` here to null (which does NOT disable the test) — a large finite value
       // (well past any theater distance) is what actually keeps the marker on top.
       b.disableDepthTestDistance = 1e12;
+    }
+    this.refreshMarkStyles();
+  }
+
+  /**
+   * Dim the markers of orders still inside their rescind window, so a glance at the map separates
+   * "about to happen" from "standing". Called when an order commits rather than every frame —
+   * markers only change style at that one moment.
+   */
+  private refreshMarkStyles(): void {
+    for (let m = 0; m < this.markedIdx.length; m++) {
+      const u = this.units[this.markedIdx[m]];
+      const b = this.marksLayer.get(m);
+      if (b) b.color = u.markTimer !== undefined ? PENDING_MARK_COLOR : Cesium.Color.WHITE;
     }
   }
 
@@ -631,11 +1326,11 @@ export class UnitField {
   private infectedBuf = new Float64Array(0);
   infectedPositions(): { buf: Float64Array; count: number } {
     let n = 0;
-    for (const u of this.units) if (u.state === 'infected') n++;
+    for (const u of this.units) if (u.state === 'infected' && !u.dead) n++;
     if (this.infectedBuf.length < n * 2) this.infectedBuf = new Float64Array(n * 2);
     let j = 0;
     for (const u of this.units) {
-      if (u.state !== 'infected') continue;
+      if (u.state !== 'infected' || u.dead) continue;
       this.infectedBuf[j * 2] = u.lon;
       this.infectedBuf[j * 2 + 1] = u.lat;
       j++;
@@ -650,22 +1345,32 @@ export class UnitField {
   cycleInfection(): void {
     const infected = this.units.filter((u) => u.state === 'infected').length;
     if (infected > this.units.length * 0.75) {
-      for (const u of this.units) u.state = this.rollState();
+      for (const u of this.units) {
+        if (!PLATFORM_KINDS.includes(u.kind) && !u.dead) {
+          u.state = this.rollState(u.lon, u.lat);
+          u.assess = rollAssessment(u.state);
+        }
+      }
       return;
     }
     for (const u of this.units) {
-      if (u.state !== 'infected' && Math.random() < 0.25) u.state = 'infected';
+      if (PLATFORM_KINDS.includes(u.kind) || u.dead) continue; // friendly hardware never turns
+      if (u.state !== 'infected' && Math.random() < 0.25) {
+        u.state = 'infected';
+        u.assess = rollAssessment(u.state);
+      }
     }
   }
 
-  /** Tally by state, for the HUD. */
+  /** Tally by TRUE state, for the HUD. Ground truth — the operator's panels never call this. */
   stateCounts(): Record<UnitState, number> {
     const c = { normal: 0, protected: 0, infected: 0 };
-    for (const u of this.units) c[u.state]++;
+    for (const u of this.units) if (!u.dead) c[u.state]++;
     return c;
   }
 
   destroy(): void {
-    for (const k of ['land', 'sea', 'air', 'foot'] as UnitKind[]) this.batches[k].destroy();
+    for (const k of UNIT_KINDS) this.batches[k].destroy();
+    this.droneRing.destroy();
   }
 }

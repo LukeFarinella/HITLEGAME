@@ -150,6 +150,45 @@ body:has(#globe-ui) #hint { display: none; }
 #g-exit[hidden] { display: none; }
 @media (max-width: 500px) { #g-exit { left: 16px; font-size: 10px; padding: 8px 12px; } }
 
+/* ---------- active tasking reminder (theater, top right) ----------
+   Sits immediately left of the ⚙ so neither has to move, and carries the same two bars as the
+   select-screen panel — the only numbers the operator is scored on. */
+#g-tasking {
+  position: absolute;
+  top: calc(56px + env(safe-area-inset-top, 0px));
+  right: calc(clamp(20px, 4vw, 44px) + 42px);
+  z-index: 60;
+  width: 224px;
+  pointer-events: none;
+  font-family: var(--mono);
+  border: 1px solid var(--gunmetal); border-right: 2px solid var(--red);
+  background: rgba(11, 12, 14, .72); backdrop-filter: blur(6px);
+  padding: 9px 11px;
+  display: flex; flex-direction: column; gap: 7px;
+  animation: up-in .16s ease-out;
+}
+#g-tasking[hidden] { display: none; }
+.gt-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.gt-name { color: var(--bone); font-size: 10.5px; letter-spacing: .12em; }
+.gt-order { font-size: 8.5px; letter-spacing: .14em; padding: 1px 5px; border: 1px solid currentColor; }
+.gt-order.order-investigate { color: #F2A83B; }
+.gt-order.order-execute { color: var(--red); }
+.gt-row { display: flex; align-items: center; gap: 7px; }
+.gt-k { color: var(--ash); font-size: 8.5px; letter-spacing: .12em; text-transform: uppercase; width: 40px; flex: none; }
+.gt-bar { flex: 1; height: 3px; background: var(--gunmetal); position: relative; overflow: hidden; }
+.gt-bar i { position: absolute; inset: 0 auto 0 0; display: block; width: 0; }
+.gt-bar i.ok { background: var(--ok); }
+.gt-bar i.bad { background: var(--red); }
+.gt-v { color: var(--bone); font-size: 9.5px; font-variant-numeric: tabular-nums; width: 40px; text-align: right; flex: none; }
+
+@media (max-width: 500px) {
+  /* On a phone the reminder shares the top edge with the gear — drop it below and go full width. */
+  #g-tasking {
+    top: calc(96px + env(safe-area-inset-top, 0px));
+    right: 12px; width: 200px;
+  }
+}
+
 /* ---------- dev settings (⚙) ---------- */
 #dev-toggle {
   position: absolute;
@@ -208,6 +247,12 @@ body:has(#globe-ui) #hint { display: none; }
 }
 .dev-row input[type="range"]:hover::-webkit-slider-thumb { background: var(--bone); }
 .dev-row input[type="range"]:hover::-moz-range-thumb { background: var(--bone); }
+.dev-check {
+  display: flex; align-items: center; gap: 8px; cursor: pointer;
+  color: var(--ash); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+}
+.dev-check input { accent-color: var(--steel); width: 13px; height: 13px; cursor: pointer; margin: 0; }
+.dev-check:hover { color: var(--bone); }
 .dev-regen {
   width: 100%; pointer-events: auto; cursor: pointer; margin-top: 2px;
   font-family: var(--mono); font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
@@ -220,6 +265,243 @@ body:has(#globe-ui) #hint { display: none; }
 @media (max-width: 500px) {
   #dev-toggle { right: 16px; }
   #dev-panel { right: 12px; width: calc(100vw - 24px); max-width: 280px; }
+}
+
+/* ---------- command store (theater-select screen, left rail) ----------
+   Same console vocabulary as the dev panel and the unit panel: a hairline gunmetal box on smoked
+   carbon, one accent edge, mono type in caps. The accent here is --orange, because everything the
+   store sells is measured in obelisks. */
+#c2-store {
+  position: absolute;
+  top: calc(150px + env(safe-area-inset-top, 0px));
+  left: clamp(20px, 4vw, 44px);
+  z-index: 70;
+  width: 296px;
+  max-height: min(62vh, 560px);
+  display: flex; flex-direction: column;
+  pointer-events: auto;
+  font-family: var(--mono);
+  border: 1px solid var(--gunmetal); border-left: 2px solid var(--orange);
+  background: rgba(11, 12, 14, .82); backdrop-filter: blur(8px);
+  animation: up-in .16s ease-out;
+}
+#c2-store[hidden] { display: none; }
+/* Collapsed: the header + ledger stay as a running readout of the campaign. */
+#c2-store.collapsed .c2-tabs,
+#c2-store.collapsed .c2-filter-wrap,
+#c2-store.collapsed .c2-body { display: none; }
+
+.c2-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 9px 12px; border-bottom: 1px solid var(--gunmetal);
+}
+.c2-mark { color: var(--bone); font-size: 11px; letter-spacing: .18em; }
+.c2-collapse {
+  pointer-events: auto; cursor: pointer; color: var(--ash); background: none; border: none;
+  font-size: 13px; line-height: 1; padding: 2px 4px;
+}
+.c2-collapse:hover { color: var(--orange); }
+
+.c2-ledger { display: flex; border-bottom: 1px solid var(--gunmetal); }
+.c2-stat { flex: 1; padding: 9px 12px; display: flex; flex-direction: column; gap: 3px; }
+.c2-stat + .c2-stat { border-left: 1px solid var(--gunmetal); }
+.c2-k { color: var(--ash); font-size: 9.5px; letter-spacing: .16em; text-transform: uppercase; }
+.c2-v { color: var(--orange); font-size: 15px; letter-spacing: .04em; font-variant-numeric: tabular-nums; }
+
+.c2-tabs { display: flex; border-bottom: 1px solid var(--gunmetal); }
+.c2-tab {
+  flex: 1; pointer-events: auto; cursor: pointer;
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .16em;
+  color: var(--ash); background: none; border: none;
+  border-bottom: 2px solid transparent;
+  padding: 9px 8px;
+}
+.c2-tab:hover { color: var(--bone); }
+.c2-tab.active { color: var(--bone); border-bottom-color: var(--orange); background: rgba(232, 112, 30, .07); }
+.c2-tab:focus-visible { outline: 1px solid var(--orange); outline-offset: -3px; }
+
+.c2-filter-wrap { padding: 9px 12px 0; }
+.c2-filter-wrap[hidden] { display: none; }
+#c2-filter {
+  width: 100%;
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--bone); background: var(--graphite-2);
+  border: 1px solid var(--gunmetal); padding: 7px 9px;
+}
+#c2-filter::placeholder { color: var(--ash); letter-spacing: .12em; }
+#c2-filter:focus { outline: none; border-color: var(--orange); }
+
+.c2-body { overflow-y: auto; padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 9px; }
+.c2-body::-webkit-scrollbar { width: 8px; }
+.c2-body::-webkit-scrollbar-thumb { background: var(--gunmetal); }
+.c2-body::-webkit-scrollbar-track { background: transparent; }
+
+.c2-row {
+  border: 1px solid var(--gunmetal); background: var(--graphite-2);
+  padding: 9px 10px; display: flex; flex-direction: column; gap: 6px;
+}
+.c2-row.owned, .c2-row.tier-3 { border-left: 2px solid var(--ok); }
+.c2-row.tier-1, .c2-row.tier-2 { border-left: 2px solid var(--orange); }
+.c2-row.pending { opacity: .55; }
+.c2-row-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.c2-name { color: var(--bone); font-size: 11.5px; letter-spacing: .1em; text-transform: uppercase; }
+.c2-cost { color: var(--orange); font-size: 11px; font-variant-numeric: tabular-nums; }
+.c2-tier { color: var(--ash); font-size: 9.5px; letter-spacing: .14em; }
+.c2-row.tier-1 .c2-tier, .c2-row.tier-2 .c2-tier { color: var(--orange); }
+.c2-row.tier-3 .c2-tier { color: var(--ok); }
+.c2-blurb { margin: 0; color: var(--ash); font-size: 9.5px; line-height: 1.55; letter-spacing: .04em; }
+.c2-meta {
+  display: flex; justify-content: space-between; gap: 10px;
+  color: var(--ash); font-size: 9.5px; letter-spacing: .1em; font-variant-numeric: tabular-nums;
+}
+.c2-row-head, .c2-meta { cursor: pointer; }
+
+.c2-pips { display: flex; gap: 4px; }
+.c2-pips i { width: 100%; height: 2px; background: var(--gunmetal); }
+.c2-pips i.on { background: var(--orange); }
+.c2-row.tier-3 .c2-pips i.on { background: var(--ok); }
+
+.c2-buy {
+  width: 100%; pointer-events: auto; cursor: pointer; margin-top: 1px;
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--orange); background: rgba(232, 112, 30, .08);
+  border: 1px solid rgba(232, 112, 30, .4); padding: 7px 9px;
+}
+.c2-buy:hover:not(:disabled) { background: rgba(232, 112, 30, .2); border-color: var(--orange); }
+.c2-buy:focus-visible { outline: 2px solid var(--orange); outline-offset: 2px; }
+.c2-buy:disabled { color: var(--ash); background: transparent; border-color: var(--gunmetal); cursor: not-allowed; }
+.c2-buy:disabled.done { color: var(--ok); border-color: rgba(79, 158, 122, .4); }
+
+/* Hardpoints: one line per mount, so a platform's loadout reads as a rack, not a sentence */
+.c2-row.platform.owned { border-left: 2px solid var(--sel, #6FD3E8); }
+.c2-hardpoints { display: flex; flex-direction: column; gap: 3px; }
+.c2-hp {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 9.5px; letter-spacing: .08em;
+  border-left: 2px solid var(--gunmetal); padding: 3px 0 3px 7px;
+}
+.c2-hp.fitted { border-left-color: var(--sel, #6FD3E8); color: var(--bone); }
+.c2-hp.empty { color: var(--ash); }
+.c2-hp-k { color: var(--ash); width: 26px; flex: none; }
+.c2-hp-v { flex: 1; }
+.c2-strip {
+  pointer-events: auto; cursor: pointer; background: none; border: none;
+  color: var(--ash); font-size: 11px; line-height: 1; padding: 0 3px;
+}
+.c2-strip:hover { color: var(--red); }
+
+/* Armoury: the gear list, nested under the platform it's being fitted to */
+.c2-armoury {
+  display: flex; flex-direction: column; gap: 7px;
+  border-top: 1px solid var(--gunmetal); padding-top: 8px; margin-top: 2px;
+}
+.c2-gear {
+  display: flex; flex-direction: column; gap: 5px;
+  background: rgba(11, 12, 14, .5); border: 1px solid var(--gunmetal); padding: 7px 8px;
+}
+.c2-gear .c2-name { font-size: 10px; }
+.c2-gear .c2-cost { font-size: 10px; }
+
+/* Loadout readout on the unit card */
+.up-loadout li { color: var(--ash); border-left-color: var(--gunmetal); }
+.up-loadout li.fitted { color: var(--sel, #6FD3E8); border-left-color: var(--sel, #6FD3E8); }
+.c2-note { margin: 0; color: var(--ash); font-size: 10px; letter-spacing: .14em; text-align: center; padding: 14px 0; }
+
+/* ---------- tasking panel (right rail, mirrors the store) ----------
+   Accent is --red: the store spends, this one commits the operator to a call they're scored on. */
+#c2-tasking {
+  position: absolute;
+  top: calc(150px + env(safe-area-inset-top, 0px));
+  right: clamp(20px, 4vw, 44px);
+  z-index: 70;
+  width: 296px;
+  max-height: min(62vh, 560px);
+  display: flex; flex-direction: column;
+  pointer-events: auto;
+  font-family: var(--mono);
+  border: 1px solid var(--gunmetal); border-right: 2px solid var(--red);
+  background: rgba(11, 12, 14, .82); backdrop-filter: blur(8px);
+  animation: up-in .16s ease-out;
+}
+#c2-tasking.collapsed #c2-active,
+#c2-tasking.collapsed .c2-ledger-line,
+#c2-tasking.collapsed .c2-body { display: none; }
+/* The dev gear lives top-right too — drop the panel clear of it. */
+#c2-tasking .c2-head { border-bottom: 1px solid var(--gunmetal); }
+
+#c2-active { border-bottom: 1px solid var(--gunmetal); }
+#c2-active .c2-note { padding: 12px 0; }
+.c2-active { padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.c2-active-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.c2-order { font-size: 9px; letter-spacing: .16em; padding: 2px 6px; border: 1px solid currentColor; }
+.c2-order.order-investigate { color: #F2A83B; }
+.c2-order.order-execute { color: var(--red); }
+
+.c2-bar-row { display: flex; align-items: center; gap: 8px; }
+.c2-bar-k { color: var(--ash); font-size: 9px; letter-spacing: .12em; width: 48px; flex: none; }
+.c2-bar { flex: 1; height: 4px; background: var(--gunmetal); position: relative; overflow: hidden; }
+.c2-bar i { position: absolute; inset: 0 auto 0 0; display: block; }
+.c2-bar i.ok { background: var(--ok); }
+.c2-bar i.bad { background: var(--red); }
+.c2-bar-v { color: var(--bone); font-size: 10px; font-variant-numeric: tabular-nums; width: 44px; text-align: right; flex: none; }
+.c2-buy.standdown { color: var(--ash); background: transparent; border-color: var(--gunmetal); }
+.c2-buy.standdown:hover:not(:disabled) { color: var(--red); border-color: var(--red); background: rgba(226, 58, 46, .1); }
+
+.c2-ledger-line {
+  display: flex; justify-content: space-between; gap: 8px;
+  padding: 8px 12px; border-bottom: 1px solid var(--gunmetal);
+  color: var(--ash); font-size: 9.5px; letter-spacing: .1em;
+}
+.c2-ledger-line b { color: var(--bone); font-variant-numeric: tabular-nums; font-weight: 400; }
+.c2-ledger-line .ok b { color: var(--ok); }
+.c2-ledger-line .bad b { color: var(--red); }
+
+.c2-row.mission.locked { opacity: .5; }
+.c2-row.mission.active { border-left: 2px solid var(--red); }
+.c2-row.mission.complete { border-left: 2px solid var(--ok); }
+.c2-row.mission.complete .c2-tier { color: var(--ok); }
+.c2-row.mission.active .c2-tier { color: var(--red); }
+.c2-meta .ok { color: var(--ok); }
+.c2-meta .bad { color: var(--red); }
+.c2-grant {
+  color: var(--red); font-size: 9px; letter-spacing: .12em;
+  border-top: 1px solid var(--gunmetal); padding-top: 6px;
+}
+
+#globe-ui.in-theater #c2-tasking { display: none; }
+
+/* Two 296px rails don't fit a phone, so they stack as bottom sheets: store on the floor, tasking
+   directly above it. Both are capped well under half the viewport so that even with both expanded
+   they can't collide, and either can be collapsed to its header. */
+@media (max-width: 500px) {
+  #c2-tasking {
+    left: 12px; right: 12px; width: auto;
+    top: auto; bottom: calc(50vh + 8px);
+    max-height: 34vh;
+  }
+}
+
+/* Transient notice — e.g. picking a theater on ground you haven't taken */
+#g-toast {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  bottom: 54px; z-index: 90; pointer-events: none;
+  font-family: var(--mono); font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--bone); background: rgba(11, 12, 14, .88);
+  border: 1px solid var(--gunmetal); border-left: 2px solid var(--red);
+  padding: 9px 14px; backdrop-filter: blur(6px);
+  animation: up-in .16s ease-out;
+}
+#g-toast[hidden] { display: none; }
+
+/* The store is a theater-SELECT tool; inside a theater it would just be in the way. */
+#globe-ui.in-theater #c2-store { display: none; }
+
+@media (max-width: 500px) {
+  #c2-store {
+    left: 12px; right: 12px; width: auto;
+    top: auto; bottom: calc(46px + env(safe-area-inset-bottom, 0px));
+    max-height: 34vh;
+  }
 }
 
 /* ---------- single-unit selection panel + reticle ---------- */
@@ -256,6 +538,40 @@ body:has(#globe-ui) #hint { display: none; }
 .up-row .v.state-infected { color: var(--red); }
 .up-row .v.sensor-dark { color: var(--ash); }
 .up-row .v.sensor-tracked { color: var(--sel, #6FD3E8); }
+/* Assessment bands — the same three colours the field uses, keyed off the estimate not the truth */
+.up-row .v.band-clear { color: var(--bone); }
+.up-row .v.band-suspect { color: #F2C13B; }
+.up-row .v.band-threat { color: var(--red); }
+
+/* Confidence bar under the assessment row: the number, read at a glance */
+.up-assess { height: 3px; background: var(--gunmetal); position: relative; margin: 1px 0 3px; }
+.up-assess i { position: absolute; inset: 0 auto 0 0; display: block; background: var(--bone); }
+.up-assess.band-suspect i { background: #F2C13B; }
+.up-assess.band-threat i { background: var(--red); }
+.up-assess[hidden] { display: none; }
+
+/* Order countdown: the same bar shape as the assessment, draining as the rescind window closes */
+.up-assess.order-bar i { background: #F2A83B; }
+.up-assess.order-bar.exec i { background: var(--red); }
+.up-row .v.order-pending { color: #F2A83B; }
+.up-row .v.order-armed { color: var(--red); }
+.up-row .v.order-logged { color: var(--ash); }
+
+/* Charge sheet. Severity is carried by a leading rule, so it reads down the list without relying
+   on colour alone to separate an unreturned trolley from a homicide. */
+.up-record { display: flex; flex-direction: column; gap: 5px; padding-top: 3px; }
+.up-record[hidden] { display: none; }
+.up-record .k { color: var(--ash); font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; }
+.up-record ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; }
+.up-record li {
+  font-size: 10px; letter-spacing: .04em; color: var(--steel);
+  padding-left: 8px; border-left: 2px solid var(--gunmetal);
+}
+.up-record li.sev-1 { color: var(--ash); border-left-color: var(--gunmetal); }
+.up-record li.sev-2 { color: var(--steel); border-left-color: var(--ash); }
+.up-record li.sev-3 { color: #F2C13B; border-left-color: #F2C13B; }
+.up-record li.sev-4 { color: var(--red); border-left-color: var(--red); font-weight: 700; }
+.up-record li.clean { color: var(--ok); border-left-color: var(--ok); }
 
 /* mark (investigate) action */
 .up-actions { padding: 10px 12px; border-top: 1px solid var(--gunmetal); }
@@ -267,6 +583,27 @@ body:has(#globe-ui) #hint { display: none; }
 }
 .up-mark:hover { background: rgba(242, 168, 59, .18); border-color: #F2A83B; }
 .up-mark.active { color: var(--carbon); background: #F2A83B; border-color: #F2A83B; }
+/* Counting down: the button is now the abort, so it reads as one — outlined and ticking, not the
+   filled "this is done" state. */
+.up-mark.pending {
+  color: #F2A83B; background: transparent; border-color: #F2A83B;
+  animation: order-tick 1s steps(2, end) infinite;
+}
+.up-mark.exec.pending { color: var(--red); border-color: var(--red); }
+@keyframes order-tick { 0%, 60% { opacity: 1; } 61%, 100% { opacity: .62; } }
+@media (prefers-reduced-motion: reduce) { .up-mark.pending { animation: none; } }
+
+/* Lethal order: the button changes colour AND wording, because the two orders are not the same
+   action and shouldn't be one careless click apart. */
+.up-mark.exec { color: var(--red); background: rgba(226, 58, 46, .1); border-color: rgba(226, 58, 46, .5); }
+.up-mark.exec:hover:not(:disabled) { background: rgba(226, 58, 46, .22); border-color: var(--red); }
+.up-mark.exec.active { color: var(--bone); background: var(--red); border-color: var(--red); }
+/* Out of sensor coverage: the order is unavailable, and the button reads as inert, not just dim. */
+.up-mark:disabled {
+  color: var(--ash); background: transparent; border-color: var(--gunmetal);
+  cursor: not-allowed;
+}
+.up-mark:disabled:hover { background: transparent; border-color: var(--gunmetal); }
 
 /* Corner-bracket reticle that follows the selected unit */
 #unit-reticle {

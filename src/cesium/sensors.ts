@@ -53,6 +53,12 @@ export class SensorField {
   private cosLat: number;
   private coverage: Uint8Array;
   private threat: Uint8Array;
+  /**
+   * Which obelisk owns each covered cell — the nearest one that stamped it. Built alongside the
+   * coverage grid so "which obelisk services this point" is an array index rather than a scan over
+   * thousands of sites, which matters when a marked convoy rolls into range all at once.
+   */
+  private coverOwner: Int32Array;
 
   private obLon: Float64Array;
   private obLat: Float64Array;
@@ -92,8 +98,10 @@ export class SensorField {
     this.h = Math.max(1, Math.ceil(spanY / this.cell));
     this.coverage = new Uint8Array(this.w * this.h);
     this.threat = new Uint8Array(this.w * this.h);
+    this.coverOwner = new Int32Array(this.w * this.h).fill(-1);
+    this.apex = apex;
 
-    this.stamp(this.coverage, this.obLon, this.obLat, this.obeliskCount);
+    this.stampCoverage();
 
     this.rings = this.buildRings(heightAt);
     this.glow = new Cesium.PointPrimitiveCollection();
@@ -117,20 +125,31 @@ export class SensorField {
     return Math.floor(((lat - this.s0) * mPerLat) / this.cell);
   }
 
-  /** Stamp each point's range disc into a grid. */
-  private stamp(grid: Uint8Array, lon: Float64Array, lat: Float64Array, count: number): void {
+  /**
+   * Stamp every obelisk's range disc into the coverage grid, recording the nearest owner per cell.
+   * Run once at construction.
+   */
+  private stampCoverage(): void {
     const rCells = Math.ceil(this.range / this.cell);
     const r2 = rCells * rCells;
-    for (let i = 0; i < count; i++) {
-      const cx = this.cellX(lon[i]);
-      const cy = this.cellY(lat[i]);
+    const bestD = new Int32Array(this.w * this.h).fill(0x7fffffff);
+    for (let i = 0; i < this.obeliskCount; i++) {
+      const cx = this.cellX(this.obLon[i]);
+      const cy = this.cellY(this.obLat[i]);
       for (let dy = -rCells; dy <= rCells; dy++) {
         const y = cy + dy;
         if (y < 0 || y >= this.h) continue;
         for (let dx = -rCells; dx <= rCells; dx++) {
           const x = cx + dx;
           if (x < 0 || x >= this.w) continue;
-          if (dx * dx + dy * dy <= r2) grid[y * this.w + x] = 1;
+          const d = dx * dx + dy * dy;
+          if (d > r2) continue;
+          const c = y * this.w + x;
+          this.coverage[c] = 1;
+          if (d < bestD[c]) {
+            bestD[c] = d;
+            this.coverOwner[c] = i;
+          }
         }
       }
     }
@@ -142,6 +161,26 @@ export class SensorField {
     const y = this.cellY(lat);
     if (x < 0 || y < 0 || x >= this.w || y >= this.h) return false;
     return this.coverage[y * this.w + x] === 1;
+  }
+
+  /**
+   * The apex of the obelisk covering a point — where a directed-energy beam would originate.
+   * Undefined if nothing watches it. Returns a shared scratch, so copy it if you need to keep it.
+   */
+  private apex: Float64Array;
+  private apexScratch = new Cesium.Cartesian3();
+  servicingApex(lon: number, lat: number): Cesium.Cartesian3 | undefined {
+    const x = this.cellX(lon);
+    const y = this.cellY(lat);
+    if (x < 0 || y < 0 || x >= this.w || y >= this.h) return undefined;
+    const i = this.coverOwner[y * this.w + x];
+    if (i < 0) return undefined;
+    return Cesium.Cartesian3.fromElements(
+      this.apex[i * 3],
+      this.apex[i * 3 + 1],
+      this.apex[i * 3 + 2],
+      this.apexScratch,
+    );
   }
 
   /**

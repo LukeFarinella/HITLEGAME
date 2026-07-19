@@ -31,6 +31,67 @@
 
       <button id="g-exit" type="button" hidden>◀ WORLD MAP</button>
 
+      <!-- Command store: tabbed purchase panels, theater-select screen only.
+           Rows are generated in src/ui/store.ts — this is just the shell. -->
+      <div id="c2-store">
+        <div class="c2-head">
+          <span class="c2-mark">◈ COMMAND STORE</span>
+          <button class="c2-collapse" id="c2-collapse" type="button" aria-label="Collapse">—</button>
+        </div>
+        <div class="c2-ledger">
+          <div class="c2-stat">
+            <span class="c2-k">Officers</span>
+            <span class="c2-v" id="c2-officers">—</span>
+          </div>
+          <div class="c2-stat">
+            <span class="c2-k">Sites live</span>
+            <span class="c2-v" id="c2-sites">—</span>
+          </div>
+        </div>
+        <div class="c2-tabs">
+          <button class="c2-tab active" type="button" data-tab="platforms">PLATFORMS</button>
+          <button class="c2-tab" type="button" data-tab="assets">NETWORK</button>
+          <button class="c2-tab" type="button" data-tab="territory">TERRITORY</button>
+        </div>
+        <div class="c2-filter-wrap">
+          <input id="c2-filter" type="text" placeholder="FILTER STATES" autocomplete="off" />
+        </div>
+        <div class="c2-body" id="c2-body"></div>
+      </div>
+
+      <!-- Tasking: the mission chain. Right rail, mirrors the store. Rows from src/ui/missions.ts -->
+      <div id="c2-tasking">
+        <div class="c2-head">
+          <span class="c2-mark">◈ TASKING</span>
+          <button class="c2-collapse" id="c2-tasking-collapse" type="button" aria-label="Collapse">—</button>
+        </div>
+        <div id="c2-active"></div>
+        <div class="c2-ledger-line" id="c2-ledger-line"></div>
+        <div class="c2-body" id="c2-mission-list"></div>
+      </div>
+
+      <!-- Transient notice (e.g. clicking ground you don't hold) -->
+      <div id="g-toast" hidden></div>
+
+      <!-- Active tasking reminder, theater only. The full panel lives on the select screen; in a
+           theater you just need to know what you're being scored on and how close the ceiling is. -->
+      <div id="g-tasking" hidden>
+        <div class="gt-head">
+          <span class="gt-name" id="gt-name">—</span>
+          <span class="gt-order" id="gt-order">—</span>
+        </div>
+        <div class="gt-row">
+          <span class="gt-k">Valid</span>
+          <span class="gt-bar"><i class="ok" id="gt-valid-bar"></i></span>
+          <span class="gt-v" id="gt-valid">0 / 0</span>
+        </div>
+        <div class="gt-row">
+          <span class="gt-k">Invalid</span>
+          <span class="gt-bar"><i class="bad" id="gt-invalid-bar"></i></span>
+          <span class="gt-v" id="gt-invalid">0 / 0</span>
+        </div>
+      </div>
+
       <!-- Dev settings -->
       <button id="dev-toggle" type="button" aria-label="Dev settings" title="Dev settings">⚙</button>
       <div id="dev-panel" hidden>
@@ -41,18 +102,23 @@
         <div class="dev-body">
           <label class="dev-row" for="dev-population">
             <span class="dev-k">Building population <span class="dev-v" id="dev-population-val">—</span></span>
-            <input type="range" id="dev-population" min="0.25" max="2" step="0.05" value="1" />
+            <input type="range" id="dev-population" min="0.25" max="2" step="0.05" value="0.65" />
           </label>
           <label class="dev-row" for="dev-roadgap">
             <span class="dev-k">Road clearance <span class="dev-v" id="dev-roadgap-val">—</span></span>
-            <input type="range" id="dev-roadgap" min="4" max="40" step="1" value="14" />
+            <input type="range" id="dev-roadgap" min="4" max="40" step="1" value="19" />
           </label>
           <label class="dev-row" for="dev-maxheight">
             <span class="dev-k">Max height <span class="dev-v" id="dev-maxheight-val">—</span></span>
-            <input type="range" id="dev-maxheight" min="60" max="400" step="10" value="230" />
+            <input type="range" id="dev-maxheight" min="60" max="400" step="10" value="270" />
+          </label>
+          <label class="dev-check" for="dev-strict">
+            <input type="checkbox" id="dev-strict" checked />
+            <span>Keep off crossing streets</span>
           </label>
           <button class="dev-regen" id="dev-regen" type="button">↻ REGENERATE CITY</button>
-          <p class="dev-note">Adjustments rebuild the current theater's skyline. Enter a theater to see them.</p>
+          <button class="dev-regen" id="dev-reset" type="button">↺ RESET CAMPAIGN</button>
+          <p class="dev-note">Adjustments rebuild the current theater's skyline. Enter a theater to see them. Reset returns the campaign to Washington downtown with full starting officers.</p>
         </div>
       </div>
     </div>
@@ -66,15 +132,30 @@
       </div>
       <div class="up-body" id="up-single">
         <div class="up-row"><span class="k">Type</span><span class="v" id="up-type">—</span></div>
-        <div class="up-row"><span class="k">Status</span><span class="v" id="up-status">—</span></div>
+        <!-- Assessment, not ground truth: C2 sees a confidence, never the contagion sim's answer -->
+        <div class="up-row"><span class="k">Assessment</span><span class="v" id="up-status">—</span></div>
+        <div class="up-assess" id="up-assess-bar"><i></i></div>
         <div class="up-row"><span class="k">Position</span><span class="v" id="up-pos">—</span></div>
         <div class="up-row"><span class="k">Heading</span><span class="v" id="up-hdg">—</span></div>
         <div class="up-row"><span class="k">Sensor</span><span class="v" id="up-sensor">—</span></div>
+        <!-- Standing order + its rescind countdown; hidden when nothing is ordered -->
+        <div class="up-row" id="up-order" hidden><span class="k">Order</span><span class="v" id="up-order-v">—</span></div>
+        <div class="up-assess order-bar" id="up-order-bar" hidden><i></i></div>
+        <div class="up-record" id="up-record">
+          <span class="k">Infractions</span>
+          <ul id="up-charges"></ul>
+        </div>
+        <!-- Platform hardpoints; fitting happens in the store, this is the in-theater readout -->
+        <div class="up-record up-loadout" id="up-loadout" hidden>
+          <span class="k">Hardpoints</span>
+          <ul id="up-hardpoints"></ul>
+        </div>
       </div>
       <div class="up-body" id="up-multi" hidden>
         <div class="up-row"><span class="k">Types</span><span class="v" id="up-kinds">—</span></div>
-        <div class="up-row"><span class="k">States</span><span class="v" id="up-states">—</span></div>
+        <div class="up-row"><span class="k">Assessed</span><span class="v" id="up-states">—</span></div>
         <div class="up-row"><span class="k">Marked</span><span class="v" id="up-marked">—</span></div>
+        <div class="up-row"><span class="k">Tracked</span><span class="v" id="up-tracked">—</span></div>
       </div>
       <div class="up-actions">
         <button class="up-mark" id="up-mark" type="button">◈ MARK INVESTIGATE</button>

@@ -50,6 +50,8 @@ export interface ProcOptions {
   roadGap?: number;
   /** Scales how many buildings are attempted per cell (density). 1 = default; <1 thins, >1 packs. */
   populationScale?: number;
+  /** Reject footprints that overhang a crossing street (corners/intersections). Default true. */
+  strictRoadClearance?: boolean;
 }
 
 const CELL = 300; // density / spatial grid, metres
@@ -188,6 +190,60 @@ export function generateBuildings(
     return { dist: best, dirx, diry, nx, ny, hw };
   };
 
+  /**
+   * A building is snapped to front its NEAREST road, which clears that one street by construction —
+   * but at corners and intersections the footprint can still overhang a DIFFERENT street, which is
+   * what makes buildings read as sitting on the road. So test the whole rotated rectangle against
+   * every nearby segment, not just the one it was placed against.
+   *
+   * `reach` is the rectangle's support radius toward the road (its extent along that direction), so
+   * a long building broadside to a street is rejected where a narrow one edge-on is not.
+   *
+   * This only enforces a thin margin off the ribbon, NOT the full `roadGap` setback: a building's
+   * long axis runs along its own street, so a cross street lies off its end, and demanding the full
+   * setback there rejects ordinary mid-block buildings on short blocks (measured: ~60% of the city).
+   * Real blocks build right up to the corner — they just never sit on the roadway.
+   */
+  const clearsRoads = (
+    x: number,
+    y: number,
+    ux: number,
+    uy: number,
+    px: number,
+    py: number,
+    halfLen: number,
+    halfDep: number,
+  ): boolean => {
+    const MARGIN = 2; // metres of pavement kept clear of any road ribbon
+    const ix = Math.floor((x + R) / CELL);
+    const iy = Math.floor((y + R) / CELL);
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const gx = ix + dx;
+        const gy = iy + dy;
+        if (gx < 0 || gy < 0 || gx >= gridN || gy >= gridN) continue;
+        const segs = segCells.get(gy * gridN + gx);
+        if (!segs) continue;
+        for (const s of segs) {
+          const vx = s.bx - s.ax;
+          const vy = s.by - s.ay;
+          const l2 = vx * vx + vy * vy;
+          let t = l2 > 0 ? ((x - s.ax) * vx + (y - s.ay) * vy) / l2 : 0;
+          t = Math.max(0, Math.min(1, t));
+          let nx = x - (s.ax + vx * t);
+          let ny = y - (s.ay + vy * t);
+          const dist = Math.hypot(nx, ny);
+          if (dist < 1e-6) return false; // centred on the roadway
+          nx /= dist;
+          ny /= dist;
+          const reach = Math.abs(ux * nx + uy * ny) * halfLen + Math.abs(px * nx + py * ny) * halfDep;
+          if (dist < s.hw + MARGIN + reach) return false;
+        }
+      }
+    }
+    return true;
+  };
+
   const placed = new Map<number, number[]>(); // overlap hash: cell -> [x,y,...]
   const overlaps = (x: number, y: number, minDist: number): boolean => {
     const ix = Math.floor((x + R) / OVERLAP_CELL);
@@ -220,6 +276,7 @@ export function generateBuildings(
 
   const roadGap = opts.roadGap ?? DEFAULT_ROAD_GAP;
   const popScale = Math.max(0, opts.populationScale ?? 1);
+  const strict = opts.strictRoadClearance ?? true;
   const DMIN = 0.02; // below this fraction of peak density → countryside, stop
   const MAX_PER_CELL = 60;
 
@@ -272,6 +329,8 @@ export function generateBuildings(
       const py = ux;
       const hw = wid / 2;
       const hd = dep / 2;
+      // reject footprints that overhang a crossing street (corners, intersections, forks)
+      if (strict && !clearsRoads(x, y, ux, uy, px, py, hw, hd)) continue;
       const corner = (cs: number, cd: number): number[] => {
         const wx = x + ux * hw * cs + px * hd * cd;
         const wy = y + uy * hw * cs + py * hd * cd;
