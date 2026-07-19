@@ -1,3 +1,5 @@
+import { slotKey, onSlotChange } from './saves';
+
 /**
  * What operating past the public's consent costs you.
  *
@@ -11,7 +13,7 @@
  * doing, and a more interesting decision to hand the player.
  */
 
-const SAVE_KEY = 'gorgon.resistance.v1';
+const SAVE_BASE = 'resistance.v1';
 
 /** How much a maximally unjustified order moves the meter. Shortfall scales it down from there. */
 const TRANSGRESSION_WEIGHT = 0.055;
@@ -25,8 +27,20 @@ class Resistance {
   private listeners = new Set<() => void>();
 
   constructor() {
+    this.load();
+    // Opening a slot re-reads that campaign's hardening; closing one drops back to calm ground.
+    onSlotChange(() => {
+      this.load();
+      for (const fn of this.listeners) fn();
+    });
+  }
+
+  private load(): void {
+    this.value = 0;
+    const key = slotKey(SAVE_BASE);
+    if (!key) return; // no campaign open — defaults, and save() will refuse to write
     try {
-      const raw = localStorage.getItem(SAVE_KEY);
+      const raw = localStorage.getItem(key);
       if (raw !== null) this.value = Math.min(1, Math.max(0, parseFloat(raw)));
     } catch {
       // storage unavailable — start calm
@@ -90,8 +104,10 @@ class Resistance {
   }
 
   private save(): void {
+    const key = slotKey(SAVE_BASE);
+    if (!key) return;
     try {
-      localStorage.setItem(SAVE_KEY, String(this.value));
+      localStorage.setItem(key, String(this.value));
     } catch {
       // not fatal
     }

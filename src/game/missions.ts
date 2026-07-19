@@ -1,5 +1,6 @@
 import { progression, type Saved } from './progression';
 import { tolerance } from './tolerance';
+import { slotKey, onSlotChange } from './saves';
 
 /**
  * The mission chain — the campaign's spine, and the only thing that scores the operator.
@@ -41,7 +42,7 @@ export interface MissionDef {
    */
   maxObelisksLost: number;
   reward: number;
-  /** Officers forfeited on failure, charged after the rollback. */
+  /** Funding tokens forfeited on failure, charged after the rollback. */
   penalty: number;
   /** Completing this mission grants a standing authorization. */
   grants?: Authorization;
@@ -200,7 +201,7 @@ export interface Ledger {
 }
 
 // v2: the chain was rewritten around the narrative arc, so old ids no longer resolve.
-const SAVE_KEY = 'gorgon.missions.v2';
+const SAVE_BASE = 'missions.v2';
 
 interface SavedMissions {
   completed: string[];
@@ -223,6 +224,19 @@ export class Missions {
 
   constructor() {
     this.load();
+    // The chain belongs to the campaign, so it swaps with the slot.
+    onSlotChange(() => {
+      this.completed.clear();
+      this.auths.clear();
+      this.active = null;
+      this._ledger = { investigations: 0, executions: 0, valid: 0, invalid: 0 };
+      this.load();
+      // A loaded campaign always has work on the books; a closed slot has none.
+      if (slotKey(SAVE_BASE)) this.ensureActive();
+      // Notify directly rather than through emit(), which would save — writing the state we just
+      // read straight back is pointless, and on slot CLOSE it would be actively wrong.
+      for (const fn of this.listeners) fn({ type: 'progress' });
+    });
   }
 
   get ledger(): Ledger {
@@ -278,11 +292,33 @@ export class Missions {
     return true;
   }
 
-  /** Stand down voluntarily. Costs nothing — only failure rolls the campaign back. */
-  abandon(): boolean {
-    if (!this.active) return false;
-    this.active = null;
-    this.emit({ type: 'progress' });
+  /** The next tasking in the chain that could be started, or undefined once the chain is done. */
+  nextAvailable(): MissionDef | undefined {
+    return MISSIONS.find((m) => this.statusOf(m) === 'available');
+  }
+
+  /**
+   * Put the next tasking in the chain on the books, if nothing is running.
+   *
+   * The chain is not a menu. The operator is a contractor being handed work in the order the
+   * company decides to hand it over, and being asked to opt in to their own job was always a
+   * fiction — there was never a reason to decline, so the accept button was a click that only ever
+   * had one answer. Optional side work can be opt-in later; the spine is assigned.
+   *
+   * Called on campaign load and after every completion or failure. A FAILED tasking is re-assigned
+   * rather than skipped: it wasn't completed, so it is still the next thing owed.
+   */
+  ensureActive(): boolean {
+    if (this.active) return false;
+    const next = this.nextAvailable();
+    if (!next) return false;
+    this.active = {
+      id: next.id,
+      valid: 0,
+      invalid: 0,
+      obelisksLost: 0,
+      restore: progression.snapshot(),
+    };
     return true;
   }
 
@@ -310,6 +346,8 @@ export class Missions {
     if (this.active.invalid > def.maxInvalid) {
       progression.restore(this.active.restore, def.penalty);
       this.active = null;
+      // A failed tasking is re-assigned, not skipped — it is still the next thing owed.
+      this.ensureActive();
       const e: MissionEvent = { type: 'failed', mission: def };
       this.emit(e);
       return e;
@@ -322,6 +360,8 @@ export class Missions {
       tolerance.advance(def.toleranceGain);
       this.active = null;
       progression.award(def.reward);
+      // The next tasking is on the books before the completion notice has finished animating.
+      this.ensureActive();
       const e: MissionEvent = { type: 'complete', mission: def };
       this.emit(e);
       return e;
@@ -344,6 +384,8 @@ export class Missions {
     if (this.active.obelisksLost > def.maxObelisksLost) {
       progression.restore(this.active.restore, def.penalty);
       this.active = null;
+      // A failed tasking is re-assigned, not skipped — it is still the next thing owed.
+      this.ensureActive();
       const e: MissionEvent = { type: 'failed', mission: def };
       this.emit(e);
       return e;
@@ -364,6 +406,7 @@ export class Missions {
     }
     progression.restore(this.active.restore, def.penalty);
     this.active = null;
+    this.ensureActive();
     const e: MissionEvent = { type: 'failed', mission: def };
     this.emit(e);
     return e;
@@ -379,15 +422,19 @@ export class Missions {
         active: this.active,
         ledger: this._ledger,
       };
-      localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+      const key = slotKey(SAVE_BASE);
+      if (!key) return; // no campaign open
+      localStorage.setItem(key, JSON.stringify(data));
     } catch {
       // Storage unavailable — the chain just doesn't persist.
     }
   }
 
   private load(): void {
+    const key = slotKey(SAVE_BASE);
+    if (!key) return; // title screen: an empty chain
     try {
-      const raw = localStorage.getItem(SAVE_KEY);
+      const raw = localStorage.getItem(key);
       if (!raw) return;
       const s = JSON.parse(raw) as SavedMissions;
       for (const id of s.completed ?? []) this.completed.add(id);

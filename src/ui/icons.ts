@@ -26,10 +26,29 @@ function legs(n: number, r0: number, r1: number, phase: number): string {
 const GLYPHS: Record<string, string> = {
   // ---- platforms (mirror the map markers) ----
   drone: `<circle ${A} cx="12" cy="12" r="8"/><circle ${A} cx="12" cy="12" r="3"/>`,
+  // Four legs off an oblong body with the head cantilevered forward. The only platform glyph with
+  // a front and a back, which is what separates it from the arachnid at a glance.
+  dog:
+    `<rect ${A} x="8.5" y="7" width="7" height="9.5" rx="1.2"/>` +
+    `<circle ${A} cx="12" cy="4.6" r="2.3"/>` +
+    `<path ${A} d="M9.5 7.5 7.4 10M14.5 7.5l2.1 2.5M9.5 16l-2.1 3.5M14.5 16l2.1 3.5"/>`,
+  // Rotor rings on an X. Rings rather than legs is the whole distinction from the dog, which sits
+  // at the same size and fills the same role.
+  quad:
+    `<rect ${A} x="9.8" y="9.8" width="4.4" height="4.4" rx="0.8"/>` +
+    `<path ${A} d="M10 10 7.6 7.6M14 10l2.4-2.4M10 14l-2.4 2.4M14 14l2.4 2.4"/>` +
+    `<circle ${A} cx="6.2" cy="6.2" r="3"/><circle ${A} cx="17.8" cy="6.2" r="3"/>` +
+    `<circle ${A} cx="6.2" cy="17.8" r="3"/><circle ${A} cx="17.8" cy="17.8" r="3"/>`,
   spider: `${legs(6, 3.5, 9.5, Math.PI / 6)}<circle ${A} cx="12" cy="12" r="3.5"/>`,
   biped:
     `<rect ${A} x="7.5" y="3.5" width="9" height="9" rx="1"/>` +
     `<path ${A} d="M9.5 12.5 8 17l2.5 3.5M14.5 12.5 16 17l-2.5 3.5"/>`,
+  // Hull from above with outriggers — a trimaran, seen the way the map marker draws it.
+  naval:
+    `<path ${A} d="M12 3.2 14.8 8.2v11.3H9.2V8.2Z"/>` +
+    `<path ${A} d="M5.4 8.6v7.6M18.6 8.6v7.6M5.4 12.4h3.8M18.6 12.4h-3.8"/>`,
+  // The planform, which is the entire identity of the wing.
+  interceptor: `<path ${A} d="M12 3 20.5 19.5 12 15.2 3.5 19.5Z"/>`,
   walker: `${legs(4, 5, 10, Math.PI / 4)}<rect ${A} x="7" y="7" width="10" height="10" rx="1"/>`,
 
   // ---- gear ----
@@ -51,6 +70,21 @@ const GLYPHS: Record<string, string> = {
   relay:
     `<rect ${A} x="9.5" y="9.5" width="5" height="5" rx="1"/>` +
     `<path ${A} d="M9.5 12H4M14.5 12H20M12 9.5V4M12 14.5V20"/>`,
+  // Emergency powers: the barrier, with the bar broken out of it. This is the purchase that removes
+  // the public-tolerance gate outright, so the glyph is a gate that no longer closes.
+  'emergency-powers':
+    `<path ${A} d="M4 6.5v13M20 6.5v13"/>` +
+    `<path ${A} d="M4 11h5.5M14.5 11H20"/>` +
+    `<path ${A} d="M12.6 7.2 9.8 12.4h3.4L10.9 17"/>`,
+  // Marking automation: the tasking glyph it automates, under a loop.
+  'auto-investigate':
+    `<path ${A} d="M3.5 14.5S6.6 9.5 12 9.5s8.5 5 8.5 5-3.1 5-8.5 5-8.5-5-8.5-5Z"/>` +
+    `<circle ${A} cx="12" cy="14.5" r="2.2"/>` +
+    `<path ${A} d="M6.2 6.4a8 8 0 0 1 11.6 0"/><path ${A} d="M18.4 3.4v3.2h-3.2"/>`,
+  'auto-execute':
+    `<circle ${A} cx="12" cy="14.5" r="5.5"/>` +
+    `<path ${A} d="M12 7.5v2.4M12 19.1v2.4M5.5 14.5h2.4M16.1 14.5h2.4"/>` +
+    `<path ${A} d="M6.2 6.4a8 8 0 0 1 11.6 0"/><path ${A} d="M18.4 3.4v3.2h-3.2"/>`,
 
   // ---- territory ----
   state: `<path ${A} d="M12 21s6-5.5 6-10a6 6 0 1 0-12 0c0 4.5 6 10 6 10Z"/><circle ${A} cx="12" cy="11" r="2"/>`,
@@ -68,11 +102,34 @@ const GLYPHS: Record<string, string> = {
     `<circle ${A} cx="12" cy="12" r="1"/>`,
 };
 
-/** An icon as an inline SVG string, or empty if the name isn't in the set. */
+/** Names already reported missing, so a per-frame re-render warns once rather than every time. */
+const warned = new Set<string>();
+
+/**
+ * An icon as an inline SVG string.
+ *
+ * A name with no glyph returns EMPTY and complains in dev. It used to return empty and say nothing,
+ * which is how four platforms and three network purchases shipped with a blank space where their
+ * icon should be — every one of them added after the icon set and never noticed, because nothing
+ * anywhere failed. Adding a platform without adding its glyph should be loud.
+ */
 export function icon(name: string): string {
   const g = GLYPHS[name];
-  if (!g) return '';
+  if (!g) {
+    if (import.meta.env.DEV && !warned.has(name)) {
+      warned.add(name);
+      console.warn(`[GORGON] no icon glyph for "${name}" — add one to src/ui/icons.ts`);
+    }
+    return '';
+  }
   return `<svg class="c2-glyph" viewBox="0 0 24 24" aria-hidden="true">${g}</svg>`;
+}
+
+/**
+ * Every name this set can draw. Exported so a caller can assert its own catalog is covered.
+ */
+export function iconNames(): string[] {
+  return Object.keys(GLYPHS);
 }
 
 export function hasIcon(name: string): boolean {

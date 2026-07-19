@@ -57,6 +57,8 @@ export class MissionPanel {
   private activeEl: HTMLElement;
   private ledgerEl: HTMLElement;
   private listEl: HTMLElement;
+  /** Accordion open state, kept across the re-render that every order triggers. */
+  private briefingOpen = false;
 
   constructor(private hooks: MissionHooks) {
     this.root = document.getElementById('c2-tasking')!;
@@ -74,12 +76,12 @@ export class MissionPanel {
     missions.onChange((e) => {
       if (e.type === 'complete') {
         this.hooks.notify(
-          `MISSION COMPLETE · ${e.mission.name} · +${fmt.format(e.mission.reward)} OFFICERS` +
+          `MISSION COMPLETE · ${e.mission.name} · +${fmt.format(e.mission.reward)} FUNDING TOKENS` +
             (e.mission.grants === 'execute' ? ' · EXECUTION AUTHORIZED' : ''),
         );
       } else if (e.type === 'failed') {
         this.hooks.notify(
-          `MISSION FAILED · ${e.mission.name} · CAMPAIGN ROLLED BACK · −${fmt.format(e.mission.penalty)} OFFICERS`,
+          `MISSION FAILED · ${e.mission.name} · CAMPAIGN ROLLED BACK · −${fmt.format(e.mission.penalty)} FUNDING TOKENS`,
         );
       }
       this.render();
@@ -95,42 +97,118 @@ export class MissionPanel {
     this.renderList();
   }
 
+  /**
+   * The active tasking.
+   *
+   * Three parts, in the order they matter: what this job is called, the OBJECTIVE STEPS with live
+   * progress against each, and the narrative behind an accordion. The steps are the operative
+   * content — an operator mid-theater needs "8 of 20, two errors left" at a glance, not prose — so
+   * the prose folds away and stays folded until it's asked for.
+   */
   private renderActive(): void {
     const def = missions.activeDef();
     const run = missions.activeRun();
+    this.activeEl.replaceChildren();
+
     if (!def || !run) {
-      // The tolerance bar is campaign state, not tasking state — it stays up between jobs.
+      // The whole chain is cleared. Tolerance and resistance are campaign state, not tasking
+      // state, so they stay up with nothing running.
       this.activeEl.innerHTML =
-        `<p class="c2-note">NO ACTIVE TASKING</p>` +
+        `<p class="c2-note">CHAIN CLEARED · NO FURTHER TASKING</p>` +
         `<div class="c2-active c2-idle">${toleranceBar()}</div>`;
       return;
     }
 
-    const validPct = Math.min(100, (run.valid / def.target) * 100);
-    // The invalid bar fills toward the ceiling — the (max+1)th is what actually fails the mission.
-    const invalidPct = Math.min(100, (run.invalid / (def.maxInvalid + 1)) * 100);
-
-    this.activeEl.replaceChildren();
     const wrap = document.createElement('div');
     wrap.className = 'c2-active';
+
+    const verb = def.mark === 'execute' ? 'EXECUTIONS' : 'INVESTIGATIONS';
     wrap.innerHTML =
-      `<div class="c2-active-head"><span class="c2-name">${icon(def.mark === 'execute' ? 'lethal' : 'surveil')}${def.name}</span>` +
-      `<span class="c2-order order-${def.mark}">${def.mark === 'execute' ? 'LETHAL' : 'SURVEIL'}</span></div>` +
-      `<div class="c2-bar-row"><span class="c2-bar-k">VALID</span>` +
-      `<span class="c2-bar"><i class="ok" style="width:${validPct}%"></i></span>` +
-      `<span class="c2-bar-v">${run.valid} / ${def.target}</span></div>` +
-      `<div class="c2-bar-row"><span class="c2-bar-k">INVALID</span>` +
-      `<span class="c2-bar"><i class="bad" style="width:${invalidPct}%"></i></span>` +
-      `<span class="c2-bar-v">${run.invalid} / ${def.maxInvalid}</span></div>` +
+      `<div class="c2-active-head">` +
+      `<span class="c2-name">${icon(def.mark === 'execute' ? 'lethal' : 'surveil')}${def.name}</span>` +
+      `<span class="c2-order order-${def.mark}">${def.mark === 'execute' ? 'LETHAL' : 'SURVEIL'}</span>` +
+      `</div>` +
+      `<div class="c2-obj-label">OBJECTIVES</div>` +
+      this.step(
+        `${def.target} valid ${verb.toLowerCase()}`,
+        run.valid,
+        def.target,
+        'ok',
+        run.valid >= def.target,
+      ) +
+      // The failure conditions are counted UP toward their ceiling rather than down from it: a
+      // player reading "2 / 3" understands they have one left; "1 remaining" reads as a budget.
+      this.step(`Stay under ${def.maxInvalid + 1} invalid`, run.invalid, def.maxInvalid, 'bad', false) +
+      this.step(
+        `Hold the net · max ${def.maxObelisksLost} sites lost`,
+        run.obelisksLost,
+        def.maxObelisksLost,
+        'bad',
+        false,
+      ) +
       toleranceBar();
 
-    const stand = document.createElement('button');
-    stand.type = 'button';
-    stand.className = 'c2-buy standdown';
-    stand.textContent = 'STAND DOWN';
-    stand.addEventListener('click', () => missions.abandon());
-    wrap.append(stand);
+    wrap.append(this.accordion(def));
     this.activeEl.append(wrap);
+  }
+
+  /**
+   * One objective line: label, progress bar, count.
+   *
+   * `tone` is which way the bar reads — 'ok' bars fill toward success, 'bad' bars fill toward
+   * failing the tasking. Both are shown the same way on purpose, because to the operator they are
+   * the same kind of fact: a number moving toward a threshold that ends the job.
+   */
+  private step(label: string, at: number, of: number, tone: 'ok' | 'bad', done: boolean): string {
+    const pct = Math.min(100, of > 0 ? (at / of) * 100 : 0);
+    return (
+      `<div class="c2-obj${done ? ' done' : ''}">` +
+      `<div class="c2-obj-top"><span class="c2-obj-tick">${done ? '◈' : '○'}</span>` +
+      `<span class="c2-obj-text">${label}</span>` +
+      `<span class="c2-obj-count">${at} / ${of}</span></div>` +
+      `<span class="c2-bar"><i class="${tone}" style="width:${pct}%"></i></span>` +
+      `</div>`
+    );
+  }
+
+  /**
+   * The narrative, folded away.
+   *
+   * Open state is remembered across re-renders — this panel redraws on every order, and an
+   * accordion that snapped shut mid-sentence each time a contact was flagged would be unreadable.
+   */
+  private accordion(def: MissionDef): HTMLElement {
+    const box = document.createElement('div');
+    box.className = 'c2-acc';
+
+    const head = document.createElement('button');
+    head.type = 'button';
+    head.className = 'c2-acc-head';
+    head.innerHTML = `<span class="c2-acc-caret">▸</span><span>BRIEFING</span>`;
+
+    const body = document.createElement('div');
+    body.className = 'c2-acc-body';
+    body.innerHTML =
+      def.briefing
+        .split('\n\n')
+        .map((para) => `<p class="c2-modal-p">${para}</p>`)
+        .join('') +
+      `<div class="c2-modal-objectives">` +
+      `<div><span>ON CLEARANCE</span><b>+${fmt.format(def.reward)} tokens · +${Math.round(def.toleranceGain * 100)}% tolerance</b></div>` +
+      `<div><span>ON FAILURE</span><b>rollback · −${fmt.format(def.penalty)} tokens</b></div>` +
+      (def.grants
+        ? `<div><span>GRANTS</span><b>${def.grants === 'execute' ? 'lethal authority' : 'custody authority'}</b></div>`
+        : '') +
+      `</div>`;
+
+    if (this.briefingOpen) box.classList.add('open');
+    head.addEventListener('click', () => {
+      this.briefingOpen = !this.briefingOpen;
+      box.classList.toggle('open', this.briefingOpen);
+    });
+
+    box.append(head, body);
+    return box;
   }
 
   private renderLedger(): void {
@@ -149,64 +227,12 @@ export class MissionPanel {
   }
 
   /**
-   * The briefing window. Opened from a mission's name or brief; carries the narrative that explains
-   * what the tasking is FOR, which the one-line summary in the list cannot.
+   * One link in the chain — a progress readout, not a control.
+   *
+   * Nothing here is clickable any more. The chain is assigned in order, so a row's only job is to
+   * say where the campaign is in it: what's done, what's running, what's still coming and what it
+   * will ask for when it arrives.
    */
-  private openBriefing(m: MissionDef): void {
-    const status = missions.statusOf(m);
-    const back = document.createElement('div');
-    back.className = 'c2-modal-back';
-
-    const box = document.createElement('div');
-    box.className = 'c2-modal';
-    box.innerHTML =
-      `<div class="c2-modal-head">` +
-      `<span class="c2-name">${icon(m.mark === 'execute' ? 'lethal' : 'surveil')}${m.name}</span>` +
-      `<span class="c2-order order-${m.mark}">${m.mark === 'execute' ? 'LETHAL' : 'SURVEIL'}</span>` +
-      `</div>` +
-      m.briefing
-        .split('\n\n')
-        .map((para) => `<p class="c2-modal-p">${para}</p>`)
-        .join('') +
-      `<div class="c2-modal-objectives">` +
-      `<div><span>OBJECTIVE</span><b>${m.target} valid ${m.mark === 'execute' ? 'executions' : 'investigations'}</b></div>` +
-      `<div><span>INVALID CEILING</span><b>${m.maxInvalid}</b></div>` +
-      `<div><span>SITES THE NET MAY LOSE</span><b>${m.maxObelisksLost}</b></div>` +
-      `<div><span>ON CLEARANCE</span><b>+${fmt.format(m.reward)} officers · +${Math.round(m.toleranceGain * 100)}% tolerance</b></div>` +
-      `<div><span>ON FAILURE</span><b>rollback · −${fmt.format(m.penalty)} officers</b></div>` +
-      (m.grants
-        ? `<div><span>GRANTS</span><b>${m.grants === 'execute' ? 'lethal authority' : 'custody authority'}</b></div>`
-        : '') +
-      `</div>`;
-
-    const actions = document.createElement('div');
-    actions.className = 'c2-modal-actions';
-    const close = document.createElement('button');
-    close.type = 'button';
-    close.className = 'c2-buy standdown';
-    close.textContent = 'CLOSE';
-    close.addEventListener('click', () => back.remove());
-    actions.append(close);
-
-    if (status === 'available' && !missions.activeRun()) {
-      const accept = document.createElement('button');
-      accept.type = 'button';
-      accept.className = 'c2-buy';
-      accept.textContent = 'ACCEPT TASKING';
-      accept.addEventListener('click', () => {
-        missions.accept(m);
-        back.remove();
-      });
-      actions.append(accept);
-    }
-    box.append(actions);
-    back.append(box);
-    back.addEventListener('click', (e) => {
-      if (e.target === back) back.remove();
-    });
-    document.body.append(back);
-  }
-
   private row(m: MissionDef): HTMLElement {
     const status = missions.statusOf(m);
     const row = document.createElement('div');
@@ -216,23 +242,22 @@ export class MissionPanel {
     head.className = 'c2-row-head';
     head.innerHTML =
       `<span class="c2-name">${icon(m.mark === 'execute' ? 'lethal' : 'surveil')}${m.name}</span>` +
-      `<span class="c2-tier">${status.toUpperCase()}</span>`;
-    head.addEventListener('click', () => this.openBriefing(m));
+      `<span class="c2-tier">${status === 'available' ? 'UPCOMING' : status.toUpperCase()}</span>`;
     row.append(head);
 
+    // A locked mission's brief is withheld: what the company wants next is not the operator's to
+    // read ahead on, and it keeps the chain's turns as turns.
     if (status !== 'locked') {
       const brief = document.createElement('p');
-      brief.className = 'c2-blurb briefable';
+      brief.className = 'c2-blurb';
       brief.textContent = m.brief;
-      brief.addEventListener('click', () => this.openBriefing(m));
       row.append(brief);
     }
 
     const meta = document.createElement('div');
     meta.className = 'c2-meta';
     const verb = m.mark === 'execute' ? 'EXECUTIONS' : 'INVESTIGATIONS';
-    meta.innerHTML =
-      `<span>${m.target} VALID ${verb}</span><span>MAX ${m.maxInvalid} INVALID</span>`;
+    meta.innerHTML = `<span>${m.target} VALID ${verb}</span><span>MAX ${m.maxInvalid} INVALID</span>`;
     row.append(meta);
 
     const pay = document.createElement('div');
@@ -242,35 +267,14 @@ export class MissionPanel {
       `<span class="bad">FAIL −${fmt.format(m.penalty)}</span>`;
     row.append(pay);
 
-    if (m.grants === 'execute') {
+    if (m.grants) {
       const grant = document.createElement('div');
       grant.className = 'c2-grant';
-      grant.textContent = '◈ GRANTS EXECUTION AUTHORIZATION';
+      grant.textContent =
+        m.grants === 'execute' ? '◈ GRANTS EXECUTION AUTHORIZATION' : '◈ GRANTS CUSTODY AUTHORIZATION';
       row.append(grant);
     }
 
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'c2-buy';
-    if (status === 'complete') {
-      btn.disabled = true;
-      btn.classList.add('done');
-      btn.textContent = 'COMPLETE';
-    } else if (status === 'active') {
-      btn.disabled = true;
-      btn.textContent = 'IN PROGRESS';
-    } else if (status === 'locked') {
-      btn.disabled = true;
-      const req = MISSIONS.find((x) => x.id === m.requires);
-      btn.textContent = `REQUIRES ${req?.name ?? m.requires}`;
-    } else if (missions.activeRun()) {
-      btn.disabled = true;
-      btn.textContent = 'ANOTHER TASKING ACTIVE';
-    } else {
-      btn.textContent = 'READ BRIEFING';
-      btn.addEventListener('click', () => this.openBriefing(m));
-    }
-    row.append(btn);
     return row;
   }
 }

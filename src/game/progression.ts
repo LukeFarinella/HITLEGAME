@@ -1,5 +1,6 @@
 import type { Region, StateTerritory, Territory, Tier } from './territory';
 import { tolerance } from './tolerance';
+import { slotKey, onSlotChange } from './saves';
 import {
   PLATFORMS,
   emptyLoadout,
@@ -15,7 +16,7 @@ import {
 } from './platforms';
 
 /**
- * What the player owns: officers (the currency), the assets they've commissioned, and how far each
+ * What the player owns: funding tokens (the currency), the assets they've commissioned, and how far each
  * state has been built out.
  *
  * This module is deliberately dumb about what a purchase *does* — it owns ids, prices and the
@@ -108,20 +109,27 @@ export const ASSETS: Asset[] = [
  */
 
 /**
- * Starting officers. Enough to take the whole map and commission everything with room to spare —
- * earning officers is a later update, and until then the store is meant to be explored, not
+ * Starting funding. Enough to take the whole map and commission everything with room to spare —
+ * earning tokens is a later update, and until then the store is meant to be explored, not
  * budgeted against.
  */
-export const START_OFFICERS = 250_000;
+export const START_TOKENS = 250_000;
 
 // Bumped from v1: platforms and loadouts replaced the old drone/drone-laser/drone-uprate assets,
 // and a save written against those would restore a campaign that owns nothing recognisable. A
 // clean reset is more honest than a partial migration.
-const SAVE_KEY = 'gorgon.progression.v2';
+const SAVE_BASE = 'progression.v2';
 
 /** The whole ledger, as persisted and as snapshotted for mission rollback. */
 export interface Saved {
-  officers: number;
+  tokens: number;
+  /**
+   * The pre-rename name for {@link tokens}. Read on load, never written.
+   *
+   * The currency was called "officers" until it became funding tokens. Saves written before that
+   * carry the old key, and dropping it would silently zero the balance of every existing campaign.
+   */
+  officers?: number;
   assets: AssetId[];
   tiers: Record<string, Tier>;
   /** Fitted gear per platform type. */
@@ -135,7 +143,7 @@ export interface Saved {
 }
 
 export class Progression {
-  private _officers = START_OFFICERS;
+  private _tokens = START_TOKENS;
   private assets = new Set<AssetId>();
   private tiers = new Map<string, Tier>();
   /** The state this campaign was founded in. Null until the operator has chosen. */
@@ -160,14 +168,21 @@ export class Progression {
 
   constructor() {
     this.load();
+    // Opening a save slot swaps the whole campaign underneath; closing one leaves the module at
+    // its founding defaults so the title screen has nothing granted behind it.
+    onSlotChange(() => {
+      this.clear();
+      this.load();
+      this.changed();
+    });
   }
 
   setAuthProvider(fn: (a: string) => boolean): void {
     this.authCheck = fn;
   }
 
-  get officers(): number {
-    return this._officers;
+  get tokens(): number {
+    return this._tokens;
   }
 
   has(id: AssetId): boolean {
@@ -186,10 +201,11 @@ export class Progression {
     if (this._homeState) return false;
     this._homeState = fips;
     this.tiers.set(fips, 1);
-    const spider = PLATFORM_BY_ID.get('spider');
-    if (spider) {
-      this.counts.set('spider', 1);
-      if (!this.loadouts.has('spider')) this.loadouts.set('spider', emptyLoadout(spider));
+    // The campaign opens with one quadruped and nothing else — the humblest thing in the catalog.
+    const opener = PLATFORM_BY_ID.get('dog');
+    if (opener) {
+      this.counts.set('dog', 1);
+      if (!this.loadouts.has('dog')) this.loadouts.set('dog', emptyLoadout(opener));
     }
     this.changed();
     return true;
@@ -260,13 +276,13 @@ export class Progression {
       const req = ASSETS.find((x) => x.id === a.requires);
       return `REQUIRES ${req?.name ?? a.requires}`;
     }
-    if (this._officers < a.cost) return 'INSUFFICIENT OFFICERS';
+    if (this._tokens < a.cost) return 'INSUFFICIENT FUNDING';
     return null;
   }
 
   buyAsset(a: Asset): boolean {
     if (this.assetBlocker(a)) return false;
-    this._officers -= a.cost;
+    this._tokens -= a.cost;
     this.assets.add(a.id);
     this.changed();
     return true;
@@ -283,8 +299,8 @@ export class Progression {
 
   buyNextTier(s: StateTerritory): boolean {
     const next = this.nextTierCost(s);
-    if (!next || this._officers < next.cost) return false;
-    this._officers -= next.cost;
+    if (!next || this._tokens < next.cost) return false;
+    this._tokens -= next.cost;
     this.tiers.set(s.id, next.tier);
     this.changed();
     return true;
@@ -331,8 +347,8 @@ export class Progression {
 
   buyRegionTier(r: Region): boolean {
     const next = this.nextRegionTier(r);
-    if (!next || this._officers < next.cost) return false;
-    this._officers -= next.cost;
+    if (!next || this._tokens < next.cost) return false;
+    this._tokens -= next.cost;
     for (const s of r.states) {
       if (this.tierOf(s) < next.tier) this.tiers.set(s.id, next.tier);
     }
@@ -414,7 +430,7 @@ export class Progression {
     if (def.requires && !this.hasPlatform(def.requires)) {
       return `REQUIRES ${PLATFORM_BY_ID.get(def.requires)?.name ?? def.requires}`;
     }
-    if (this._officers < def.cost) return 'INSUFFICIENT OFFICERS';
+    if (this._tokens < def.cost) return 'INSUFFICIENT FUNDING';
     return null;
   }
 
@@ -423,13 +439,13 @@ export class Progression {
     if (!def.expansion) return 'NO EXPANSION';
     if (!this.hasPlatform(def.id)) return 'PLATFORM NOT FIELDED';
     if (this.countOf(def.id) >= def.maxCount) return 'AT FULL STRENGTH';
-    if (this._officers < def.expansion.cost) return 'INSUFFICIENT OFFICERS';
+    if (this._tokens < def.expansion.cost) return 'INSUFFICIENT FUNDING';
     return null;
   }
 
   buyExpansion(def: PlatformDef): boolean {
     if (!def.expansion || this.expansionBlocker(def)) return false;
-    this._officers -= def.expansion.cost;
+    this._tokens -= def.expansion.cost;
     this.counts.set(def.id, Math.min(def.maxCount, this.countOf(def.id) + def.expansion.count));
     this.changed();
     return true;
@@ -448,7 +464,7 @@ export class Progression {
 
   buyPlatform(def: PlatformDef): boolean {
     if (this.platformBlocker(def)) return false;
-    this._officers -= def.cost;
+    this._tokens -= def.cost;
     this.counts.set(def.id, 1);
     if (!this.loadouts.has(def.id)) this.loadouts.set(def.id, emptyLoadout(def));
     this.changed();
@@ -465,7 +481,7 @@ export class Progression {
     if (!gearFits(gear, id)) return 'INCOMPATIBLE';
     if (loadout.includes(gear.id)) return 'FITTED';
     if (!loadout.includes(null)) return 'NO FREE HARDPOINT';
-    if (this._officers < gear.cost) return 'INSUFFICIENT OFFICERS';
+    if (this._tokens < gear.cost) return 'INSUFFICIENT FUNDING';
     return null;
   }
 
@@ -488,7 +504,7 @@ export class Progression {
     const blocker = this.gearBlocker(gear, id);
     if (blocker && blocker !== 'NO FREE HARDPOINT') return false;
     loadout[slot] = gear.id;
-    this._officers -= gear.cost;
+    this._tokens -= gear.cost;
     this.changed();
     return true;
   }
@@ -503,7 +519,7 @@ export class Progression {
     if (!loadout || !fitted) return false;
     const gear = GEAR_BY_ID.get(fitted);
     loadout[slot] = null;
-    if (gear) this._officers += Math.floor(gear.cost / 2);
+    if (gear) this._tokens += Math.floor(gear.cost / 2);
     this.changed();
     return true;
   }
@@ -548,7 +564,7 @@ export class Progression {
    */
   snapshot(): Saved {
     return {
-      officers: this._officers,
+      tokens: this._tokens,
       assets: [...this.assets],
       tiers: Object.fromEntries(this.tiers),
       // Deep-copied: a loadout is a mutable array, and a snapshot that aliased the live one would
@@ -560,9 +576,9 @@ export class Progression {
     };
   }
 
-  /** Roll back to a snapshot, optionally charging a penalty on the way. Officers never go below 0. */
+  /** Roll back to a snapshot, optionally charging a penalty on the way. Funding tokens never go below 0. */
   restore(snap: Saved, penalty = 0): void {
-    this._officers = Math.max(0, snap.officers - penalty);
+    this._tokens = Math.max(0, snap.tokens - penalty);
     this.assets = new Set(snap.assets);
     this.tiers = new Map(Object.entries(snap.tiers) as [string, Tier][]);
     this.loadouts = new Map(
@@ -576,36 +592,57 @@ export class Progression {
 
   /** Straight award, for mission completion. */
   award(amount: number): void {
-    this._officers += amount;
+    this._tokens += amount;
     this.changed();
   }
 
   /** Dev sandbox only. */
-  setOfficers(n: number): void {
-    this._officers = Math.max(0, Math.round(n));
+  setTokens(n: number): void {
+    this._tokens = Math.max(0, Math.round(n));
     this.changed();
   }
 
   // ---- persistence -----------------------------------------------------------------------------
 
   private save(): void {
+    const key = slotKey(SAVE_BASE);
+    if (!key) return; // no campaign open — nothing to persist and nowhere to put it
     try {
-      localStorage.setItem(SAVE_KEY, JSON.stringify(this.snapshot()));
+      localStorage.setItem(key, JSON.stringify(this.snapshot()));
     } catch {
       // Private browsing / disabled storage: the campaign just doesn't persist. Not fatal.
     }
   }
 
+  /** Drop every campaign-scoped field back to its founding value. */
+  private clear(): void {
+    this._tokens = START_TOKENS;
+    this._homeState = null;
+    this.assets.clear();
+    this.tiers.clear();
+    this.counts.clear();
+    this.loadouts.clear();
+    this.autoThresholds.clear();
+  }
+
   private load(): void {
+    const key = slotKey(SAVE_BASE);
+    if (!key) return; // title screen: founding defaults, nothing read
     let saved: Saved | undefined;
     try {
-      const raw = localStorage.getItem(SAVE_KEY);
+      const raw = localStorage.getItem(key);
       if (raw) saved = JSON.parse(raw) as Saved;
     } catch {
       saved = undefined;
     }
     if (!saved) return; // nothing granted until a home state is chosen
-    this._officers = typeof saved.officers === 'number' ? saved.officers : START_OFFICERS;
+    // Old saves carry `officers`; new ones carry `tokens`. Prefer the new key, fall back.
+    this._tokens =
+      typeof saved.tokens === 'number'
+        ? saved.tokens
+        : typeof saved.officers === 'number'
+          ? saved.officers
+          : START_TOKENS;
     for (const id of saved.assets ?? []) this.assets.add(id);
     for (const [id, tier] of Object.entries(saved.tiers ?? {})) this.tiers.set(id, tier);
     for (const [k, v] of Object.entries(saved.autoThresholds ?? {})) this.autoThresholds.set(k, v);
@@ -628,7 +665,7 @@ export class Progression {
 
   /** Wipe the campaign back to its opening position. Wired to the dev panel. */
   reset(): void {
-    this._officers = START_OFFICERS;
+    this._tokens = START_TOKENS;
     this.assets.clear();
     this.tiers.clear();
     this.loadouts.clear();

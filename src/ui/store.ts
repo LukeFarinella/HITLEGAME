@@ -36,7 +36,7 @@ export interface StoreHooks {
 
 export class Store {
   private root: HTMLElement;
-  private officersEl: HTMLElement;
+  private tokensEl: HTMLElement;
   private sitesEl: HTMLElement;
   private bodyEl: HTMLElement;
   private tab: Tab = 'platforms';
@@ -48,7 +48,7 @@ export class Store {
 
   constructor(private hooks: StoreHooks) {
     this.root = document.getElementById('c2-store')!;
-    this.officersEl = document.getElementById('c2-officers')!;
+    this.tokensEl = document.getElementById('c2-tokens')!;
     this.sitesEl = document.getElementById('c2-sites')!;
     this.bodyEl = document.getElementById('c2-body')!;
 
@@ -75,7 +75,7 @@ export class Store {
   // ---- rendering -------------------------------------------------------------------------------
 
   private render(): void {
-    this.officersEl.textContent = fmt.format(progression.officers);
+    this.tokensEl.textContent = fmt.format(progression.tokens);
     this.sitesEl.textContent = this.territory
       ? `${fmt.format(progression.activeObelisks(this.territory))} / ${fmt.format(this.territory.totalObelisks)}`
       : '—';
@@ -137,7 +137,7 @@ export class Store {
       if (blocker) {
         btn.disabled = true;
         btn.textContent =
-          blocker === 'INSUFFICIENT OFFICERS' ? `INSUFFICIENT · ${fmt.format(p.cost)}` : blocker;
+          blocker === 'INSUFFICIENT FUNDING' ? `INSUFFICIENT · ${fmt.format(p.cost)}` : blocker;
       } else {
         btn.textContent = 'COMMISSION';
         btn.addEventListener('click', () => {
@@ -223,7 +223,7 @@ export class Store {
       if (blocker) {
         btn.disabled = true;
         btn.textContent =
-          blocker === 'INSUFFICIENT OFFICERS'
+          blocker === 'INSUFFICIENT FUNDING'
             ? `INSUFFICIENT · ${fmt.format(p.expansion.cost)}`
             : blocker;
       } else {
@@ -429,7 +429,7 @@ export class Store {
       btn.classList.add('done');
       btn.textContent = 'FULLY PROLIFERATED';
     } else {
-      const afford = progression.officers >= next.cost;
+      const afford = progression.tokens >= next.cost;
       btn.disabled = !afford;
       const verb = next.tier === 1 ? 'UNLOCK' : next.tier === 2 ? 'CITY NET' : 'PROLIFERATE';
       btn.textContent = afford
@@ -500,7 +500,7 @@ export class Store {
       btn.classList.add('done');
       btn.textContent = 'FULLY PROLIFERATED';
     } else {
-      const afford = progression.officers >= next.cost;
+      const afford = progression.tokens >= next.cost;
       btn.disabled = !afford;
       const verb = next.tier === 1 ? 'UNLOCK' : next.tier === 2 ? 'CITY NET' : 'PROLIFERATE';
       // A block containing the campaign's free home state charges for the others only, so say how

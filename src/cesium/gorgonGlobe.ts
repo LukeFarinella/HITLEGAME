@@ -34,8 +34,11 @@ import { icon } from '../ui/icons';
 import { sound, bindInterfaceSounds } from '../ui/sound';
 import { MissionPanel } from '../ui/missions';
 import { showStartWindow } from '../ui/start';
+import { showTitle, setTitleTerritory } from '../ui/title';
+import { showLoading, setStage, hideLoading } from '../ui/loading';
+import { setActiveSlot, migrateLegacySave } from '../game/saves';
 import { LaserBeams } from './lasers';
-import { ScanBeams, Blasts, Sparks } from './effects';
+import { ScanBeams, Blasts, Sparks, Impacts, Cuffs } from './effects';
 import { Reactions } from './reactions';
 import { RouteLayer } from './routes';
 import { AttackPulse } from './pulse';
@@ -513,6 +516,16 @@ let scans: ScanBeams | undefined;
 let blasts: Blasts | undefined;
 /** Cutting sparks where an attacker is working on a site. */
 let sparks: Sparks | undefined;
+/**
+ * Screen-space impact marks.
+ *
+ * Everything else here is geometry in metres, which is honest and invisible from orbit. These hold
+ * their size in pixels, so an execution or a strike registers at whatever altitude the operator
+ * happens to be watching from.
+ */
+let impacts: Impacts | undefined;
+/** Restraint rounds — the visible half of a detainment. */
+let cuffs: Cuffs | undefined;
 
 /** Park the pulse on whichever site the siege is currently working on, or stand it down. */
 function updateAttackPulse() {
@@ -584,6 +597,9 @@ function onSiegeEvent(e: SiegeEvent) {
   if (e.type === 'stopped') {
     sound.play('stopped');
     reactCompany(); // the net defended itself — that is a company win, not a public one
+    if (e.how === 'detained' && e.lon !== undefined && e.lat !== undefined) {
+      throwCuffsAt(e.lon, e.lat);
+    }
     toast(e.how === 'detained' ? 'ATTACKER DETAINED' : 'ATTACKER SERVICED');
     return;
   }
@@ -717,6 +733,12 @@ function addUnits(center: { lon: number; lat: number }, map: TheaterMap, net: Ro
   scene.primitives.add(blasts.cores);
   sparks = new Sparks();
   scene.primitives.add(sparks.collection);
+  impacts = new Impacts();
+  scene.primitives.add(impacts.collection);
+  cuffs = new Cuffs();
+  // The round landing is what puts the mark down, so the two read as one event.
+  cuffs.onLand = (at) => impacts?.at(at, 110, 0.55, 14);
+  scene.primitives.add(cuffs.collection);
   startSiege(field);
   updateUnitHud();
 }
@@ -809,6 +831,14 @@ function removeUnits() {
     scene.primitives.remove(sparks.collection);
     sparks = undefined;
   }
+  if (impacts) {
+    scene.primitives.remove(impacts.collection);
+    impacts = undefined;
+  }
+  if (cuffs) {
+    scene.primitives.remove(cuffs.collection);
+    cuffs = undefined;
+  }
   stopSiege();
 }
 
@@ -864,7 +894,50 @@ scene.preUpdate.addEventListener(() => {
   pulse?.update(dt);
   blasts?.update(dt);
   sparks?.update(dt);
+  cuffs?.update(dt);
+  impacts?.update(dt);
 });
+
+/**
+ * Throw a restraint round at a point, from whatever plausibly threw it.
+ *
+ * The automatic detain sweep doesn't say which asset acted — it only reports that the attacker was
+ * taken — so the source is reconstructed: the home garrison if the point is inside its reach,
+ * otherwise the nearest platform that could have done it. Getting that wrong draws the round from
+ * slightly the wrong machine, which is a far smaller problem than not drawing it at all.
+ */
+function throwCuffsAt(lon: number, lat: number) {
+  if (!cuffs || !theaterMap || !unitField) return;
+  const to = Cesium.Cartesian3.fromDegrees(lon, lat, theaterMap.heightAt(lon, lat) + 6);
+
+  const mLon = 111_320 * Math.cos((lat * Math.PI) / 180);
+  const rangeTo = (a: { lon: number; lat: number }) =>
+    Math.hypot((a.lon - lon) * mLon, (a.lat - lat) * 111_320);
+
+  if (theaterHome && rangeTo(theaterHome) <= GARRISON_DETAIN_M) {
+    const apex = sensorField?.servicingApex(theaterHome.lon, theaterHome.lat);
+    cuffs.fire(
+      apex
+        ? Cesium.Cartesian3.clone(apex)
+        : Cesium.Cartesian3.fromDegrees(theaterHome.lon, theaterHome.lat, theaterMap.heightAt(theaterHome.lon, theaterHome.lat) + 120),
+      to,
+    );
+    return;
+  }
+
+  let best: Cesium.Cartesian3 | null = null;
+  let bestD = Infinity;
+  for (const p of unitField.platformUnits()) {
+    const st = unitField.platformStatus(p.index);
+    if (!st) continue;
+    const d = rangeTo(st);
+    if (d < bestD) {
+      bestD = d;
+      best = unitField.worldPositionOf(p.index);
+    }
+  }
+  if (best) cuffs.fire(best, to);
+}
 
 /**
  * Draw a sensor link to everyone currently under investigation.
@@ -997,7 +1070,17 @@ function seedHiddenPockets(field: UnitField) {
 const COLLATERAL_RESISTANCE = 0.02;
 function resolveArrivals(dt: number) {
   if (!unitField) return;
-  const strikes = unitField.resolveArrivals(dt);
+  const { strikes, detainedAttacker, detainments } = unitField.resolveArrivals(dt);
+  // Every detainment throws, whether or not it was the siege attacker.
+  for (const d of detainments) cuffs?.fire(d.from, d.to);
+  if (detainedAttacker) {
+    // The director keeps the siege clock, so it has to be told this ended in custody.
+    siege?.noteAttackerStruck();
+    sound.play('order');
+    reactCompany();
+    toast('◈ ATTACKER DETAINED');
+    updateUnitHud();
+  }
   for (const strike of strikes) {
     if (theaterMap) {
       const h = theaterMap.heightAt(strike.lon, strike.lat);
@@ -1008,6 +1091,8 @@ function resolveArrivals(dt: number) {
         Cesium.Cartesian3.fromDegrees(strike.lon, strike.lat, h),
       );
       blasts?.fire(strike.lon, strike.lat, h, INTERCEPT.blastM);
+      // The world ring is the truth about the lethal radius; this is the part that survives zoom.
+      impacts?.at(Cesium.Cartesian3.fromDegrees(strike.lon, strike.lat, h), 300, 1.0, 24);
       // Debris off the seat of the blast, thrown much harder than a cutting torch throws sparks.
       sparks?.emit(Cesium.Cartesian3.fromDegrees(strike.lon, strike.lat, h + 6), 18);
     }
@@ -1076,6 +1161,9 @@ function resolveExecutions() {
   if (shots.length) sound.play('laser');
   for (const s of shots) {
     lasers.fire(s.from, s.to);
+    // The beam is a half-second flash along a line; from theater altitude that line can be a few
+    // pixels of a very big picture. The mark is what says WHERE it landed.
+    impacts?.at(s.to, 120, 0.7);
     missions.report('execute', s.valid);
     reactAt(s.lon, s.lat, s.valid ? 'approve' : 'dismay');
   }
@@ -1148,7 +1236,7 @@ let sensorField: SensorField | undefined;
  * What the scene is currently built for. Rebuilding a theater's obelisks and its 23k units is only
  * correct when OWNERSHIP moved — and mission events fire constantly (every single mark reports),
  * so without this guard a routine progress event would regenerate the whole field and silently wipe
- * the operator's standing marks mid-mission. Officers deliberately aren't in the signature: earning
+ * the operator's standing marks mid-mission. Funding tokens deliberately aren't in the signature: earning
  * or spending them changes nothing the scene renders.
  */
 let appliedOwnership = '';
@@ -1221,7 +1309,16 @@ function rebuildHeatField(): void {
   setText('g-obelisks', territory ? String(progression.activeObelisks(territory)) : String(obelisks.count));
 }
 
-void loadObelisks()
+/**
+ * The world data every campaign shares: 115k obelisk sites, and the survey that turns them into
+ * ownable territory.
+ *
+ * Kicked off at module load rather than when a slot is opened, so it warms while the operator is
+ * still reading the title screen — by the time they've picked a campaign this has usually already
+ * landed, and the map loading screen is a formality. It is campaign-INDEPENDENT, which is what
+ * makes that safe: nothing here depends on which save is open.
+ */
+const worldReady: Promise<void> = loadObelisks()
   .then(async (field) => {
     obelisks = field;
     setText('g-obelisks', String(field.count));
@@ -1230,19 +1327,79 @@ void loadObelisks()
     // waits for it — drawing every site first and then blanking most of them would flash the whole
     // map as "owned". It also warms the states-10m module a theater build needs later.
     territory = await surveyTerritory(field);
-    applyOwnership(true);
+    setTitleTerritory(territory);
     store?.setTerritory(territory);
-    maybeOfferStart();
-
-    // A theater entered before the data landed still wants its obelisks.
-    if (mode === 'theater' && theaterMap && theaterCenter) {
-      addObeliskPyramids(theaterCenter.lon, theaterCenter.lat, theaterMap);
-    }
   })
   .catch((e) => {
     console.warn('[GORGON] obelisks failed to load:', e);
     setText('g-obelisks', 'ERR');
   });
+
+/**
+ * Bring a campaign up: open the slot, wait for the world, then reveal the map.
+ *
+ * Ownership can only be applied AFTER both halves are in — the survey (what territory exists) and
+ * the slot (what of it is owned) — so this is the one place both are known to be ready. Doing it
+ * any earlier is what used to flash the whole map as owned for a frame.
+ */
+async function openCampaign(slot: number): Promise<void> {
+  setActiveSlot(slot);
+  showLoading({ title: 'LOADING MAP', subtitle: `CAMPAIGN SLOT ${slot}` });
+  setStage('READING CAMPAIGN RECORD');
+
+  await worldReady;
+  setStage('APPLYING TERRITORY OWNERSHIP');
+  applyOwnership(true); // the store re-renders off progression.onChange, which the slot swap fired
+  // Let the browser paint the revealed globe before the overlay lifts, so the fade reveals a drawn
+  // map rather than a blank canvas that fills in a frame later.
+  await nextFrame();
+  setStage('READY');
+  hideLoading();
+  maybeOfferStart();
+}
+
+/**
+ * Resolve after the next paint — or after a short timeout, whichever lands first.
+ *
+ * The timeout is not belt-and-braces, it is the whole point. requestAnimationFrame does not fire in
+ * a backgrounded tab, so waiting on it unconditionally means a player who alt-tabs during a load
+ * comes back to a loading screen that will never lift. Nothing downstream of this actually needs
+ * the frame; it only makes the reveal prettier when the tab is visible.
+ */
+function nextFrame(timeoutMs = 400): Promise<void> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      resolve();
+    };
+    requestAnimationFrame(() => requestAnimationFrame(finish));
+    window.setTimeout(finish, timeoutMs);
+  });
+}
+
+/**
+ * Back to the title screen.
+ *
+ * Everything is already persisted continuously, so there is nothing to flush — this just tears the
+ * sortie down, closes the slot (after which no module will write anything), and puts the menu up.
+ */
+function exitToTitle(): void {
+  if (mode === 'theater') exitTheater();
+  hideLoading();
+  hideUnitPanel();
+  setActiveSlot(null);
+  applyOwnership(true); // nothing owned at the menu — clear the orbit heat
+  bootTitle();
+}
+
+function bootTitle(): void {
+  showTitle({ onPlay: (slot) => void openCampaign(slot) });
+}
+
+migrateLegacySave();
+bootTitle();
 
 /**
  * Sites pulled down by the siege in the CURRENT theater. Global obelisk indices.
@@ -1592,7 +1749,8 @@ function endMarquee() {
 const BAND_HEX: Record<string, string> = { clear: '#EDEFF2', suspect: '#4F9E7A', threat: '#F2C13B' };
 const KIND_ABBR: Record<UnitKind, string> = {
   land: 'CV', sea: 'SV', air: 'AV', foot: 'FT',
-  drone: 'DISC', spider: 'ARC', biped: 'MAR', walker: 'COL', naval: 'LIT', interceptor: 'RAP',
+  drone: 'DISC', dog: 'K9', quad: 'KITE', spider: 'ARC', biped: 'MAR', walker: 'COL',
+  naval: 'LIT', interceptor: 'RAP',
 };
 const BAND_ABBR: Record<string, string> = { clear: 'CLR', suspect: 'SUS', threat: 'THR' };
 const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
@@ -2203,12 +2361,25 @@ function enterTheater(carto: Cesium.Cartographic) {
   void buildTheater(lon, lat, ++theaterToken);
 }
 
+/** Name the theater being entered, for the loading screen. Falls back to coordinates. */
+function theaterLabel(lon: number, lat: number): string {
+  const st = territory?.stateAt(lon, lat);
+  const coords = `${Math.abs(lat).toFixed(2)}°${lat >= 0 ? 'N' : 'S'} ${Math.abs(lon).toFixed(2)}°${lon >= 0 ? 'E' : 'W'}`;
+  return st ? `${st.name.toUpperCase()} · ${coords}` : coords;
+}
+
 /** Fetch once, build one mesh, drape the overlays on it. Nothing streams after this. */
 async function buildTheater(lon: number, lat: number, tok: number) {
   setText('g-terrain', 'LOADING MAP…');
+  // Everything the operator can interact with is built behind this: the mesh, the road graph, the
+  // sensor net and all ~24k contacts. Buildings deliberately stay outside the gate — they are
+  // scenery, they stream as chunk primitives, and holding a dense metro's entire skyline would add
+  // ten seconds to every entry for something the player is not waiting on.
+  showLoading({ title: 'LOADING SCENARIO', subtitle: theaterLabel(lon, lat) });
+  setStage('FETCHING BORDERS');
   try {
     const detail = await loadDetail();
-    if (tok !== theaterToken) return;
+    if (tok !== theaterToken) return hideLoading();
 
     const bbox = theaterBbox(lon, lat);
     const land = landInBox(detail.landPolys, bbox);
@@ -2218,11 +2389,12 @@ async function buildTheater(lon: number, lat: number, tok: number) {
       console.warn('[GORGON] roads failed to load:', e);
       return undefined;
     });
+    setStage('BAKING TERRAIN MESH');
     const map = await buildTheaterMap({ lon, lat }, THEATER_RADIUS_M, land, {
       samples: THEATER_SAMPLES,
       shoreRes: SHORE_RES,
     });
-    if (tok !== theaterToken) return;
+    if (tok !== theaterToken) return hideLoading();
 
     // The static mesh replaces the globe entirely inside a theater.
     globe.show = false;
@@ -2246,8 +2418,9 @@ async function buildTheater(lon: number, lat: number, tok: number) {
     // Roads sit closest to the ground; the grid and borders stack above them. They live in their
     // own merged primitive rather than the PolylineCollection above — there are ~30k of them, and
     // that collection charges per line, per frame.
+    setStage('DRAWING ROAD NETWORK');
     const net = await roadsPromise;
-    if (tok !== theaterToken) return;
+    if (tok !== theaterToken) return hideLoading();
     if (net) {
       const groups: RoadGroup[] = [];
       const byClass = new Map<RoadClass, Line[]>();
@@ -2279,12 +2452,20 @@ async function buildTheater(lon: number, lat: number, tok: number) {
 
     // Units need the baked terrain (to ride on) and the road graph (to route on) — both ready now.
     // Spawn them before the building extrude so they're live immediately; buildings fill in after.
+    setStage('POPULATING THEATER');
     addUnits({ lon, lat }, map, net);
 
     setText(
       'g-terrain',
       `STATIC z${map.zoom} · ${map.tiles} TILES · ${(map.triangles / 1000).toFixed(0)}k TRI`,
     );
+
+    // Everything playable is in. Paint one frame of the finished theater, then lift the overlay so
+    // the reveal is of a drawn scene rather than a canvas that fills in immediately after.
+    setStage('READY');
+    await nextFrame();
+    if (tok !== theaterToken) return hideLoading();
+    hideLoading();
 
     // Buildings are generated PROCEDURALLY from the road density (see procBuildings.ts), not fetched
     // — real footprints were too sparse. Dense where roads converge, clear of the roadway, towers
@@ -2296,6 +2477,9 @@ async function buildTheater(lon: number, lat: number, tok: number) {
   } catch (e) {
     console.warn('[GORGON] theater map build failed:', e);
     setText('g-terrain', 'MAP BUILD FAILED');
+    // Never leave the operator staring at a loading screen that will not resolve.
+    hideLoading();
+    toast('◈ THEATER BUILD FAILED · RETURNING TO ORBIT');
   }
 }
 
@@ -2439,20 +2623,51 @@ interface ContactOption {
   action: 'investigate' | 'detain' | 'execute' | 'strike';
   label: string;
   blocked: string | null;
+  /**
+   * Resolved on the spot rather than by sending a platform.
+   *
+   * The home site's garrison already reaches the ground around it — there is nothing to dispatch,
+   * so choosing this takes the attacker immediately instead of drawing a route.
+   */
+  immediate?: boolean;
 }
-function contactOptions(kind: PlatformId): ContactOption[] {
-  const opts: ContactOption[] = [
-    { action: 'investigate', label: 'FLAG FOR INVESTIGATION', blocked: null },
-  ];
 
+/**
+ * What can be done to this contact right now.
+ *
+ * `kind` is the selected platform, or null when nothing is selected — which is a real case, because
+ * the home garrison can act on an attacker with no platform involved at all.
+ */
+function contactOptions(
+  kind: PlatformId | null,
+  opts_: { isAttacker: boolean; garrisonInRange: boolean } = { isAttacker: false, garrisonInRange: false },
+): ContactOption[] {
+  const opts: ContactOption[] = [];
+
+  // The home site can take an attacker off its own doorstep. Self-defence of the network, so it
+  // needs no custody authority and no hardware — but only ever against something attacking it.
+  if (opts_.isAttacker && opts_.garrisonInRange) {
+    opts.push({ action: 'detain', label: 'DETAIN · HOME GARRISON', blocked: null, immediate: true });
+  }
+
+  if (!kind) return opts;
+
+  opts.push({ action: 'investigate', label: 'FLAG FOR INVESTIGATION', blocked: null });
+
+  // Innate self-defence: usable only on something actively pulling a site down, and never a
+  // substitute for the custody authority the chain grants for detaining the public.
+  const innate =
+    opts_.isAttacker && (PLATFORM_BY_ID.get(kind)?.selfDefence?.includes('detain') ?? false);
   opts.push({
     action: 'detain',
-    label: 'DETAIN',
-    blocked: !missions.hasAuth('detain')
-      ? 'NO CUSTODY AUTHORITY'
-      : !progression.platformHas(kind, 'detain')
-        ? 'NO DETAINMENT RIG FITTED'
-        : null,
+    label: innate ? 'DETAIN ATTACKER' : 'DETAIN',
+    blocked: innate
+      ? null
+      : !missions.hasAuth('detain')
+        ? 'NO CUSTODY AUTHORITY'
+        : !progression.platformHas(kind, 'detain')
+          ? 'NO DETAINMENT RIG FITTED'
+          : null,
   });
 
   opts.push({
@@ -2492,7 +2707,7 @@ function closeContactMenu() {
 function openContactMenu(
   screenX: number,
   screenY: number,
-  kind: PlatformId,
+  kind: PlatformId | null,
   contact: { index: number; lon: number; lat: number; id: string },
   append: boolean,
 ) {
@@ -2503,7 +2718,15 @@ function openContactMenu(
   box.style.top = `${screenY}px`;
   box.innerHTML = `<div class="gc-head">${contact.id}</div>`;
 
-  for (const opt of contactOptions(kind)) {
+  const isAttacker = unitField?.isAttacker(contact.index) ?? false;
+  const garrisonInRange =
+    !!theaterHome &&
+    Math.hypot(
+      (contact.lon - theaterHome.lon) * 111_320 * Math.cos((theaterHome.lat * Math.PI) / 180),
+      (contact.lat - theaterHome.lat) * 111_320,
+    ) <= GARRISON_DETAIN_M;
+
+  for (const opt of contactOptions(kind, { isAttacker, garrisonInRange })) {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = `gc-item${opt.action === 'execute' || opt.action === 'strike' ? ' lethal' : ''}`;
@@ -2515,6 +2738,17 @@ function openContactMenu(
       b.addEventListener('click', () => {
         closeContactMenu();
         if (!unitField) return;
+        // The garrison doesn't travel — it acts, now.
+        if (opt.immediate) {
+          if (siege?.detain()) {
+            sound.play('order');
+            reactCompany();
+            toast('◈ ATTACKER DETAINED · HOME GARRISON');
+            updateUnitHud();
+          }
+          return;
+        }
+        if (!kind) return;
         if (unitField.orderSelected(contact.lon, contact.lat, append, opt.action, contact.index)) {
           sound.play(opt.action === 'execute' || opt.action === 'strike' ? 'orderLethal' : 'order');
           updateUnitPanel();
@@ -2539,7 +2773,6 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
   if (!down || mode !== 'theater' || !unitField) return;
   if (Cesium.Cartesian2.distance(down, m.position) > ORDER_SLOP_PX) return; // that was a tilt drag
   const sel = unitField.selectedPlatform();
-  if (!sel) return; // orders only apply to a selected platform
 
   // Shift queues the leg behind whatever is already commanded instead of replacing it.
   const append = shiftHeld;
@@ -2548,11 +2781,14 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
   // whatever its hardpoints can actually do. Right-clicking open ground is a plain move.
   const contact = unitField.contactAt(scene, m.position.x, m.position.y, SELECT_PX);
   if (contact) {
-    openContactMenu(m.position.x, m.position.y, sel.kind, contact, append);
+    // With nothing selected the menu is still worth opening IF the home garrison could reach this
+    // contact — that path involves no platform at all.
+    openContactMenu(m.position.x, m.position.y, sel?.kind ?? null, contact, append);
     return;
   }
 
   closeContactMenu();
+  if (!sel) return; // a plain move order needs something to move
   const g = groundAt(m.position);
   if (g && unitField.orderSelected(g.lon, g.lat, append)) {
     sound.play('click');
@@ -2640,15 +2876,22 @@ bindInterfaceSounds();
 {
   const gear = el('dev-toggle');
   const panel = el('dev-panel');
-  gear?.addEventListener('click', () => {
+  /**
+   * The settings panel shares the right rail with the tasking panel, so opening it stands the
+   * tasking panel down rather than covering it.
+   *
+   * The alternative was to offset one of them, which works at 1280 and falls apart below about
+   * 1100 where the two rails plus a third column no longer fit. Only ever having one panel in a
+   * rail is the version that holds at every width.
+   */
+  const setDev = (open: boolean) => {
     if (!panel) return;
-    panel.hidden = !panel.hidden;
-    gear.classList.toggle('active', !panel.hidden);
-  });
-  el('dev-close')?.addEventListener('click', () => {
-    if (panel) panel.hidden = true;
-    gear?.classList.remove('active');
-  });
+    panel.hidden = !open;
+    gear?.classList.toggle('active', open);
+    document.body.classList.toggle('dev-open', open);
+  };
+  gear?.addEventListener('click', () => setDev(!!panel?.hidden));
+  el('dev-close')?.addEventListener('click', () => setDev(false));
 
   // wire one slider: reflect its value into a label live, and run `commit` when released
   const bindSlider = (
@@ -2710,11 +2953,11 @@ bindInterfaceSounds();
     if (!input) return () => {};
     const paint = () => {
       if (out) out.textContent = fmtv(get());
-      input.value = String(Math.round(get() * (id === 'dev-officers' ? 1 : 100)));
+      input.value = String(Math.round(get() * (id === 'dev-tokens' ? 1 : 100)));
     };
     input.addEventListener('input', () => {
       const raw = parseFloat(input.value);
-      set(id === 'dev-officers' ? raw : raw / 100);
+      set(id === 'dev-tokens' ? raw : raw / 100);
       if (out) out.textContent = fmtv(get());
     });
     paint();
@@ -2725,8 +2968,8 @@ bindInterfaceSounds();
     () => `${Math.round(tolerance.level * 100)}% ${toleranceLabel(tolerance.level)}`);
   const paintResistance = pct('dev-resistance', () => resistance.level, (v) => resistance.setLevel(v),
     () => `${Math.round(resistance.level * 100)}%`);
-  const paintOfficers = pct('dev-officers', () => progression.officers, (v) => progression.setOfficers(v),
-    () => progression.officers.toLocaleString('en-US'));
+  const paintTokens = pct('dev-tokens', () => progression.tokens, (v) => progression.setTokens(v),
+    () => progression.tokens.toLocaleString('en-US'));
 
   // Mission chain: one button per stage, plus a "nothing cleared" reset at the top.
   const chain = el('dev-chain');
@@ -2775,7 +3018,7 @@ bindInterfaceSounds();
   const paintAll = () => {
     paintTolerance();
     paintResistance();
-    paintOfficers();
+    paintTokens();
     paintChain();
     paintGrants();
   };
@@ -2784,7 +3027,7 @@ bindInterfaceSounds();
     if (!territory) return;
     // 156 purchases, batched into one save and one scene rebuild — see Progression.batch.
     progression.batch(() => {
-      progression.setOfficers(progression.officers + 100_000_000);
+      progression.setTokens(progression.tokens + 100_000_000);
       for (const st of territory!.states) {
         for (let k = progression.tierOf(st); k < 3; k++) progression.buyNextTier(st);
       }
@@ -2793,7 +3036,7 @@ bindInterfaceSounds();
   });
   el('dev-grant-platforms')?.addEventListener('click', () => {
     progression.batch(() => {
-      progression.setOfficers(progression.officers + 1_000_000);
+      progression.setTokens(progression.tokens + 1_000_000);
       for (const p of PLATFORMS) {
         if (!progression.hasPlatform(p.id)) progression.buyPlatform(p);
         if (p.expansion) progression.buyExpansion(p);
@@ -2803,7 +3046,7 @@ bindInterfaceSounds();
   });
   el('dev-grant-gear')?.addEventListener('click', () => {
     progression.batch(() => {
-      progression.setOfficers(progression.officers + 1_000_000);
+      progression.setTokens(progression.tokens + 1_000_000);
       for (const p of PLATFORMS) {
         if (!progression.hasPlatform(p.id)) continue;
         for (const gear of GEAR) {
@@ -2816,7 +3059,7 @@ bindInterfaceSounds();
   });
   el('dev-grant-network')?.addEventListener('click', () => {
     progression.batch(() => {
-      progression.setOfficers(progression.officers + 1_000_000);
+      progression.setTokens(progression.tokens + 1_000_000);
       for (const a of ASSETS) if (!a.pending) progression.buyAsset(a);
     });
     paintAll();
@@ -2836,6 +3079,11 @@ bindInterfaceSounds();
     maybeOfferStart();
     toast('CAMPAIGN RESET · WASHINGTON DOWNTOWN');
   });
+
+  el('dev-exit-title')?.addEventListener('click', () => {
+    el('dev-panel')?.setAttribute('hidden', '');
+    exitToTitle();
+  });
 }
 el('up-close')?.addEventListener('click', () => {
   unitField?.deselect();
@@ -2853,8 +3101,8 @@ el('up-mark')?.addEventListener('click', () => {
   // Ordering against a PROTECTED contact burns a company asset. The operator is never told that is
   // what happened — they are told what it cost, and can work the rest out.
   if (assets > 0) {
-    progression.setOfficers(progression.officers - ASSET_WRITE_OFF * assets);
-    toast(`◈ ASSET WRITE-OFF · −${(ASSET_WRITE_OFF * assets).toLocaleString('en-US')} OFFICERS`);
+    progression.setTokens(progression.tokens - ASSET_WRITE_OFF * assets);
+    toast(`◈ ASSET WRITE-OFF · −${(ASSET_WRITE_OFF * assets).toLocaleString('en-US')} FUNDING TOKENS`);
     sound.play('denied');
   } else if (shortfalls.length) {
     sound.play('denied');
@@ -2940,6 +3188,13 @@ if (import.meta.env.DEV) {
     get sparks() {
       return sparks;
     },
+    get impacts() {
+      return impacts;
+    },
+    get cuffs() {
+      return cuffs;
+    },
+    throwCuffsAt,
     openContactMenu,
     contactOptions,
     get fallenObelisks() {

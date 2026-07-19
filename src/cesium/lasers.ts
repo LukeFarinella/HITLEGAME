@@ -11,9 +11,13 @@ import * as Cesium from 'cesium';
 
 const POOL = 32;
 /** Seconds a beam stays on screen. Long enough to register, short enough to stay a flash. */
-const LIFETIME = 0.55;
+const LIFETIME = 0.7;
 const BEAM_COLOR = Cesium.Color.fromCssColorString('#FF3B2E');
-const BEAM_WIDTH = 2.5;
+/**
+ * Pixels, not metres — a beam holds this thickness at any altitude. Wide enough that a shot fired
+ * across a theater reads as an event from the altitude the whole theater is watched from.
+ */
+const BEAM_WIDTH = 7;
 
 interface Beam {
   line: Cesium.Polyline;

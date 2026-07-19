@@ -13,7 +13,7 @@ import type { UnitKind } from '../cesium/unitModels';
  */
 
 export type PlatformId = UnitKind &
-  ('drone' | 'spider' | 'biped' | 'walker' | 'naval' | 'interceptor');
+  ('drone' | 'dog' | 'quad' | 'spider' | 'biped' | 'walker' | 'naval' | 'interceptor');
 
 /** What a piece of gear grants. The scene asks for these by name. */
 export type Capability = 'laser' | 'wide-sensor' | 'deep-scan' | 'detain';
@@ -56,6 +56,28 @@ export interface PlatformDef {
   speed: number;
   /** Cruise altitude above ground. 0 for anything that walks. */
   altM: number;
+  /**
+   * Whether this platform is confined to the road network.
+   *
+   * Only the dog is. Everything else — legged, flying or floating — goes point to point, and the
+   * dog having to take the streets is what makes it feel like the cheap option rather than just a
+   * slower one: a target three blocks away is three blocks away, and a target across a river is a
+   * different problem entirely.
+   */
+  roadBound?: boolean;
+  /**
+   * Capabilities the platform has WITHOUT gear, usable only against units attacking the network.
+   *
+   * Deliberately not the same thing as a fitted rig. Taking hold of somebody who is pulling a site
+   * down is self-defence of company property; taking hold of a member of the public is custody, and
+   * that needs both the hardware and the authority the chain grants for it. Keeping them separate is
+   * what lets the opening platform answer an attack without quietly handing the operator a power the
+   * story hasn't given them yet.
+   *
+   * These are also MANUAL only — they never feed the automatic detain sweep, because a platform that
+   * deals with attackers on its own is a platform the operator isn't answerable for.
+   */
+  selfDefence?: Capability[];
 }
 
 /**
@@ -65,24 +87,68 @@ export interface PlatformDef {
  */
 export const PLATFORMS: PlatformDef[] = [
   {
-    id: 'spider',
-    name: 'ARACHNID SCOUT',
+    id: 'dog',
+    name: 'KENNEL QUADRUPED',
     blurb:
-      'Six-legged walker at infantry scale. Outruns traffic through the street grid and reads what an orbital sensor cannot.',
-    cost: 3000,
+      'Four-legged walker at animal scale. Confined to the road network and barely quicker than the people it watches — the cheapest way to have eyes somewhere.',
+    cost: 2000,
     maxCount: 4,
     expansion: {
       count: 3,
-      cost: 7500,
-      name: 'ARACHNID PICKET',
-      blurb: 'Three more scouts, for a picket line across the theater rather than a single set of eyes.',
+      cost: 5000,
+      name: 'KENNEL PACK',
+      blurb: 'Three more quadrupeds, for a picket across the street grid rather than a single set of eyes.',
     },
     hardpoints: 1,
     sensorM: BASE_SENSOR_M,
-    // Faster than the traffic it moves through (ground vehicles run 80 m/s). A scout that can be
-    // outrun by the contacts it's watching can't reposition onto anything, which mattered more once
-    // platform sensors came down to an obelisk's 750 m — reach is now legwork, not aperture.
-    speed: 110,
+    // Just faster than a foot contact (12 m/s) and far slower than traffic (80). It cannot chase
+    // anything; it can only be somewhere. That is the entire platform.
+    speed: 22,
+    altM: 0,
+    roadBound: true,
+    // The quadruped can take an attacker off a site bare-handed. It is the campaign's opening
+    // platform and attacks begin long before custody authority exists — without this the entire
+    // early game has no answer to a siege at all.
+    selfDefence: ['detain'],
+  },
+  {
+    id: 'quad',
+    name: 'KITE QUADCOPTER',
+    blurb:
+      'The quadruped’s aerial counterpart: the same sensor at the same modest pace, but it crosses rivers, rail and rooftops instead of driving around them.',
+    cost: 4500,
+    maxCount: 3,
+    expansion: {
+      count: 2,
+      cost: 8000,
+      name: 'KITE FLIGHT',
+      blurb: 'Two more rotorcraft, so a theater can be covered from the air without waiting on roads.',
+    },
+    hardpoints: 1,
+    sensorM: BASE_SENSOR_M,
+    // Marginally quicker than the dog. What it is buying is not speed, it is the straight line.
+    speed: 30,
+    altM: 400,
+  },
+  {
+    id: 'spider',
+    name: 'ARACHNID PURSUIT',
+    blurb:
+      'Six-legged walker at vehicle scale. Outruns everything on the road and goes where the road does not — the first platform that can actually chase a contact down.',
+    cost: 11_000,
+    maxCount: 3,
+    requires: 'dog',
+    expansion: {
+      count: 2,
+      cost: 14_000,
+      name: 'ARACHNID PICKET',
+      blurb: 'Two more pursuit walkers, for a picket line across the theater rather than a single response.',
+    },
+    hardpoints: 2,
+    sensorM: BASE_SENSOR_M,
+    // Comfortably faster than the traffic it moves through (ground vehicles run 80 m/s), and off
+    // the graph entirely — this is the platform you buy when the dog could not get there in time.
+    speed: 130,
     altM: 0,
   },
   {
@@ -210,7 +276,7 @@ export const GEAR: GearDef[] = [
     requiresAuth: 'detain',
     // Anything that can physically reach a person. Not the disc — you cannot take someone into
     // custody from cruise altitude.
-    fits: ['spider', 'biped', 'walker', 'naval'],
+    fits: ['dog', 'spider', 'biped', 'walker', 'naval'],
   },
   {
     id: 'deep-scan',
@@ -219,7 +285,7 @@ export const GEAR: GearDef[] = [
       'Tightens assessment on contacts inside the envelope — fewer false readings to act on.',
     cost: 7500,
     grants: 'deep-scan',
-    fits: ['drone', 'biped', 'walker', 'naval'],
+    fits: ['drone', 'quad', 'biped', 'walker', 'naval'],
   },
 ];
 

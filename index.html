@@ -43,8 +43,8 @@
         </div>
         <div class="c2-ledger">
           <div class="c2-stat">
-            <span class="c2-k">Officers</span>
-            <span class="c2-v" id="c2-officers">—</span>
+            <span class="c2-k">Funding tokens</span>
+            <span class="c2-v" id="c2-tokens">—</span>
           </div>
           <div class="c2-stat">
             <span class="c2-k">Sites live</span>
@@ -146,9 +146,9 @@
             <span class="dev-k">Resistance <span class="dev-v" id="dev-resistance-val">—</span></span>
             <input type="range" id="dev-resistance" min="0" max="100" step="1" value="0" />
           </label>
-          <label class="dev-row" for="dev-officers">
-            <span class="dev-k">Officers <span class="dev-v" id="dev-officers-val">—</span></span>
-            <input type="range" id="dev-officers" min="0" max="1000000" step="5000" value="250000" />
+          <label class="dev-row" for="dev-tokens">
+            <span class="dev-k">Funding tokens <span class="dev-v" id="dev-tokens-val">—</span></span>
+            <input type="range" id="dev-tokens" min="0" max="1000000" step="5000" value="250000" />
           </label>
 
           <div class="dev-k">Chain cleared through</div>
@@ -164,6 +164,10 @@
 
           <button class="dev-regen" id="dev-reset" type="button">↺ RESET CAMPAIGN</button>
           <p class="dev-note">Reset clears everything, including the founding choice.</p>
+
+          <div class="dev-sect">CAMPAIGN</div>
+          <button class="dev-regen" id="dev-exit-title" type="button">◀ EXIT TO START MENU</button>
+          <p class="dev-note">Saves and returns to the title screen. Pick this campaign again from its slot to carry on.</p>
         </div>
       </div>
     </div>

@@ -68,7 +68,7 @@ export interface StateTerritory {
   center: { lon: number; lat: number };
   /** 1–10 for the headline economies, which are sold individually. Undefined for the rest. */
   gdpRank?: number;
-  /** Officer costs, scaled to how many obelisks the state can eventually field. */
+  /** Funding-token costs, scaled to how many obelisks the state can eventually field. */
   costs: { unlock: number; city: number; full: number };
 }
 

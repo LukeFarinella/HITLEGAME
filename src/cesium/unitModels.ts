@@ -229,6 +229,84 @@ function spiderMesh(): ModelMesh {
 const SPIDER_HARDPOINT: Hardpoint = { x: 0, y: -0.6, z: 4.6 };
 
 /**
+ * Quad-legged ground scout — the "dog".
+ *
+ * The campaign's opening platform and deliberately the humblest thing on the board: roughly the
+ * size of a large animal, walking on four plantigrade legs at a pace only slightly better than the
+ * people it watches. It is also the ONLY platform bound to the road network, which is the whole
+ * shape of it as a piece of equipment — a dog can go where a car can go and nowhere else.
+ *
+ * Built low and long with the sensor head cantilevered forward off a short neck, so that even at
+ * icon scale the silhouette reads as an animal rather than as a table.
+ */
+function dogMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  m.box(0, 0, 3.0, 2.6, 5.4, 2.0); // torso
+  m.box(0, 3.2, 3.6, 1.6, 1.4, 1.4); // shoulder / neck root
+  m.box(0, 4.4, 4.2, 1.9, 1.6, 1.3); // sensor head, held forward and slightly up
+  m.box(0, 5.3, 4.2, 1.2, 0.5, 0.7); // muzzle sensor
+
+  // Four legs, knees folding backward on the rear pair and forward on the front — the asymmetry is
+  // what makes it read as a quadruped instead of a stool.
+  for (const [y, knee] of [
+    [2.0, 1],
+    [-2.0, -1],
+  ] as [number, number][]) {
+    for (const side of [1, -1]) {
+      const hip: V = [side * 1.4, y, 3.0];
+      const kn: V = [side * 1.7, y + knee * 0.9, 1.7];
+      const foot: V = [side * 1.7, y, 0];
+      m.strut(hip, kn, 0.34, 0.28);
+      m.strut(kn, foot, 0.28, 0.18);
+    }
+  }
+  m.box(0, -1.0, 4.3, 1.2, 1.8, 0.9); // hardpoint nub, dorsal
+  return m.build();
+}
+
+const DOG_HARDPOINT: Hardpoint = { x: 0, y: -1.0, z: 4.9 };
+
+/**
+ * Quadcopter scout.
+ *
+ * The dog's aerial counterpart: same class of sensor, same modest pace, but it ignores the ground
+ * entirely. Where the dog has to follow the street grid to reach anything, this crosses whatever is
+ * in between — which is the trade the pair exists to offer.
+ *
+ * Four arms off a compact core, each ending in a rotor ring. The rings are what make it legible
+ * from above, where a quadcopter is otherwise just a dot.
+ */
+function quadMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  m.box(0, 0, 0, 3.0, 3.6, 1.5); // core
+  m.box(0, 2.2, -0.3, 1.6, 1.2, 0.9); // forward sensor pod
+
+  const ARM = 4.4;
+  for (const sx of [1, -1]) {
+    for (const sy of [1, -1]) {
+      const hub: V = [sx * ARM, sy * ARM, 0.5];
+      m.strut([sx * 1.2, sy * 1.2, 0], hub, 0.3, 0.24);
+      m.box(hub[0], hub[1], hub[2], 0.9, 0.9, 0.5); // motor can
+      // Rotor disc as a thin octagonal ring — cheap, and reads as a spinning blade at distance.
+      const R = 2.5;
+      for (let i = 0; i < 8; i++) {
+        const a0 = (i / 8) * Math.PI * 2;
+        const a1 = ((i + 1) / 8) * Math.PI * 2;
+        m.strut(
+          [hub[0] + Math.cos(a0) * R, hub[1] + Math.sin(a0) * R, hub[2] + 0.5],
+          [hub[0] + Math.cos(a1) * R, hub[1] + Math.sin(a1) * R, hub[2] + 0.5],
+          0.12,
+        );
+      }
+    }
+  }
+  m.box(0, -1.4, -1.1, 1.4, 1.6, 0.8); // hardpoint, slung underneath
+  return m.build();
+}
+
+const QUAD_HARDPOINT: Hardpoint = { x: 0, y: -1.4, z: -1.6 };
+
+/**
  * Bipedal walker on digitigrade legs — roughly twice a ground vehicle, so it towers over traffic
  * without competing with the disc. ~50 m tall before scale.
  *
@@ -356,6 +434,8 @@ export type UnitKind =
   | 'air'
   | 'foot'
   | 'drone'
+  | 'dog'
+  | 'quad'
   | 'spider'
   | 'biped'
   | 'walker'
@@ -365,7 +445,7 @@ export type UnitKind =
 /** Every kind, in one place — iterate this instead of re-listing the literals. */
 export const UNIT_KINDS: UnitKind[] = [
   'land', 'sea', 'air', 'foot',
-  'drone', 'spider', 'biped', 'walker', 'naval', 'interceptor',
+  'drone', 'dog', 'quad', 'spider', 'biped', 'walker', 'naval', 'interceptor',
 ];
 
 /**
@@ -373,7 +453,7 @@ export const UNIT_KINDS: UnitKind[] = [
  * directly and carrying gear — as opposed to the ambient population the sim spawns in thousands.
  */
 export const PLATFORM_KINDS: UnitKind[] = [
-  'drone', 'spider', 'biped', 'walker', 'naval', 'interceptor',
+  'drone', 'dog', 'quad', 'spider', 'biped', 'walker', 'naval', 'interceptor',
 ];
 
 export const UNIT_MESHES: Record<UnitKind, ModelMesh> = {
@@ -382,6 +462,8 @@ export const UNIT_MESHES: Record<UnitKind, ModelMesh> = {
   air: aircraftMesh(),
   foot: footMesh(),
   drone: droneMesh(),
+  dog: dogMesh(),
+  quad: quadMesh(),
   spider: spiderMesh(),
   biped: bipedMesh(),
   walker: walkerMesh(),
@@ -399,7 +481,13 @@ export const UNIT_SCALE: Record<UnitKind, number> = {
   // Measured against the units they're specified relative to, not guessed: a ground vehicle reads
   // 78 m long on screen and a foot unit ~54 m tall, so these land at ~35 m (infantry-scale, wide
   // and low), 158 m (2.03x a vehicle) and 516 m (five to six city blocks).
-  spider: 3,
+  // The dog is the small one: ~25 m on screen against a 78 m ground vehicle and a 54 m foot unit,
+  // so it reads as an animal moving through traffic rather than as another vehicle.
+  dog: 2.2,
+  quad: 2.4, // ~30 m rotor-tip to rotor-tip — the dog's counterpart, held in the air
+  // Promoted from infantry scale to VEHICLE scale: ~105 m, so it sits visibly above the 78 m
+  // ground traffic it now outruns. It is a machine that drives, not a machine that sneaks.
+  spider: 4.2,
   biped: 3.4,
   walker: 3,
   naval: 3, // ~180 m — reads as a ship against the 78 m ground vehicles
@@ -451,6 +539,40 @@ const PLATFORM_ICONS: Partial<Record<UnitKind, HTMLCanvasElement>> = {
     g.stroke();
     g.beginPath();
     g.arc(0, 0, 7, 0, Math.PI * 2);
+    g.stroke();
+  }),
+  // Dog: four legs off an oblong body, head forward. The one silhouette with a front and a back.
+  dog: iconCanvas((g) => {
+    g.beginPath();
+    g.moveTo(-6, -8); g.lineTo(-8, -1);
+    g.moveTo(6, -8); g.lineTo(8, -1);
+    g.moveTo(-6, 8); g.lineTo(-8, 15);
+    g.moveTo(6, 8); g.lineTo(8, 15);
+    g.stroke();
+    g.beginPath();
+    g.rect(-7, -9, 14, 19);
+    g.fill();
+    g.stroke();
+    g.beginPath();
+    g.arc(0, -13, 4.5, 0, Math.PI * 2); // head
+    g.fill();
+    g.stroke();
+  }),
+  // Quadcopter: four rotor rings on an X. Rings, not legs — that is the whole distinction from the
+  // dog at 24 px, and the two are otherwise the same size and role.
+  quad: iconCanvas((g) => {
+    for (const [sx, sy] of [[1, 1], [1, -1], [-1, 1], [-1, -1]] as [number, number][]) {
+      g.beginPath();
+      g.moveTo(sx * 3, sy * 3);
+      g.lineTo(sx * 11, sy * 11);
+      g.stroke();
+      g.beginPath();
+      g.arc(sx * 12.5, sy * 12.5, 5.5, 0, Math.PI * 2);
+      g.stroke();
+    }
+    g.beginPath();
+    g.rect(-4.5, -4.5, 9, 9);
+    g.fill();
     g.stroke();
   }),
   // Arachnid: six legs off a small body.
@@ -520,6 +642,8 @@ export function platformIcon(kind: UnitKind): HTMLCanvasElement | undefined {
 /** Where gear installs on each platform. Only platform kinds have one. */
 export const HARDPOINTS: Partial<Record<UnitKind, Hardpoint>> = {
   drone: DISC_HARDPOINT,
+  dog: DOG_HARDPOINT,
+  quad: QUAD_HARDPOINT,
   spider: SPIDER_HARDPOINT,
   biped: BIPED_HARDPOINT,
   walker: WALKER_HARDPOINT,

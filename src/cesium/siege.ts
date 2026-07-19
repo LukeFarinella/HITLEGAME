@@ -45,7 +45,11 @@ const MAX_SPAWN_RANGE_M = 12_000;
 export type SiegeEvent =
   | { type: 'inbound'; targetLocal: number }
   | { type: 'lost'; targetLocal: number; targetIndex: number }
-  | { type: 'stopped'; how: 'detained' | 'serviced' };
+  /**
+   * `lon`/`lat` are where the attacker was standing when it was taken — captured before it leaves
+   * the board, because the scene needs somewhere to throw the round AT.
+   */
+  | { type: 'stopped'; how: 'detained' | 'serviced'; lon?: number; lat?: number };
 
 export interface SiegeHooks {
   /** Global obelisk index for a site local to the current theater. */
@@ -132,10 +136,7 @@ export class SiegeDirector {
       ) <= garrison.rangeM;
     const detainer = this.units.detainableBy(this.hooks.detainers());
     if (detainer || inGarrison) {
-      this.launched = false;
-      this.units.clearAttacker();
-      this.timer = this.interval();
-      this.hooks.on({ type: 'stopped', how: 'detained' });
+      this.detain();
       return;
     }
 
@@ -146,6 +147,25 @@ export class SiegeDirector {
       this.timer = this.interval();
       this.hooks.on({ type: 'lost', targetLocal: attacker.local, targetIndex });
     }
+  }
+
+  /**
+   * Take the attacker into custody and stand the siege down.
+   *
+   * Shared by the automatic sweep (a fitted detainment rig, or the home garrison's own reach) and
+   * by the operator right-clicking an attacker with something that can hold it. Same outcome either
+   * way: the attack stops, nothing is killed, and nothing goes on the mission ledger.
+   */
+  detain(): boolean {
+    const a = this.units.attacker();
+    if (!a) return false;
+    // Read the position first: clearAttacker takes it off the board.
+    const { lon, lat } = a;
+    this.launched = false;
+    this.units.clearAttacker();
+    this.timer = this.interval();
+    this.hooks.on({ type: 'stopped', how: 'detained', lon, lat });
+    return true;
   }
 
   /**

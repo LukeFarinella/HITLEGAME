@@ -35,7 +35,12 @@ import * as Cesium from 'cesium';
  */
 const SCAN_POOL = 48;
 const SCAN_COLOR = Cesium.Color.fromCssColorString('#5FD8E8');
-const SCAN_WIDTH = 1.2;
+/**
+ * Polyline width is in PIXELS, so a scan line holds its thickness at every zoom — the problem was
+ * never that it shrank, it was that it was drawn as a hairline against a whole city. Sized here to
+ * be followable from the altitude the operator actually watches a theater from.
+ */
+const SCAN_WIDTH = 3.6;
 /** Seconds for one breath of the scan pulse. */
 const SCAN_PERIOD = 1.1;
 
@@ -59,7 +64,7 @@ export class ScanBeams {
       // distinction between "you are being looked at" and "you are being shot".
       const material = Cesium.Material.fromType('PolylineDash', {
         color: SCAN_COLOR.withAlpha(0.7),
-        dashLength: 12,
+        dashLength: 22,
       });
       const line = this.collection.add({ positions, width: SCAN_WIDTH, material, show: false });
       this.lines.push({ line, positions, material });
@@ -86,12 +91,154 @@ export class ScanBeams {
     this.t += dt;
     // A slow sine rather than a flat line: a static beam reads as geometry, a breathing one reads
     // as a machine doing continuous work.
-    const alpha = 0.42 + 0.34 * (0.5 + 0.5 * Math.sin((this.t / SCAN_PERIOD) * Math.PI * 2));
+    const alpha = 0.62 + 0.34 * (0.5 + 0.5 * Math.sin((this.t / SCAN_PERIOD) * Math.PI * 2));
     for (let i = 0; i < this.used; i++) {
       (this.lines[i].material.uniforms as { color: Cesium.Color }).color =
         SCAN_COLOR.withAlpha(alpha);
     }
     for (let i = this.used; i < SCAN_POOL; i++) this.lines[i].line.show = false;
+  }
+
+  destroy(): void {
+    this.collection.destroy();
+  }
+}
+
+// --- screen-space rings ---------------------------------------------------------------------------
+
+/**
+ * A ring texture, drawn once and shared.
+ *
+ * Everything below that has to survive being zoomed out is a BILLBOARD sized in pixels rather than
+ * geometry sized in metres. That is the whole trick, and it is the same one pulse.ts uses: a
+ * 260 m shockwave is honest about what the weapon did and completely invisible from the altitude a
+ * theater is actually watched from, which is exactly backwards — the moment you most need to see
+ * that something went off is when you are looking at the whole map.
+ *
+ * So the world-space ring stays (it is the truth about the lethal radius, up close) and a
+ * screen-space ring is drawn over it (it is the legibility, from everywhere else).
+ */
+function ringTexture(size: number, color: string, lineWidth: number): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = size;
+  c.height = size;
+  const g = c.getContext('2d')!;
+  g.translate(size / 2, size / 2);
+  g.strokeStyle = color;
+  g.lineWidth = lineWidth;
+  g.beginPath();
+  g.arc(0, 0, size / 2 - lineWidth, 0, Math.PI * 2);
+  g.stroke();
+  return c;
+}
+
+/** A soft filled disc, for flashes. */
+function discTexture(size: number, inner: string, outer: string): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = size;
+  c.height = size;
+  const g = c.getContext('2d')!;
+  g.translate(size / 2, size / 2);
+  const grad = g.createRadialGradient(0, 0, 0, 0, 0, size / 2);
+  grad.addColorStop(0, inner);
+  grad.addColorStop(0.45, outer);
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = grad;
+  g.beginPath();
+  g.arc(0, 0, size / 2, 0, Math.PI * 2);
+  g.fill();
+  return c;
+}
+
+/**
+ * Screen-space impact marks: one-shot rings and flashes that hold their size at any zoom.
+ *
+ * Used for every event that has to register from theater altitude — a contact being serviced, an
+ * area strike going off, a site taking a hit. Pooled and recycled like everything else here.
+ */
+interface Mark {
+  ring: Cesium.Billboard;
+  flash: Cesium.Billboard;
+  age: number;
+  life: number;
+  minPx: number;
+  maxPx: number;
+  live: boolean;
+}
+
+export class Impacts {
+  readonly collection = new Cesium.BillboardCollection();
+  private pool: Mark[] = [];
+  private cursor = 0;
+
+  constructor(size = 24) {
+    const ring = ringTexture(128, '#FF6A3D', 11) as unknown as string;
+    const flash = discTexture(128, 'rgba(255,238,200,0.95)', 'rgba(255,120,40,0.5)') as unknown as string;
+    for (let i = 0; i < size; i++) {
+      this.pool.push({
+        ring: this.collection.add({
+          position: Cesium.Cartesian3.ZERO,
+          image: ring,
+          width: 1,
+          height: 1,
+          show: false,
+          disableDepthTestDistance: 1e12,
+        }),
+        flash: this.collection.add({
+          position: Cesium.Cartesian3.ZERO,
+          image: flash,
+          width: 1,
+          height: 1,
+          show: false,
+          disableDepthTestDistance: 1e12,
+        }),
+        age: 0,
+        life: 0.6,
+        minPx: 12,
+        maxPx: 90,
+        live: false,
+      });
+    }
+  }
+
+  /** Mark a point. `maxPx` is how big the ring gets on screen, whatever the camera is doing. */
+  at(position: Cesium.Cartesian3, maxPx = 90, life = 0.6, minPx = 12): void {
+    const m = this.pool[this.cursor];
+    this.cursor = (this.cursor + 1) % this.pool.length;
+    m.ring.position = position;
+    m.flash.position = position;
+    m.age = 0;
+    m.life = life;
+    m.minPx = minPx;
+    m.maxPx = maxPx;
+    m.live = true;
+    m.ring.show = true;
+    m.flash.show = true;
+  }
+
+  update(dt: number): void {
+    for (const m of this.pool) {
+      if (!m.live) continue;
+      m.age += dt;
+      if (m.age >= m.life) {
+        m.live = false;
+        m.ring.show = false;
+        m.flash.show = false;
+        continue;
+      }
+      const t = m.age / m.life;
+      // Ring expands and fades outward; flash is bright immediately and gone first.
+      const px = m.minPx + (m.maxPx - m.minPx) * (1 - Math.pow(1 - t, 2.4));
+      m.ring.width = px;
+      m.ring.height = px;
+      m.ring.color = Cesium.Color.WHITE.withAlpha(1 - t);
+
+      const ft = Math.min(1, t / 0.4);
+      const fpx = m.maxPx * 0.55 * (1 - ft) + m.minPx * 0.5;
+      m.flash.width = fpx;
+      m.flash.height = fpx;
+      m.flash.color = Cesium.Color.WHITE.withAlpha(1 - ft);
+    }
   }
 
   destroy(): void {
@@ -141,7 +288,7 @@ export class Blasts {
       const positions: Cesium.Cartesian3[] = [];
       for (let k = 0; k <= BLAST_SEGMENTS; k++) positions.push(new Cesium.Cartesian3());
       const material = Cesium.Material.fromType('Color', { color: BLAST_RING.withAlpha(0) });
-      const line = this.rings.add({ positions, width: 3, material, show: false });
+      const line = this.rings.add({ positions, width: 9, material, show: false });
       const core = this.cores.add({
         position: Cesium.Cartesian3.ZERO,
         color: BLAST_CORE.withAlpha(0),
@@ -212,7 +359,7 @@ export class Blasts {
       // The core is the flash at the centre: big and bright immediately, gone well before the ring.
       b.core.position = Cesium.Cartesian3.fromDegrees(b.lon, b.lat, b.height + BLAST_LIFT_M);
       const ct = Math.min(1, t / 0.35);
-      b.core.pixelSize = 34 * (1 - ct) + 4;
+      b.core.pixelSize = 96 * (1 - ct) + 8;
       b.core.color = BLAST_CORE.withAlpha(1 - ct);
     }
   }
@@ -220,6 +367,154 @@ export class Blasts {
   destroy(): void {
     this.rings.destroy();
     this.cores.destroy();
+  }
+}
+
+// --- restraint projectile ---------------------------------------------------------------------
+
+/**
+ * The cuff round: what a detainment actually looks like.
+ *
+ * Custody was the one action in the game with no visual at all — an attacker simply stopped
+ * existing and a line of text appeared. That made the most interesting choice the game offers (take
+ * them alive instead of killing them) read as less consequential than the one that kills, which is
+ * precisely backwards.
+ *
+ * So it fires something. A pair of rings joined by a bar, tumbling end over end across the gap, and
+ * the attacker is taken when it lands. Sized in PIXELS like the rest of the impact layer, so a
+ * detainment across a theater is as visible as an execution.
+ */
+const CUFF_POOL = 12;
+/** Seconds of flight. Long enough to read as a throw rather than a teleport. */
+const CUFF_FLIGHT = 0.45;
+/** Turns over the whole flight. */
+const CUFF_SPINS = 3.5;
+const CUFF_PX = 46;
+/** How high the round arcs above the straight line, as a fraction of the gap. */
+const CUFF_ARC = 0.14;
+
+/** Two rings and a bar. Drawn once and shared by the pool. */
+function cuffTexture(size = 128): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = size;
+  c.height = size;
+  const g = c.getContext('2d')!;
+  g.translate(size / 2, size / 2);
+  g.strokeStyle = '#DDE6EE';
+  g.lineWidth = size * 0.075;
+  g.lineCap = 'round';
+  // Two cuffs, side by side.
+  const r = size * 0.2;
+  const off = size * 0.24;
+  for (const s of [-1, 1]) {
+    g.beginPath();
+    g.arc(s * off, 0, r, 0, Math.PI * 2);
+    g.stroke();
+  }
+  // The short chain between them.
+  g.lineWidth = size * 0.055;
+  g.beginPath();
+  g.moveTo(-off + r * 0.75, 0);
+  g.lineTo(off - r * 0.75, 0);
+  g.stroke();
+  // A cold highlight so it reads as metal rather than as a drawn outline.
+  g.strokeStyle = 'rgba(120,190,225,0.75)';
+  g.lineWidth = size * 0.03;
+  for (const s of [-1, 1]) {
+    g.beginPath();
+    g.arc(s * off, 0, r, Math.PI * 1.05, Math.PI * 1.65);
+    g.stroke();
+  }
+  return c;
+}
+
+interface Cuff {
+  bill: Cesium.Billboard;
+  from: Cesium.Cartesian3;
+  to: Cesium.Cartesian3;
+  /** Midpoint lifted above the chord, so the round travels an arc rather than a ruler line. */
+  apex: Cesium.Cartesian3;
+  age: number;
+  live: boolean;
+}
+
+export class Cuffs {
+  readonly collection = new Cesium.BillboardCollection();
+  private pool: Cuff[] = [];
+  private cursor = 0;
+  private scratchA = new Cesium.Cartesian3();
+  private scratchB = new Cesium.Cartesian3();
+  /** Fired when a round lands, so the caller can put an impact mark there. */
+  onLand?: (at: Cesium.Cartesian3) => void;
+
+  constructor() {
+    const image = cuffTexture() as unknown as string;
+    for (let i = 0; i < CUFF_POOL; i++) {
+      this.pool.push({
+        bill: this.collection.add({
+          position: Cesium.Cartesian3.ZERO,
+          image,
+          width: CUFF_PX,
+          height: CUFF_PX,
+          show: false,
+          disableDepthTestDistance: 1e12,
+        }),
+        from: new Cesium.Cartesian3(),
+        to: new Cesium.Cartesian3(),
+        apex: new Cesium.Cartesian3(),
+        age: 0,
+        live: false,
+      });
+    }
+  }
+
+  /** Throw a round from one point to another. */
+  fire(from: Cesium.Cartesian3, to: Cesium.Cartesian3): void {
+    const c = this.pool[this.cursor];
+    this.cursor = (this.cursor + 1) % CUFF_POOL;
+    Cesium.Cartesian3.clone(from, c.from);
+    Cesium.Cartesian3.clone(to, c.to);
+
+    // Lift the midpoint along its own surface normal — "up" is outward from the globe, not +Z.
+    const mid = Cesium.Cartesian3.midpoint(from, to, new Cesium.Cartesian3());
+    const gap = Cesium.Cartesian3.distance(from, to);
+    const up = Cesium.Cartesian3.normalize(mid, this.scratchA);
+    Cesium.Cartesian3.add(
+      mid,
+      Cesium.Cartesian3.multiplyByScalar(up, gap * CUFF_ARC + 20, this.scratchB),
+      c.apex,
+    );
+
+    c.age = 0;
+    c.live = true;
+    c.bill.show = true;
+  }
+
+  update(dt: number): void {
+    for (const c of this.pool) {
+      if (!c.live) continue;
+      c.age += dt;
+      if (c.age >= CUFF_FLIGHT) {
+        c.live = false;
+        c.bill.show = false;
+        this.onLand?.(c.to);
+        continue;
+      }
+      const t = c.age / CUFF_FLIGHT;
+      // Quadratic Bezier through the lifted midpoint.
+      const a = Cesium.Cartesian3.lerp(c.from, c.apex, t, this.scratchA);
+      const b = Cesium.Cartesian3.lerp(c.apex, c.to, t, this.scratchB);
+      c.bill.position = Cesium.Cartesian3.lerp(a, b, t, new Cesium.Cartesian3());
+      // Tumbling end over end. Billboard rotation is screen-space, which is exactly what's wanted:
+      // the spin should read the same whatever angle the camera is at.
+      c.bill.rotation = -t * CUFF_SPINS * Math.PI * 2;
+      // Fades in fast and holds; it is caught rather than dissipating.
+      c.bill.color = Cesium.Color.WHITE.withAlpha(Math.min(1, t * 6));
+    }
+  }
+
+  destroy(): void {
+    this.collection.destroy();
   }
 }
 
@@ -236,8 +531,8 @@ export class Blasts {
  * Ballistic, in the local horizon frame: thrown up and out, pulled back down. Cheap enough to run
  * continuously for the whole 30-second assault.
  */
-const SPARK_POOL = 96;
-const SPARK_LIFE = 0.75;
+const SPARK_POOL = 220;
+const SPARK_LIFE = 1.05;
 const SPARK_G = -9.8;
 /**
  * Initial speed range, m/s. Measured rather than guessed: at 9 m/s the shower spread about 5 m,
@@ -246,7 +541,7 @@ const SPARK_G = -9.8;
  * pulse is what carries the alarm at theater altitude, so these only have to survive the zoom the
  * operator actually flies down to.
  */
-const SPARK_SPEED = 15;
+const SPARK_SPEED = 46;
 const SPARK_HOT = Cesium.Color.fromCssColorString('#FFE9B0');
 const SPARK_COOL = Cesium.Color.fromCssColorString('#E2541E');
 
@@ -274,7 +569,7 @@ export class Sparks {
         point: this.collection.add({
           position: Cesium.Cartesian3.ZERO,
           color: SPARK_HOT,
-          pixelSize: 2,
+          pixelSize: 6,
           show: false,
           // Has to read through the obelisk it's being struck off, and from theater altitude.
           disableDepthTestDistance: 1e12,
@@ -334,7 +629,7 @@ export class Sparks {
       s.point.color = Cesium.Color.lerp(SPARK_HOT, SPARK_COOL, k, new Cesium.Color()).withAlpha(
         1 - k * k,
       );
-      s.point.pixelSize = 4 * (1 - k) + 1.2;
+      s.point.pixelSize = 9 * (1 - k) + 2.5;
     }
   }
 

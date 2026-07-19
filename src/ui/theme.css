@@ -1057,3 +1057,441 @@ body:has(#globe-ui) #hint { display: none; }
 /* Platforms are machines: they get their glyph where a person gets a face. */
 .up-mug.hardware { border-color: var(--red-dim); }
 .up-mug .c2-glyph { width: 40px; height: 40px; color: var(--red); }
+
+/* ===== TITLE SCREEN =============================================================================
+   The first thing the game is. Sits above everything, including the Cesium canvas, and is the only
+   surface that owns the whole viewport. */
+
+#g-title-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(120% 90% at 50% 0%, #16191f 0%, var(--carbon) 62%),
+    var(--carbon);
+  animation: gt-in .5s ease both;
+}
+
+@keyframes gt-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* Scanline wash, so the menu reads as the same equipment the rest of the game is rendered on. */
+.gt-vignette {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0) 0px,
+    rgba(0, 0, 0, 0) 2px,
+    rgba(0, 0, 0, .22) 3px
+  );
+  mix-blend-mode: multiply;
+}
+
+.gt-inner {
+  position: relative;
+  width: min(560px, 90vw);
+  text-align: center;
+  padding: 8px 0 24px;
+}
+
+.gt-eyebrow {
+  font: 600 10px/1 var(--mono);
+  letter-spacing: .34em;
+  color: var(--ash);
+  margin-bottom: 18px;
+}
+
+.gt-mark {
+  margin: 0;
+  font: 700 clamp(48px, 11vw, 86px)/0.92 var(--sans);
+  letter-spacing: .16em;
+  color: var(--bone);
+  text-indent: .16em;
+}
+.gt-mark b { color: var(--red); font-weight: 700; }
+
+.gt-sub {
+  margin-top: 6px;
+  font: 600 12px/1 var(--mono);
+  letter-spacing: .42em;
+  color: var(--ash);
+  text-indent: .42em;
+}
+
+.gt-blurb {
+  margin: 26px auto 0;
+  max-width: 44ch;
+  font: 400 13px/1.7 var(--sans);
+  color: var(--ash);
+}
+
+.gt-actions { margin-top: 34px; }
+
+.gt-start {
+  appearance: none;
+  border: 1px solid var(--red-dim);
+  background: linear-gradient(180deg, rgba(226, 58, 46, .14), rgba(226, 58, 46, .05));
+  color: var(--bone);
+  font: 700 15px/1 var(--mono);
+  letter-spacing: .3em;
+  text-indent: .3em;
+  padding: 16px 52px;
+  cursor: pointer;
+  transition: background .16s ease, border-color .16s ease, box-shadow .16s ease;
+}
+.gt-start:hover {
+  background: linear-gradient(180deg, rgba(226, 58, 46, .28), rgba(226, 58, 46, .1));
+  border-color: var(--red);
+  box-shadow: 0 0 26px var(--red-glow);
+}
+
+/* ---- slot list ---- */
+.gt-slots { margin-top: 30px; text-align: left; animation: gt-slot-in .32s ease both; }
+
+@keyframes gt-slot-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+.gt-slots-head {
+  font: 600 10px/1 var(--mono);
+  letter-spacing: .32em;
+  color: var(--ash);
+  text-align: center;
+  margin-bottom: 14px;
+}
+
+.gt-slot {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  border: 1px solid var(--gunmetal);
+  background: var(--graphite-2);
+  margin-bottom: 10px;
+  transition: border-color .16s ease, background .16s ease;
+}
+.gt-slot:hover { border-color: var(--steel); background: var(--graphite); }
+.gt-slot.empty { border-style: dashed; }
+
+.gt-slot-open {
+  flex: 1;
+  appearance: none;
+  border: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  padding: 14px 16px;
+  cursor: pointer;
+  display: grid;
+  gap: 5px;
+}
+
+.gt-slot-n {
+  font: 600 9px/1 var(--mono);
+  letter-spacing: .28em;
+  color: var(--ash);
+}
+
+.gt-slot-title {
+  font: 700 15px/1.1 var(--sans);
+  letter-spacing: .06em;
+  color: var(--bone);
+}
+.gt-slot.empty .gt-slot-title { color: var(--ash); }
+
+.gt-slot-meta {
+  font: 500 10px/1.5 var(--mono);
+  letter-spacing: .08em;
+  color: var(--ash);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.gt-slot-meta svg { width: 12px; height: 12px; opacity: .75; }
+
+.gt-slot-del {
+  appearance: none;
+  border: 0;
+  border-left: 1px solid var(--gunmetal);
+  background: none;
+  color: var(--ash);
+  font: 600 9px/1 var(--mono);
+  letter-spacing: .2em;
+  padding: 0 14px;
+  cursor: pointer;
+  transition: background .16s ease, color .16s ease;
+}
+.gt-slot-del:hover { background: rgba(226, 58, 46, .12); color: var(--red); }
+.gt-slot-del.armed { background: var(--red); color: var(--bone); }
+
+.gt-foot {
+  position: absolute;
+  bottom: 18px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font: 500 9px/1 var(--mono);
+  letter-spacing: .26em;
+  color: #4a5057;
+}
+
+/* ===== LOADING SCREEN ===========================================================================
+   Covers the scene entirely while a world or a theater is built. Below the title screen in stacking
+   order: exiting to title from inside a load should never leave the loader on top. */
+
+#g-loading {
+  position: fixed;
+  inset: 0;
+  z-index: 380;
+  display: grid;
+  grid-template-rows: 1fr auto;
+  background:
+    radial-gradient(110% 80% at 50% 40%, #14171c 0%, var(--carbon) 70%),
+    var(--carbon);
+  opacity: 1;
+  transition: opacity .45s ease;
+}
+#g-loading.out { opacity: 0; pointer-events: none; }
+
+.gl-inner {
+  align-self: center;
+  justify-self: center;
+  text-align: center;
+  width: min(520px, 88vw);
+}
+
+.gl-mark {
+  font: 700 30px/1 var(--sans);
+  letter-spacing: .2em;
+  text-indent: .2em;
+  color: var(--bone);
+  opacity: .85;
+}
+.gl-mark b { color: var(--red); }
+
+.gl-title {
+  margin-top: 22px;
+  font: 600 13px/1 var(--mono);
+  letter-spacing: .3em;
+  text-indent: .3em;
+  color: var(--bone);
+}
+
+.gl-sub {
+  margin-top: 8px;
+  font: 500 11px/1 var(--mono);
+  letter-spacing: .16em;
+  color: var(--ash);
+  min-height: 11px;
+}
+
+/* Indeterminate sweep. The work behind this has no honest percentage — the stage line is what
+   actually reports progress, and a fake percentage would be worse than none. */
+.gl-bar {
+  margin: 24px auto 0;
+  width: 100%;
+  height: 2px;
+  background: var(--gunmetal-2);
+  overflow: hidden;
+}
+.gl-bar span {
+  display: block;
+  width: 34%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, var(--red), transparent);
+  animation: gl-sweep 1.5s ease-in-out infinite;
+}
+@keyframes gl-sweep {
+  from { transform: translateX(-120%); }
+  to { transform: translateX(400%); }
+}
+
+.gl-stage {
+  margin-top: 14px;
+  font: 500 10px/1 var(--mono);
+  letter-spacing: .2em;
+  color: var(--ash);
+  min-height: 10px;
+}
+
+/* ---- field note ---- */
+.gl-tipwrap {
+  padding: 0 24px 34px;
+  max-width: 720px;
+  margin: 0 auto;
+  text-align: center;
+}
+
+.gl-tiplabel {
+  display: inline-block;
+  font: 600 9px/1 var(--mono);
+  letter-spacing: .3em;
+  color: var(--red);
+  margin-bottom: 10px;
+}
+
+.gl-tip {
+  margin: 0;
+  font: 400 13px/1.75 var(--sans);
+  color: var(--steel);
+  opacity: 0;
+  transition: opacity .28s ease;
+  min-height: 3.5em;
+}
+.gl-tip.in { opacity: 1; }
+
+@media (max-width: 620px) {
+  .gl-tip { font-size: 12px; }
+  .gt-blurb { font-size: 12px; }
+}
+
+/* ===== MISSION OBJECTIVES + ACCORDION ===========================================================
+   The active tasking's operative content. Steps first, prose folded. */
+
+.c2-obj-label {
+  font: 600 9px/1 var(--mono);
+  letter-spacing: .28em;
+  color: var(--ash);
+  margin: 12px 0 8px;
+}
+
+.c2-obj { margin-bottom: 9px; }
+
+.c2-obj-top {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin-bottom: 4px;
+}
+
+.c2-obj-tick {
+  color: var(--ash);
+  font-size: 10px;
+  line-height: 1;
+  flex: none;
+}
+.c2-obj.done .c2-obj-tick { color: var(--ok); }
+
+.c2-obj-text {
+  flex: 1;
+  font: 500 11px/1.35 var(--sans);
+  color: var(--steel);
+}
+.c2-obj.done .c2-obj-text { color: var(--ok); }
+
+.c2-obj-count {
+  font: 600 10px/1 var(--mono);
+  color: var(--bone);
+  flex: none;
+}
+
+/* ---- accordion ---- */
+.c2-acc {
+  margin-top: 12px;
+  border-top: 1px solid var(--gunmetal);
+}
+
+.c2-acc-head {
+  width: 100%;
+  appearance: none;
+  border: 0;
+  background: none;
+  color: var(--ash);
+  font: 600 9px/1 var(--mono);
+  letter-spacing: .26em;
+  padding: 11px 0 9px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+}
+.c2-acc-head:hover { color: var(--steel); }
+
+.c2-acc-caret {
+  display: inline-block;
+  transition: transform .18s ease;
+  font-size: 9px;
+}
+.c2-acc.open .c2-acc-caret { transform: rotate(90deg); }
+
+/* Collapsed by height rather than display:none so it can animate, and so the panel's own scroll
+   height doesn't jump the moment it opens. */
+.c2-acc-body {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height .26s ease;
+}
+.c2-acc.open .c2-acc-body { max-height: 1200px; }
+.c2-acc-body .c2-modal-p { font-size: 11px; line-height: 1.65; }
+.c2-acc-body .c2-modal-objectives { margin-top: 10px; }
+
+/* ===== PANEL COLLISION RULES ====================================================================
+   Fixed panels are laid out in two rails plus a bottom-left card. These rules are what keep them
+   from ever occupying the same pixels — verified by walking every visible panel's bounding box and
+   asserting zero intersections, at 1280/1440/1024/860 wide. */
+
+/* The settings panel takes the right rail; the tasking panel stands down while it is open. Two
+   panels offset within one rail stops fitting below ~1100px, so only one is ever present. */
+body.dev-open #c2-tasking { display: none; }
+
+/* Align the settings panel to the same rail geometry it is replacing, so the swap reads as one
+   panel changing rather than two panels of different shapes trading places. */
+#dev-panel {
+  top: calc(150px + env(safe-area-inset-top, 0px));
+  width: 296px;
+  max-height: min(62vh, 560px);
+  overflow-y: auto;
+}
+
+/*
+ * The unit card is bottom-left and the platform roster is top-left: the same column. With a full
+ * roster on a short viewport the two met in the middle, so the roster is bounded to the space
+ * actually above the card rather than being allowed to grow into it.
+ *
+ * 300px is the card's height budget (264px wide, and taller than it is wide once a portrait plate
+ * and a charge sheet are in it) plus the gutter.
+ */
+#g-roster {
+  max-height: calc(100vh - 104px - 300px);
+  overflow-y: auto;
+}
+
+/* Below this the two rails plus the map no longer coexist: the store takes the screen and the
+   tasking rail moves under it rather than over the top of it. */
+@media (max-width: 860px) {
+  #c2-store, #c2-tasking {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    width: auto;
+    max-height: 38vh;
+  }
+  #c2-store { top: calc(140px + env(safe-area-inset-top, 0px)); }
+  #c2-tasking { top: auto; bottom: 12px; }
+  /* Stacked, the settings panel replaces BOTH rails rather than just the tasking one — there is no
+     column left to put it beside. */
+  #dev-panel {
+    left: 12px;
+    right: 12px;
+    width: auto;
+    top: calc(140px + env(safe-area-inset-top, 0px));
+    max-height: 70vh;
+  }
+  /* Full-width settings owns the screen while it is open: the store, and in a theater the platform
+     roster, both stand down. There is no arrangement of three panels at this width that doesn't
+     collide, and hiding is honest where offsetting would only look like it worked. */
+  body.dev-open #c2-store,
+  body.dev-open #g-roster { display: none; }
+  /* The lat/lon readout is an aiming aid for picking a theater on a wide screen. Stacked, the
+     panels reach the bottom of the viewport and it has nowhere to be that isn't on top of one of
+     them — and it is the one element here nothing depends on. */
+  #g-cursor { display: none; }
+  /* The unit card would sit on top of the tasking rail at this width — move it up and across. */
+  #unit-panel { left: 12px; right: 12px; width: auto; bottom: auto; top: calc(140px + env(safe-area-inset-top, 0px)); }
+  #g-roster { max-height: 22vh; }
+}

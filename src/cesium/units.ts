@@ -10,6 +10,7 @@ import {
 } from './unitModels';
 import { PLATFORM_BY_ID, type PlatformId } from '../game/platforms';
 import type { RoadNet, RoadClass } from './roads';
+import { RouteGraph } from './routeGraph';
 import type { SensorField } from './sensors';
 import { assessBand, rollAssessment, rollRecord, type Record_ } from '../game/intel';
 import type { MarkKind } from '../game/missions';
@@ -127,6 +128,8 @@ const SPEED: Record<UnitKind, number> = {
   air: 210,
   foot: 12,
   drone: PLATFORM_BY_ID.get('drone')!.speed,
+  dog: PLATFORM_BY_ID.get('dog')!.speed,
+  quad: PLATFORM_BY_ID.get('quad')!.speed,
   spider: PLATFORM_BY_ID.get('spider')!.speed,
   biped: PLATFORM_BY_ID.get('biped')!.speed,
   walker: PLATFORM_BY_ID.get('walker')!.speed,
@@ -144,6 +147,10 @@ const RIDE_HEIGHT: Record<UnitKind, number> = {
   air: 0,
   foot: 14,
   drone: 0,
+  // The dog walks the road ribbon like the traffic it shares it with, so it clears the drape the
+  // same way a vehicle does. The quadcopter's height comes from its own cruise altitude.
+  dog: 14,
+  quad: 0,
   spider: 2,
   biped: 2,
   walker: 2,
@@ -449,7 +456,8 @@ interface Unit {
 /** Callsign prefix per kind. */
 const CALLSIGN: Record<UnitKind, string> = {
   land: 'CV', sea: 'SV', air: 'AV', foot: 'FT',
-  drone: 'GORGON', spider: 'ARC', biped: 'MAR', walker: 'COL', naval: 'LIT', interceptor: 'RAP',
+  drone: 'GORGON', dog: 'K9', quad: 'KITE', spider: 'ARC', biped: 'MAR', walker: 'COL',
+  naval: 'LIT', interceptor: 'RAP',
 };
 /** Human label per kind, for the panel. */
 export const KIND_LABEL: Record<UnitKind, string> = {
@@ -458,7 +466,9 @@ export const KIND_LABEL: Record<UnitKind, string> = {
   air: 'AIRCRAFT',
   foot: 'FOOT UNIT',
   drone: 'DISC OBSERVER',
-  spider: 'ARACHNID SCOUT',
+  dog: 'KENNEL QUADRUPED',
+  quad: 'KITE QUADCOPTER',
+  spider: 'ARACHNID PURSUIT',
   biped: 'MARSHAL BIPED',
   walker: 'COLOSSUS SIEGE WALKER',
   naval: 'LITTORAL DRONE',
@@ -625,13 +635,21 @@ export class UnitField {
   readonly batches: Record<UnitKind, InstancedModelBatch>;
   private units: Unit[] = [];
   private graph?: RoadGraph;
+  /**
+   * The routable network, built lazily on the first order given to a road-bound platform.
+   *
+   * Lazy because most theaters never field one: a quarter-million nodes and a flood fill is real
+   * work to do at spawn for a capability the player may not have bought.
+   */
+  private routes?: RouteGraph | null;
   private center: { lon: number; lat: number };
   private radiusM: number;
   private heightAt: (lon: number, lat: number) => number;
   private shoreAt: (lon: number, lat: number) => number;
   private scratch = new Cesium.Cartesian3();
   private nextId: Record<UnitKind, number> = {
-    land: 0, sea: 0, air: 0, foot: 0, drone: 0, spider: 0, biped: 0, walker: 0, naval: 0, interceptor: 0,
+    land: 0, sea: 0, air: 0, foot: 0, drone: 0, dog: 0, quad: 0, spider: 0, biped: 0, walker: 0,
+    naval: 0, interceptor: 0,
   };
   /** Obelisk coverage test, used both to seed infection and to steer it toward the dark. */
   private isCovered?: (lon: number, lat: number) => boolean;
@@ -696,6 +714,8 @@ export class UnitField {
       air: new InstancedModelBatch(UNIT_MESHES.air, counts.air, bounds, true),
       foot: new InstancedModelBatch(UNIT_MESHES.foot, counts.foot + FOOT_SPAWN_HEADROOM, bounds, true),
       drone: new InstancedModelBatch(UNIT_MESHES.drone, PLATFORM_BY_ID.get('drone')!.maxCount, bounds, true),
+      dog: new InstancedModelBatch(UNIT_MESHES.dog, PLATFORM_BY_ID.get('dog')!.maxCount, bounds, true),
+      quad: new InstancedModelBatch(UNIT_MESHES.quad, PLATFORM_BY_ID.get('quad')!.maxCount, bounds, true),
       spider: new InstancedModelBatch(UNIT_MESHES.spider, PLATFORM_BY_ID.get('spider')!.maxCount, bounds, true),
       biped: new InstancedModelBatch(UNIT_MESHES.biped, PLATFORM_BY_ID.get('biped')!.maxCount, bounds, true),
       walker: new InstancedModelBatch(UNIT_MESHES.walker, PLATFORM_BY_ID.get('walker')!.maxCount, bounds, true),
@@ -1040,17 +1060,46 @@ export class UnitField {
    * Platforms don't wander — each takes the straight line to its last order and then holds.
    * Clearing the target on arrival is what makes the panel read ON STATION.
    */
+  /**
+   * Move a platform along its commanded route.
+   *
+   * Travels a real distance BUDGET each frame rather than snapping to whichever waypoint is within
+   * arrival range. That distinction only started to matter with road-bound platforms: their routes
+   * are real street geometry with vertices tens of metres apart, and the old snap consumed one
+   * vertex per frame regardless of speed — a quadruped rated at 22 m/s crossed a city at several
+   * hundred. Spending a budget means a route's shape can be as dense as it likes without affecting
+   * how fast anything travels along it.
+   *
+   * The final leg still uses the wider {@link ARRIVE_M} "on station" radius: a platform sent to a
+   * point is there when it is near it, and holding out for an exact coordinate would leave it
+   * creeping forever.
+   */
   private stepPlatform(u: Unit, dt: number): void {
     if (u.tlon === undefined || u.tlat === undefined) return; // holding station
-    const mLon = mPerLat * Math.cos(u.lat * DEG);
-    const dx = (u.tlon - u.lon) * mLon;
-    const dy = (u.tlat - u.lat) * mPerLat;
-    const dist = Math.hypot(dx, dy);
-    u.heading = Math.atan2(dx, dy);
-    if (dist <= ARRIVE_M) {
+    let budget = SPEED[u.kind] * dt;
+    // Bounded so one long frame can't walk a platform through the whole route in a single step.
+    for (let hops = 0; hops < 64 && budget > 0; hops++) {
+      if (u.tlon === undefined || u.tlat === undefined) return;
+      const mLon = mPerLat * Math.cos(u.lat * DEG);
+      const dx = (u.tlon - u.lon) * mLon;
+      const dy = (u.tlat - u.lat) * mPerLat;
+      const dist = Math.hypot(dx, dy);
+      u.heading = Math.atan2(dx, dy);
+
+      // The last leg is "arrive near"; intermediate legs are consumed exactly, so the path is
+      // followed rather than cut across.
+      const last = !u.route?.length;
+      const reach = last ? ARRIVE_M : 0;
+      if (dist - reach > budget) {
+        u.lon += (budget * (dx / dist)) / mLon;
+        u.lat += (budget * (dy / dist)) / mPerLat;
+        return;
+      }
+
+      budget -= Math.max(0, dist - reach);
       u.lon = u.tlon;
       u.lat = u.tlat;
-      const arrived = { lon: u.tlon, lat: u.tlat };
+      const arrived: { lon: number; lat: number } = { lon: u.tlon, lat: u.tlat };
       const next = u.route?.shift();
       if (next) {
         u.tlon = next.lon;
@@ -1064,13 +1113,11 @@ export class UnitField {
       } else {
         u.tlon = undefined;
         u.tlat = undefined;
+        return;
       }
-      return;
     }
-    const step = Math.min(dist, SPEED[u.kind] * dt);
-    u.lon += (step * (dx / dist)) / mLon;
-    u.lat += (step * (dy / dist)) / mPerLat;
   }
+
 
   // --- siege ------------------------------------------------------------------------------------
 
@@ -1243,6 +1290,11 @@ export class UnitField {
     };
   }
 
+  /** Whether a given unit index is the live siege attacker. */
+  isAttacker(index: number): boolean {
+    return this.attackerIdx >= 0 && this.attackerIdx === index && !this.units[index]?.dead;
+  }
+
   /** Take the attacker off the board — detained, serviced, or its target already gone. */
   clearAttacker(): void {
     if (this.attackerIdx < 0) return;
@@ -1288,10 +1340,17 @@ export class UnitField {
     if (sel.kind === 'naval' && this.shoreAt(lon, lat) > -60) return false;
     const u = this.units[sel.index];
 
+    // A road-bound platform doesn't get a straight line to anywhere. Its order is expanded into an
+    // actual drive along the street grid, and an unreachable destination is REFUSED rather than
+    // silently walked through the intervening blocks — which is the constraint being real.
+    const drive = this.roadRouteFor(sel.kind, u, lon, lat);
+    if (drive === null) return false;
+
     if (!append || u.tlon === undefined) {
-      u.tlon = lon;
-      u.tlat = lat;
-      u.route = [];
+      const [first, ...rest] = drive ?? [{ lon, lat }];
+      u.tlon = first.lon;
+      u.tlat = first.lat;
+      u.route = rest;
       u.loop = false;
       u.routeAction = action;
       u.routeTarget = target;
@@ -1306,12 +1365,62 @@ export class UnitField {
       u.loop = true;
       return true;
     }
-    (u.route ??= []).push({ lon, lat });
+    (u.route ??= []).push(...(drive ?? [{ lon, lat }]));
     if (action) {
       u.routeAction = action;
       u.routeTarget = target;
     }
     return true;
+  }
+
+  /**
+   * Expand an order into road geometry, for the platforms that are confined to it.
+   *
+   * Three outcomes, and they are all meaningful:
+   *   `undefined` — this platform isn't road-bound; the caller should use the raw destination.
+   *   an array    — the drive, as waypoints along real streets.
+   *   `null`      — road-bound, and there is NO route. The order is refused.
+   *
+   * The last case is the point of the whole feature. A quadruped ordered across a river, or onto
+   * an island, or into country the road fetch didn't cover, simply cannot go, and saying so is
+   * better than watching it swim.
+   *
+   * Route legs are appended from where the platform will BE when it starts driving — its current
+   * position for a fresh order, the end of its queue when appending — so a queued leg is pathed
+   * from the right place rather than from wherever the unit happens to be standing now.
+   */
+  private roadRouteFor(
+    kind: PlatformId,
+    u: Unit,
+    lon: number,
+    lat: number,
+  ): { lon: number; lat: number }[] | null | undefined {
+    if (!PLATFORM_BY_ID.get(kind)?.roadBound) return undefined;
+    const g = this.routeNet();
+    if (!g) return undefined; // no roads in this theater at all: don't strand the unit
+    const legs = u.route ?? [];
+    const tail = legs.length
+      ? legs[legs.length - 1]
+      : u.tlon !== undefined && u.tlat !== undefined
+        ? { lon: u.tlon, lat: u.tlat }
+        : { lon: u.lon, lat: u.lat };
+    return g.path(tail, { lon, lat });
+  }
+
+  /** The routable network for this theater, built on first use. Null when there are no roads. */
+  private routeNet(): RouteGraph | null {
+    if (this.routes !== undefined) return this.routes;
+    const g = this.graph;
+    if (!g || !g.edges.length) return (this.routes = null);
+    const built = new RouteGraph(g.edges);
+    this.routes = built;
+    return built;
+  }
+
+  /** Diagnostics for the dev panel: how routable this theater's road network actually is. */
+  routeNetStats(): { nodes: number; connectivity: number } | null {
+    const g = this.routeNet();
+    return g ? { nodes: g.size, connectivity: g.connectivity } : null;
   }
 
   /** Every commanded leg for a platform, current first. Empty when it's holding station. */
@@ -1837,7 +1946,8 @@ export class UnitField {
   selected(): SelectionInfo | null {
     if (this.selection.size === 0) return null;
     const byKind: Record<UnitKind, number> = {
-      land: 0, sea: 0, air: 0, foot: 0, drone: 0, spider: 0, biped: 0, walker: 0, naval: 0, interceptor: 0,
+      land: 0, sea: 0, air: 0, foot: 0, drone: 0, dog: 0, quad: 0, spider: 0, biped: 0, walker: 0,
+      naval: 0, interceptor: 0,
     };
     const byBand: Record<'clear' | 'suspect' | 'threat', number> = { clear: 0, suspect: 0, threat: 0 };
     let markedCount = 0;
@@ -2198,8 +2308,16 @@ export class UnitField {
    *
    * Returns the strikes that went off, so the caller can bill the collateral.
    */
-  resolveArrivals(dt: number): { lon: number; lat: number; killed: number; collateral: number }[] {
+  resolveArrivals(dt: number): {
+    strikes: { lon: number; lat: number; killed: number; collateral: number }[];
+    /** A platform arrived on a DETAIN order and took the live siege attacker. */
+    detainedAttacker: boolean;
+    /** Detainments resolved this frame: who threw, and at what. */
+    detainments: { from: Cesium.Cartesian3; to: Cesium.Cartesian3 }[];
+  } {
     const out: { lon: number; lat: number; killed: number; collateral: number }[] = [];
+    let detainedAttacker = false;
+    const detainments: { from: Cesium.Cartesian3; to: Cesium.Cartesian3 }[] = [];
 
     for (const { kind, index } of this.platformUnits()) {
       const u = this.units[index];
@@ -2236,10 +2354,25 @@ export class UnitField {
       } else if (t) {
         // Investigate / detain / execute all land on the one contact that was picked.
         if (action === 'detain') {
+          // from = the platform that arrived, to = the contact it was sent at.
+          const targetIdx = u.routeTarget!;
+          detainments.push({
+            from: new Cesium.Cartesian3(this.ecef[index * 3], this.ecef[index * 3 + 1], this.ecef[index * 3 + 2]),
+            to: new Cesium.Cartesian3(
+              this.ecef[targetIdx * 3],
+              this.ecef[targetIdx * 3 + 1],
+              this.ecef[targetIdx * 3 + 2],
+            ),
+          });
           t.dead = true;
           t.mark = null;
           this.selection.delete(u.routeTarget!);
-          if (this.attackerIdx === u.routeTarget) this.attackerIdx = -1;
+          // Report it as a DETAINMENT rather than letting the siege director notice the attacker
+          // vanished and score it as a kill — the whole point of custody is that it isn't one.
+          if (this.attackerIdx === u.routeTarget) {
+            this.attackerIdx = -1;
+            detainedAttacker = true;
+          }
         } else {
           t.mark = action === 'execute' ? 'execute' : 'investigate';
           t.markTimer = ORDER_DELAY[t.mark];
@@ -2252,7 +2385,7 @@ export class UnitField {
       u.tlon = undefined;
       u.tlat = undefined;
     }
-    return out;
+    return { strikes: out, detainedAttacker, detainments };
   }
 
   /** Everything inside the blast dies. Returns the toll, split into target and everyone else. */

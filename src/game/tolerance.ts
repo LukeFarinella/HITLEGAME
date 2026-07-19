@@ -1,9 +1,10 @@
 import { worstSeverity, type Record_ } from './intel';
+import { slotKey, onSlotChange } from './saves';
 
 /**
  * What the public will put up with.
  *
- * The operator's real constraint early on isn't sensor coverage or officers — it's that nobody has
+ * The operator's real constraint early on isn't sensor coverage or funding — it's that nobody has
  * agreed to any of this yet. A contractor flagging citizens on a probability score is only tolerated
  * where the case is overwhelming, so at the campaign's start a contact needs a severe record AND a
  * high assessment before an order can be issued against it at all.
@@ -27,7 +28,7 @@ export function caseStrength(assess: number, record: Record_): number {
   return 0.55 * assess + 0.45 * (worstSeverity(record) / 4);
 }
 
-const SAVE_KEY = 'gorgon.tolerance.v1';
+const SAVE_BASE = 'tolerance.v1';
 
 class PublicTolerance {
   /** 0 = the public tolerates nothing, 1 = it no longer objects to anything. */
@@ -35,8 +36,21 @@ class PublicTolerance {
   private listeners = new Set<() => void>();
 
   constructor() {
+    this.load();
+    // Opening a save slot re-reads this campaign's figure; closing one drops back to the opening
+    // value, so the title screen isn't sitting on the last campaign's numbers.
+    onSlotChange(() => {
+      this.load();
+      for (const fn of this.listeners) fn();
+    });
+  }
+
+  private load(): void {
+    this.value = TOLERANCE_START;
+    const key = slotKey(SAVE_BASE);
+    if (!key) return; // no campaign open — defaults, and save() will refuse to write
     try {
-      const raw = localStorage.getItem(SAVE_KEY);
+      const raw = localStorage.getItem(key);
       if (raw !== null) this.value = Math.min(1, Math.max(0, parseFloat(raw)));
     } catch {
       // storage unavailable — start fresh
@@ -84,8 +98,10 @@ class PublicTolerance {
   }
 
   private save(): void {
+    const key = slotKey(SAVE_BASE);
+    if (!key) return;
     try {
-      localStorage.setItem(SAVE_KEY, String(this.value));
+      localStorage.setItem(key, String(this.value));
     } catch {
       // not fatal
     }
