@@ -76,6 +76,12 @@ const GLYPHS: Record<string, string> = {
     `<path ${A} d="M4 6.5v13M20 6.5v13"/>` +
     `<path ${A} d="M4 11h5.5M14.5 11H20"/>` +
     `<path ${A} d="M12.6 7.2 9.8 12.4h3.4L10.9 17"/>`,
+  // Rapid site deployment: the diamond it drops, under a descent chute line. Deliberately NOT the
+  // obelisk glyph — the whole point of the feature is that you can tell the two apart on sight.
+  airdrop:
+    `<path ${A} d="M12 8.5 15.5 14 12 19.5 8.5 14Z"/>` +
+    `<path ${A} d="M12 8.5V3M8.6 5.4 12 3l3.4 2.4"/>` +
+    `<path ${A} d="M5.5 21h13"/>`,
   // Marking automation: the tasking glyph it automates, under a loop.
   'auto-investigate':
     `<path ${A} d="M3.5 14.5S6.6 9.5 12 9.5s8.5 5 8.5 5-3.1 5-8.5 5-8.5-5-8.5-5Z"/>` +

@@ -21,7 +21,7 @@ import {
 } from './units';
 import { UNIT_KINDS, type UnitKind } from './unitModels';
 import { SensorField } from './sensors';
-import { progression, ASSETS } from '../game/progression';
+import { progression, ASSETS, AIRDROP_COST } from '../game/progression';
 import { PLATFORMS, GEAR, PLATFORM_BY_ID, BASE_SENSOR_M, type PlatformId } from '../game/platforms';
 import { surveyTerritory, clusterCentres, type Territory } from '../game/territory';
 import { missions, MISSIONS } from '../game/missions';
@@ -29,6 +29,7 @@ import { tolerance, caseStrength, toleranceLabel } from '../game/tolerance';
 import { resistance } from '../game/resistance';
 import { assessBand, BAND_LABEL, readRecord, type Record_ } from '../game/intel';
 import { portraitFor } from '../game/portraits';
+import { VIOLATION_TTL_S, VIOLATIONS } from '../game/violations';
 import { Store } from '../ui/store';
 import { icon } from '../ui/icons';
 import { sound, bindInterfaceSounds } from '../ui/sound';
@@ -38,11 +39,13 @@ import { showTitle, setTitleTerritory } from '../ui/title';
 import { showLoading, setStage, hideLoading } from '../ui/loading';
 import { setActiveSlot, migrateLegacySave } from '../game/saves';
 import { LaserBeams } from './lasers';
-import { ScanBeams, Blasts, Sparks, Impacts, Cuffs } from './effects';
+import { ScanBeams, Blasts, Sparks, Impacts, Cuffs, ViolationPings } from './effects';
 import { Reactions } from './reactions';
 import { RouteLayer } from './routes';
 import { AttackPulse } from './pulse';
 import { SiegeDirector, type SiegeEvent } from './siege';
+import { DropSites } from './dropSites';
+import { IncidentDirector, INCIDENTS, type IncidentEvent, type IncidentKind } from './incidents';
 
 const RED = Cesium.Color.fromCssColorString('#E23A2E');
 const STEEL = Cesium.Color.fromCssColorString('#8A9AA8');
@@ -504,6 +507,8 @@ let unitField: UnitField | undefined;
 let lasers: LaserBeams | undefined;
 /** Infected attacks against the obelisk net. Lives and dies with the theater. */
 let siege: SiegeDirector | undefined;
+/** Everything else the theater does on its own: riots, chases, brawls, assassinations. */
+let incidents: IncidentDirector | undefined;
 /** The crowd reacting to what the operator does. Lives and dies with the theater. */
 let reactions: Reactions | undefined;
 /** The selected platform's commanded route, drawn on the ground. */
@@ -526,6 +531,17 @@ let sparks: Sparks | undefined;
 let impacts: Impacts | undefined;
 /** Restraint rounds — the visible half of a detainment. */
 let cuffs: Cuffs | undefined;
+/** Yellow markers over every contact the net has accused. The primary call to action. */
+let pings: ViolationPings | undefined;
+/**
+ * Airdropped sites for THIS sortie.
+ *
+ * Never persisted, and torn down on the way out. That is a deliberate rule rather than an
+ * unfinished feature: permanent coverage is what TERRITORY is for and what it is priced against,
+ * so a 400-token site that survived the session would quietly undercut the entire economy. Renting
+ * a view of somewhere for one sortie is a different purchase from owning the ground.
+ */
+let dropSites: DropSites | undefined;
 
 /** Park the pulse on whichever site the siege is currently working on, or stand it down. */
 function updateAttackPulse() {
@@ -715,6 +731,7 @@ function addUnits(center: { lon: number; lat: number }, map: TheaterMap, net: Ro
   scene.primitives.add(field.platformIcons); // 24 px markers, shown when zoomed out
   field.toleranceOverride = progression.has('emergency-powers');
   seedHiddenPockets(field);
+  seedStarterTarget(field);
   deliveryTimer = DELIVERY_INTERVAL_S;
   unitField = field;
   lasers = new LaserBeams();
@@ -735,21 +752,326 @@ function addUnits(center: { lon: number; lat: number }, map: TheaterMap, net: Ro
   scene.primitives.add(sparks.collection);
   impacts = new Impacts();
   scene.primitives.add(impacts.collection);
+  dropSites = new DropSites();
+  scene.primitives.add(dropSites.collection);
+  pings = new ViolationPings();
+  scene.primitives.add(pings.collection);
   cuffs = new Cuffs();
   // The round landing is what puts the mark down, so the two read as one event.
   cuffs.onLand = (at) => impacts?.at(at, 110, 0.55, 14);
   scene.primitives.add(cuffs.collection);
   startSiege(field);
+  startIncidents(field);
   updateUnitHud();
+}
+
+/**
+ * What each incident costs when it is not answered.
+ *
+ * Priced so that ignoring trouble is a real decision rather than a rounding error, and so that the
+ * two currencies it charges say different things: TOKENS are the company's money, and resistance is
+ * the ground's memory. A riot costs money because property is what a contractor is paid to protect;
+ * an assassination costs resistance because a protected asset dying in public is a failure everyone
+ * can see.
+ */
+const STRUCTURE_LOSS_TOKENS = 900;
+const ASSET_LOSS_TOKENS = 2500;
+const CASUALTY_RESISTANCE = 0.03;
+const ASSET_LOSS_RESISTANCE = 0.06;
+const ESCAPE_RESISTANCE = 0.04;
+
+function onIncidentEvent(e: IncidentEvent) {
+  switch (e.type) {
+    case 'opened':
+      sound.play('alert');
+      toast(`⚠ ${e.def.name} · ${e.def.brief}`);
+      incidentFocus = { lon: e.lon, lat: e.lat };
+      break;
+
+    case 'structure':
+      // A building comes down. There is no building geometry to remove — the skyline is procedural
+      // and rebuilt per theater — so the loss is shown as a blast where it happened and billed.
+      progression.spend(STRUCTURE_LOSS_TOKENS);
+      resistance.aggravate(0.012);
+      if (theaterMap) {
+        const h = theaterMap.heightAt(e.lon, e.lat);
+        blasts?.fire(e.lon, e.lat, h, 140);
+        impacts?.at(Cesium.Cartesian3.fromDegrees(e.lon, e.lat, h), 200, 0.9, 20);
+        sparks?.emit(Cesium.Cartesian3.fromDegrees(e.lon, e.lat, h + 6), 14);
+      }
+      sound.play('laser');
+      reactAt(e.lon, e.lat, 'dismay');
+      toast(`◈ STRUCTURE LOST · −${STRUCTURE_LOSS_TOKENS} TOKENS`);
+      updateUnitHud();
+      break;
+
+    case 'casualty':
+      if (e.protectedAsset) {
+        progression.spend(ASSET_LOSS_TOKENS);
+        resistance.aggravate(ASSET_LOSS_RESISTANCE);
+        toast(`◈ PROTECTED ASSET KILLED · −${ASSET_LOSS_TOKENS} TOKENS`);
+      } else {
+        resistance.aggravate(CASUALTY_RESISTANCE);
+        toast('◈ CONTACT KILLED · INTERVENTION TOO LATE');
+      }
+      reactAt(e.lon, e.lat, 'dismay');
+      sound.play('denied');
+      updateUnitHud();
+      break;
+
+    case 'escaped':
+      resistance.aggravate(ESCAPE_RESISTANCE);
+      toast('◈ PURSUIT LOST · VEHICLE CLEARED THE THEATER');
+      sound.play('denied');
+      break;
+
+    case 'resolved':
+      incidentFocus = undefined;
+      if (e.clean) {
+        reactCompany();
+        toast(`◈ ${INCIDENTS[e.kind].name} RESOLVED`);
+      }
+      break;
+  }
+}
+
+/**
+ * Fire and age live violations, and bill whatever lapsed unanswered.
+ *
+ * Ignoring a jaywalker costs nothing but the fee — which is right, and is most of the stream. What
+ * does cost is letting a SUSPICIOUS event lapse: that was the net telling you something and you
+ * didn't look, and the ground reads the difference between a programme that watches and one that
+ * only collects.
+ */
+const LAPSED_SUSPICIOUS_RESISTANCE = 0.006;
+function runLiveViolations(dt: number) {
+  if (!unitField || !sensorField || mode !== 'theater') return;
+  const lapsed = unitField.stepViolations(dt, sensorField.obeliskCount, (lon, lat) =>
+    sensorField?.servicingSite(lon, lat) ?? null,
+  );
+  for (const l of lapsed) {
+    if (l.live.def.cls === 'suspicious') resistance.aggravate(LAPSED_SUSPICIOUS_RESISTANCE);
+  }
+}
+
+/**
+ * Draw a ping over every open accusation, and over the installation that raised it.
+ *
+ * Rebuilt each frame because the accused are walking: a marker that lagged its contact would send
+ * the operator to click on whoever is standing where the accused used to be.
+ */
+function updatePings(dt: number) {
+  if (!pings) return;
+  pings.begin();
+  if (unitField && theaterMap && mode === 'theater') {
+    for (const v of unitField.liveViolations()) {
+      const at = unitField.worldPositionOf(v.index);
+      if (!at) continue;
+      const site = Cesium.Cartesian3.fromDegrees(
+        v.live.siteLon,
+        v.live.siteLat,
+        theaterMap.heightAt(v.live.siteLon, v.live.siteLat) + 180,
+      );
+      pings.add(at, site);
+    }
+  }
+  pings.end(dt);
+}
+
+/**
+ * Acting on a live violation.
+ *
+ * Two verbs, and the difference between them is the game.
+ *
+ * A FINE answers the EVENT. It is valid if the contact actually did the thing, which was decided
+ * when the accusation fired and is never shown — so a 69% reading is right about seven times in ten
+ * and there is no way to know which time you are in. It pays, immediately, and it is the operator's
+ * income.
+ *
+ * An INVESTIGATION answers the PERSON. It ignores whether they ran the stop sign and asks whether
+ * they are infected, which is a different question with a different answer. It pays nothing, risks
+ * the public, and is the only route to the mission chain's serious business.
+ *
+ * Public tolerance is a PRICE on both, never a wall: ordering below the bar is always allowed and
+ * always charges resistance in proportion to how far below it you went. That rule predates this
+ * system and it would be wrong to break it here — being able to do the indefensible thing is the
+ * whole reason the meter exists.
+ */
+const FINE_INVALID_RESISTANCE = 0.012;
+const INVESTIGATE_FALSE_RESISTANCE = 0.02;
+
+/** How far below the public bar this call sat, 0 when it cleared. */
+function shortfallOf(certainty: number): number {
+  return Math.max(0, tolerance.threshold - certainty);
+}
+
+function issueFine(index: number): boolean {
+  if (!unitField) return false;
+  const live = unitField.liveOf(index);
+  if (!live) return false;
+  // Suspicious-class events have no fine attached: there is no ticket for "we didn't like the look
+  // of it", and being unable to monetise those is what pushes the operator toward investigating.
+  if (live.def.fine <= 0) {
+    sound.play('denied');
+    toast('◈ NO CITATION APPLIES · INVESTIGATE OR STAND DOWN');
+    return false;
+  }
+
+  const under = shortfallOf(live.certainty);
+  if (under > 0) resistance.aggravate(Math.min(0.08, under * 0.14));
+
+  unitField.clearLive(index);
+  const pos = unitField.positionOf(index);
+  if (live.truth) {
+    progression.award(live.def.fine);
+    missions.report('fine', true);
+    sound.play('purchase');
+    if (pos) reactAt(pos.lon, pos.lat, 'approve');
+    toast(`◈ CITATION ISSUED · ${live.def.label} · +${live.def.fine} TOKENS`);
+  } else {
+    // Wrong. The money still arrives — the citation was issued and the contact still has to pay it,
+    // which is precisely the problem with charging people on a machine's guess.
+    progression.award(live.def.fine);
+    missions.report('fine', false);
+    resistance.aggravate(FINE_INVALID_RESISTANCE);
+    sound.play('denied');
+    if (pos) reactAt(pos.lon, pos.lat, 'dismay');
+    toast(`◈ CITATION DISPUTED · ${live.def.label} · CONTACT WAS CLEAN`);
+  }
+  updateUnitHud();
+  updateUnitPanel();
+  return true;
+}
+
+function investigateLive(index: number): boolean {
+  if (!unitField) return false;
+  const live = unitField.liveOf(index);
+  if (!live) return false;
+
+  const under = shortfallOf(live.certainty);
+  if (under > 0) resistance.aggravate(Math.min(0.1, under * 0.18));
+
+  const infected = unitField.isInfected(index);
+  unitField.clearLive(index);
+  const pos = unitField.positionOf(index);
+
+  missions.report('investigate', infected);
+  if (infected) {
+    sound.play('commit');
+    if (pos) reactAt(pos.lon, pos.lat, 'approve');
+    toast(`◈ INVESTIGATION UPHELD · ${live.def.label} CONCEALED A THREAT`);
+  } else {
+    resistance.aggravate(INVESTIGATE_FALSE_RESISTANCE);
+    sound.play('denied');
+    if (pos) reactAt(pos.lon, pos.lat, 'dismay');
+    toast('◈ INVESTIGATION CLEARED · NOTHING FOUND · PUBLIC NOTICED');
+  }
+  updateUnitHud();
+  updateUnitPanel();
+  return true;
+}
+
+/** Where the live incident is, so the alert can fly the camera to it. */
+let incidentFocus: { lon: number; lat: number } | undefined;
+
+/**
+ * A point `minM`–`maxM` from somewhere that no obelisk watches and that isn't at sea.
+ *
+ * Shared by the siege and the incident director. Trouble comes out of ground the net doesn't watch,
+ * which is also the ground where infection actually lives — so this is both a spawn rule and a
+ * piece of fiction that holds up.
+ */
+function darkPointNear(
+  lon: number,
+  lat: number,
+  minM: number,
+  maxM: number,
+): { lon: number; lat: number } | null {
+  for (let tries = 0; tries < 80; tries++) {
+    const a = Math.random() * Math.PI * 2;
+    const r = minM + Math.random() * (maxM - minM);
+    const p = destDeg(lat, lon, r, a);
+    if (sensorField && sensorField.isCovered(p.lon, p.lat)) continue;
+    if (theaterMap && theaterMap.heightAt(p.lon, p.lat) < 1) continue; // not out at sea
+    // Inside the theater disc, or it would walk in from off the edge of the map.
+    const c = theaterCenter;
+    if (c) {
+      const mLon = 111_320 * Math.cos((c.lat * Math.PI) / 180);
+      const dx = (p.lon - c.lon) * mLon;
+      const dy = (p.lat - c.lat) * 111_320;
+      if (Math.hypot(dx, dy) > THEATER_RADIUS_M * 0.92) continue;
+    }
+    return p;
+  }
+  return null;
+}
+
+/**
+ * A point `minM`–`maxM` away that is on land and inside the theater. Coverage is not considered.
+ */
+function landPointNear(
+  lon: number,
+  lat: number,
+  minM: number,
+  maxM: number,
+): { lon: number; lat: number } | null {
+  for (let tries = 0; tries < 60; tries++) {
+    const a = Math.random() * Math.PI * 2;
+    const r = minM + Math.random() * (maxM - minM);
+    const p = destDeg(lat, lon, r, a);
+    if (theaterMap && theaterMap.heightAt(p.lon, p.lat) < 1) continue;
+    const c = theaterCenter;
+    if (c) {
+      const mLon = 111_320 * Math.cos((c.lat * Math.PI) / 180);
+      if (Math.hypot((p.lon - c.lon) * mLon, (p.lat - c.lat) * 111_320) > THEATER_RADIUS_M * 0.92) continue;
+    }
+    return p;
+  }
+  return null;
+}
+
+/**
+ * Stand up the incident director. Shares the siege's spawn helper for finding unwatched ground.
+ */
+function startIncidents(field: UnitField) {
+  stopIncidents();
+  incidents = new IncidentDirector(field, {
+    darkPointNear: (lon, lat, minM, maxM) => darkPointNear(lon, lat, minM, maxM),
+    landPointNear: (lon, lat, minM, maxM) => landPointNear(lon, lat, minM, maxM),
+    missionComplete: (id) => missions.isComplete(id),
+    // Trouble starts where there are people to make it: a site is the cheapest proxy for that,
+    // since the network was built where the population is.
+    populatedPoint: () => {
+      const site = sensorField?.randomSite();
+      if (!site) return theaterCenter ?? null;
+      // Offset so incidents don't all happen on top of an obelisk.
+      const mLon = 111_320 * Math.cos((site.lat * Math.PI) / 180);
+      const a = Math.random() * Math.PI * 2;
+      const r = 200 + Math.random() * 900;
+      return { lon: site.lon + (Math.cos(a) * r) / mLon, lat: site.lat + (Math.sin(a) * r) / 111_320 };
+    },
+    on: onIncidentEvent,
+  });
 }
 
 /**
  * Stand up the siege director for this theater. Needs the sensor field (to pick targets) and the
  * unit field (to put an attacker on the board), so it's built with the units, after the obelisks.
  */
+/**
+ * Which tasking has to be cleared before the network starts getting attacked.
+ *
+ * The custody tasking's own briefing opens with "the network is under attack", so the attacks have
+ * to have started by then — but not on day one, when the operator has one site, one quadruped and
+ * no reason yet to think anyone objects to them.
+ */
+const SIEGE_REQUIRES = 'mandate';
+
 function startSiege(field: UnitField) {
   stopSiege();
   if (!sensorField) return;
+  // Nothing walks at the net until the programme is large enough to have provoked anyone.
+  if (!missions.isComplete(SIEGE_REQUIRES)) return;
   const director = new SiegeDirector(field, sensorField, {
     globalIndex: (local) => theaterSiteIndex?.[local] ?? -1,
     detainers: () =>
@@ -759,31 +1081,16 @@ function startSiege(field: UnitField) {
       theaterHome && missions.hasAuth('detain')
         ? { lon: theaterHome.lon, lat: theaterHome.lat, rangeM: GARRISON_DETAIN_M }
         : null,
-    darkPointNear: (lon, lat, minM, maxM) => {
-      // Attackers come out of ground the net doesn't watch, which is also the ground where
-      // infection actually lives — so this is both a rule and a piece of fiction that holds.
-      for (let tries = 0; tries < 80; tries++) {
-        const a = Math.random() * Math.PI * 2;
-        const r = minM + Math.random() * (maxM - minM);
-        const p = destDeg(lat, lon, r, a);
-        if (sensorField && sensorField.isCovered(p.lon, p.lat)) continue;
-        if (theaterMap && theaterMap.heightAt(p.lon, p.lat) < 1) continue; // not out at sea
-        // Inside the theater disc, or it would walk in from off the edge of the map.
-        const c = theaterCenter;
-        if (c) {
-          const mLon = 111_320 * Math.cos((c.lat * Math.PI) / 180);
-          const dx = (p.lon - c.lon) * mLon;
-          const dy = (p.lat - c.lat) * 111_320;
-          if (Math.hypot(dx, dy) > THEATER_RADIUS_M * 0.92) continue;
-        }
-        return p;
-      }
-      return null;
-    },
+    darkPointNear,
     on: onSiegeEvent,
   });
   scene.primitives.add(director.wrecks);
   siege = director;
+}
+
+function stopIncidents() {
+  incidents?.cancel();
+  incidents = undefined;
 }
 
 function stopSiege() {
@@ -839,7 +1146,16 @@ function removeUnits() {
     scene.primitives.remove(cuffs.collection);
     cuffs = undefined;
   }
+  if (pings) {
+    scene.primitives.remove(pings.collection);
+    pings = undefined;
+  }
+  if (dropSites) {
+    scene.primitives.remove(dropSites.collection); // remove() destroys it, taking the drops with it
+    dropSites = undefined;
+  }
   stopSiege();
+  stopIncidents();
 }
 
 function updateUnitHud() {
@@ -878,11 +1194,15 @@ scene.preUpdate.addEventListener(() => {
     resolveArrivals(dt);
     updateScanBeams(dt);
     updateSiegeSparks(dt);
+    runLiveViolations(dt);
+    updatePings(dt);
     runAutoMarking(dt);
     runDelivery(dt);
     runAssetGoodwill(dt);
     siege?.update(dt);
+    incidents?.update(dt);
     updateSiegeHud();
+    updateIncidentHud();
     rebuildRoster();
     refreshRoster();
     updateRouteLayer();
@@ -896,7 +1216,121 @@ scene.preUpdate.addEventListener(() => {
   sparks?.update(dt);
   cuffs?.update(dt);
   impacts?.update(dt);
+  dropSites?.update(dt);
 });
+
+/**
+ * Put an airdropped site on the ground.
+ *
+ * The drop is added to the LIVE sensor field rather than to any parallel structure, which is what
+ * makes it a real obelisk: coverage, servicing and the alert glow all come from the field, so it
+ * inherits every network upgrade the campaign owns with no code that knows it is temporary.
+ */
+function airdropAt(lon: number, lat: number): boolean {
+  if (!dropSites || !sensorField || !theaterMap || mode !== 'theater') return false;
+  if (!progression.has('airdrop')) return false;
+  if (progression.tokens < AIRDROP_COST) {
+    sound.play('denied');
+    toast(`◈ INSUFFICIENT FUNDING · ${AIRDROP_COST} TOKENS PER SITE`);
+    return false;
+  }
+  const ground = theaterMap.heightAt(lon, lat);
+  if (ground < 1) {
+    sound.play('denied');
+    toast('◈ CANNOT DEPLOY AT SEA');
+    return false;
+  }
+
+  const apex = dropSites.add(lon, lat, ground);
+  if (sensorField.addSite(lon, lat, apex) < 0) {
+    sound.play('denied');
+    toast('◈ DEPLOYMENT LIMIT REACHED IN THIS THEATER');
+    return false;
+  }
+  progression.spend(AIRDROP_COST);
+  sound.play('purchase');
+  // A drop lands: the same impact vocabulary as everything else that arrives from the air.
+  impacts?.at(apex, 160, 0.8, 18);
+  reactCompany();
+  toast(`◈ SITE DEPLOYED · ${dropSites.count} ACTIVE · −${AIRDROP_COST} TOKENS`);
+  updateUnitHud();
+  return true;
+}
+
+/** Where the home garrison throws a restraint round from. */
+function garrisonThrowPoint(): Cesium.Cartesian3 | undefined {
+  if (!theaterHome || !theaterMap) return undefined;
+  const apex = sensorField?.servicingApex(theaterHome.lon, theaterHome.lat);
+  return apex
+    ? Cesium.Cartesian3.clone(apex)
+    : Cesium.Cartesian3.fromDegrees(
+        theaterHome.lon,
+        theaterHome.lat,
+        theaterMap.heightAt(theaterHome.lon, theaterHome.lat) + 120,
+      );
+}
+
+/** Close the ground menu, if one is up. */
+function closeGroundMenu() {
+  document.getElementById('g-ground-menu')?.remove();
+}
+
+/**
+ * The ground menu.
+ *
+ * Right-clicking open ground used to be an immediate move order, and for a campaign with no airdrop
+ * capability it still is — the menu only appears once there is more than one thing that a click on
+ * empty ground could mean. That keeps the fast gesture fast for anyone who hasn't bought the
+ * capability, and matches how right-clicking a CONTACT already works.
+ */
+function openGroundMenu(screenX: number, screenY: number, lon: number, lat: number, append: boolean) {
+  closeGroundMenu();
+  const sel = unitField?.selectedPlatform();
+  const box = document.createElement('div');
+  box.id = 'g-ground-menu';
+  box.className = 'g-context';
+  box.style.left = `${screenX}px`;
+  box.style.top = `${screenY}px`;
+  box.innerHTML = `<div class="gc-head">${lat.toFixed(4)}, ${lon.toFixed(4)}</div>`;
+
+  if (sel) {
+    const move = document.createElement('button');
+    move.type = 'button';
+    move.className = 'gc-item';
+    move.innerHTML = `<span class="gc-label">${append ? 'QUEUE WAYPOINT' : 'MOVE HERE'}</span>`;
+    move.addEventListener('click', () => {
+      closeGroundMenu();
+      if (unitField?.orderSelected(lon, lat, append)) {
+        sound.play('click');
+        updateUnitPanel();
+      }
+    });
+    box.append(move);
+  }
+
+  const drop = document.createElement('button');
+  drop.type = 'button';
+  drop.className = 'gc-item';
+  const short = progression.tokens < AIRDROP_COST;
+  drop.disabled = short;
+  drop.innerHTML =
+    `<span class="gc-label">AIRDROP OBELISK · ${AIRDROP_COST}</span>` +
+    (short ? `<span class="gc-why">INSUFFICIENT FUNDING</span>` : '');
+  if (!short) {
+    drop.addEventListener('click', () => {
+      closeGroundMenu();
+      airdropAt(lon, lat);
+    });
+  }
+  box.append(drop);
+
+  document.body.append(box);
+  const dismiss = () => {
+    closeGroundMenu();
+    window.removeEventListener('pointerdown', dismiss, true);
+  };
+  window.setTimeout(() => window.addEventListener('pointerdown', dismiss, true), 0);
+}
 
 /**
  * Throw a restraint round at a point, from whatever plausibly threw it.
@@ -976,14 +1410,17 @@ function updateSiegeSparks(dt: number) {
     sparkDebt = 0;
     return;
   }
-  const at = unitField.worldPositionOf(a.index);
-  if (!at) return;
+  // Sparks come off the OBELISK, at its base — that is where the cutting is happening. Emitting
+  // them from the attacker put the shower on a person standing next to a structure, which read as
+  // the person being on fire rather than as the structure being taken apart.
+  if (!theaterMap) return;
+  const base = Cesium.Cartesian3.fromDegrees(a.tlon, a.tlat, theaterMap.heightAt(a.tlon, a.tlat) + 4);
   // Accumulate fractional emissions so the shower is frame-rate independent.
   sparkDebt += dt * SPARK_RATE_HZ;
   const n = Math.floor(sparkDebt);
   if (n <= 0) return;
   sparkDebt -= n;
-  sparks.emit(at, Math.min(n, 6));
+  sparks.emit(base, Math.min(n, 6));
 }
 
 /**
@@ -1030,6 +1467,20 @@ function runDelivery(dt: number) {
 }
 
 /**
+ * Give a thin theater something to do on arrival.
+ *
+ * Only when coverage is genuinely sparse. A developed net already has plenty inside it, and
+ * arranging a target there would be putting a thumb on a scale that doesn't need it.
+ */
+const STARTER_TARGET_MAX_SITES = 3;
+function seedStarterTarget(field: UnitField) {
+  if (!sensorField || sensorField.fixedCount > STARTER_TARGET_MAX_SITES) return;
+  const site = theaterHome ?? sensorField.randomSite();
+  if (!site) return;
+  field.seedStarterTarget(site.lon, site.lat, sensorRangeM * 0.85);
+}
+
+/**
  * Hidden pockets of infected out in unwatched ground.
  *
  * Count scales inversely with how well the theater is covered: a fully proliferated state gets one
@@ -1070,7 +1521,7 @@ function seedHiddenPockets(field: UnitField) {
 const COLLATERAL_RESISTANCE = 0.02;
 function resolveArrivals(dt: number) {
   if (!unitField) return;
-  const { strikes, detainedAttacker, detainments } = unitField.resolveArrivals(dt);
+  const { strikes, detainedAttacker, detainedIncidents, detainments } = unitField.resolveArrivals(dt);
   // Every detainment throws, whether or not it was the siege attacker.
   for (const d of detainments) cuffs?.fire(d.from, d.to);
   if (detainedAttacker) {
@@ -1079,6 +1530,12 @@ function resolveArrivals(dt: number) {
     sound.play('order');
     reactCompany();
     toast('◈ ATTACKER DETAINED');
+    updateUnitHud();
+  }
+  if (detainedIncidents > 0) {
+    sound.play('order');
+    reactCompany();
+    toast(`◈ ${detainedIncidents} CONTACT${detainedIncidents > 1 ? 'S' : ''} DETAINED`);
     updateUnitHud();
   }
   for (const strike of strikes) {
@@ -1097,10 +1554,17 @@ function resolveArrivals(dt: number) {
       sparks?.emit(Cesium.Cartesian3.fromDegrees(strike.lon, strike.lat, h + 6), 18);
     }
     sound.play('laser');
-    siege?.noteAttackerStruck();
+    // Only a strike that actually caught the attacker ends the siege. This used to fire on every
+    // strike, so blowing up an unrelated contact on the far side of the theater silently reset the
+    // attack clock and bought the operator a free reprieve.
+    if (strike.killedAttacker) siege?.noteAttackerStruck();
 
     if (strike.collateral > 0) {
-      resistance.transgress(Math.min(1, COLLATERAL_RESISTANCE * strike.collateral));
+      // Flat, not squared. This was routed through transgress(), whose shortfall curve turned six
+      // dead bystanders into a 0.003 movement — the collateral was being counted and then thrown
+      // away. An area weapon killing people who were not the target is not a borderline judgement
+      // call and should not be priced like one.
+      resistance.aggravate(Math.min(1, COLLATERAL_RESISTANCE * strike.collateral));
       reactAt(strike.lon, strike.lat, 'dismay');
       toast(
         `◈ STRIKE · ${strike.killed} DOWN · ${strike.collateral} BYSTANDER${strike.collateral > 1 ? 'S' : ''} LOST`,
@@ -1769,6 +2233,58 @@ const tally = <K extends string>(counts: Record<K, number>, abbr: Record<K, stri
     .join(' · ') || '—';
 
 /**
+ * The live accusation block.
+ *
+ * Shows the net's confidence against the public bar side by side, because that comparison IS the
+ * decision — everything else on the card is context for it. The note underneath says plainly what
+ * acting below the bar will cost, since the whole design depends on the operator choosing to do it
+ * anyway sometimes rather than being surprised by the bill.
+ */
+let liveShownFor = -1;
+function renderLive(index: number) {
+  const box = el('up-live') as HTMLElement | null;
+  if (!box) return;
+  const live = index >= 0 ? (unitField?.liveOf(index) ?? null) : null;
+  if (!live) {
+    box.hidden = true;
+    liveShownFor = -1;
+    return;
+  }
+  box.hidden = false;
+  liveShownFor = index;
+
+  const cert = Math.round(live.certainty * 100);
+  const bar = Math.round(tolerance.threshold * 100);
+  const clears = live.certainty >= tolerance.threshold;
+  box.classList.toggle('below', !clears);
+
+  setText('ul-what', live.def.label);
+  setText('ul-age', `${Math.max(0, Math.round(VIOLATION_TTL_S - live.ageS))}s`);
+  setText('ul-cert-v', `${cert}%`);
+  setText('ul-tol-v', `${bar}%`);
+  const cbar = el('ul-cert') as HTMLElement | null;
+  if (cbar) {
+    cbar.style.width = `${cert}%`;
+    cbar.className = clears ? 'ok' : 'bad';
+  }
+  const tbar = el('ul-tol') as HTMLElement | null;
+  if (tbar) tbar.style.width = `${bar}%`;
+
+  const fineBtn = el('ul-fine') as HTMLButtonElement | null;
+  if (fineBtn) {
+    const fineable = live.def.fine > 0;
+    fineBtn.disabled = !fineable;
+    fineBtn.textContent = fineable ? `FINE · ${live.def.fine}` : 'NO CITATION';
+  }
+  setText(
+    'ul-note',
+    clears
+      ? 'Clears the public bar. Acting here is uncontroversial.'
+      : `${bar - cert} points below the bar. Acting anyway will harden the ground.`,
+  );
+}
+
+/**
  * Draw the selected unit's charge sheet, worst offence first. `record < 0` means the row doesn't
  * apply at all (the drone), which is different from a clean record and reads differently.
  */
@@ -1944,6 +2460,7 @@ function updateUnitPanel() {
     renderMug(one.id, isPlatform ? (one.kind as PlatformId) : null);
     renderCase(isPlatform ? null : one);
     renderCharges(isPlatform ? null : one.record);
+    renderLive(isPlatform ? -1 : one.index);
     renderOrder(one.mark, one.markTimer);
     if (dot) (dot as HTMLElement).style.color = isPlatform ? DRONE_HEX : BAND_HEX[band];
     setText(
@@ -2153,6 +2670,32 @@ function updateTaskingHud() {
  * that matter — how far out it still is, and how long the site has left — both move continuously.
  */
 let siegeFocus: { lon: number; lat: number } | null = null;
+/**
+ * The incident alert.
+ *
+ * Its bar runs DOWN — it is time remaining, not progress made. A siege bar filling toward a site
+ * falling and an incident bar draining toward someone dying are different feelings, and the one
+ * that matters more should be the one that looks like it is running out.
+ */
+function updateIncidentHud() {
+  const box = el('g-incident');
+  if (!box) return;
+  const a = incidents?.active();
+  if (mode !== 'theater' || !a) {
+    (box as HTMLElement).hidden = true;
+    return;
+  }
+  (box as HTMLElement).hidden = false;
+  incidentFocus = { lon: a.lon, lat: a.lat };
+  setText('gi-title', a.def.name);
+  setText('gi-brief', a.def.brief);
+  setText('gi-count', `${a.members} INVOLVED`);
+  const urgent = a.remaining <= a.def.fuseS * 0.34;
+  box.classList.toggle('contact', urgent);
+  const bar = el('gi-bar');
+  if (bar) (bar as HTMLElement).style.width = `${Math.max(0, (a.remaining / a.def.fuseS) * 100)}%`;
+}
+
 function updateSiegeHud() {
   const box = el('g-siege');
   if (!box) return;
@@ -2350,12 +2893,16 @@ function enterTheater(carto: Cesium.Cartographic) {
   // Apply immediately, NOT on flyTo completion: a flight that's interrupted (user grabs the
   // camera mid-flight) would otherwise never hand over the C2 scheme.
   applyC2Controls();
-  // Arrive framed on the city, not at theater-overview height: buildings are real-scale, so at the
-  // old 95 km they were sub-pixel and you saw a road network with no buildings. flyToBoundingSphere
-  // aims the camera AT the centre (robust to terrain height) at an oblique range that reads as a
-  // skyline — the shot a portfolio piece wants. Zoom out for the theater overview.
-  camera.flyToBoundingSphere(new Cesium.BoundingSphere(Cesium.Cartesian3.fromDegrees(lon, lat, 0), 3500), {
-    offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-38), 7500),
+  // Arrive able to see the WHOLE theater.
+  //
+  // This used to land at 7.5 km, framed on downtown for the skyline. It made a good screenshot and
+  // a bad opening move: the operator arrived inside a city with no idea where the rest of their
+  // 200-mile disc was, and the first thing they did every time was pull the camera back out. Now
+  // the disc fits the frame and they descend into whichever part of it they choose.
+  //
+  // 2.2x the radius clears the disc at this pitch with margin for the oblique.
+  camera.flyToBoundingSphere(new Cesium.BoundingSphere(Cesium.Cartesian3.fromDegrees(lon, lat, 0), THEATER_RADIUS_M), {
+    offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-52), THEATER_RADIUS_M * 2.2),
     duration: 3.0,
   });
   void buildTheater(lon, lat, ++theaterToken);
@@ -2439,7 +2986,10 @@ async function buildTheater(lon: number, lat: number, tok: number) {
         Cesium.Cartesian3.fromDegrees(lon, lat, 0),
         THEATER_RADIUS_M * 1.1 + 10_000,
       );
-      const built = buildRoadPrimitive(groups, map.heightAt, 12, bounds, ROAD_MIN_HALF_PX);
+      // 4 m, down from 12. The lift only exists to beat z-fighting against the terrain mesh, and
+      // 12 m of it was visible as a hover once the ribbon became a real ground-plane surface —
+      // roads looked like they were floating a storey above the land they were drawn on.
+      const built = buildRoadPrimitive(groups, map.heightAt, 4, bounds, ROAD_MIN_HALF_PX);
       if (built) {
         roadPrimitive = scene.primitives.add(built.primitive);
         setText('g-roads', `${built.segments} SEG · z${net.zoom} · ${net.tiles} TILES`);
@@ -2640,13 +3190,13 @@ interface ContactOption {
  */
 function contactOptions(
   kind: PlatformId | null,
-  opts_: { isAttacker: boolean; garrisonInRange: boolean } = { isAttacker: false, garrisonInRange: false },
+  opts_: { threat: boolean; garrisonInRange: boolean } = { threat: false, garrisonInRange: false },
 ): ContactOption[] {
   const opts: ContactOption[] = [];
 
   // The home site can take an attacker off its own doorstep. Self-defence of the network, so it
   // needs no custody authority and no hardware — but only ever against something attacking it.
-  if (opts_.isAttacker && opts_.garrisonInRange) {
+  if (opts_.threat && opts_.garrisonInRange) {
     opts.push({ action: 'detain', label: 'DETAIN · HOME GARRISON', blocked: null, immediate: true });
   }
 
@@ -2657,10 +3207,11 @@ function contactOptions(
   // Innate self-defence: usable only on something actively pulling a site down, and never a
   // substitute for the custody authority the chain grants for detaining the public.
   const innate =
-    opts_.isAttacker && (PLATFORM_BY_ID.get(kind)?.selfDefence?.includes('detain') ?? false);
+    opts_.threat && (PLATFORM_BY_ID.get(kind)?.selfDefence?.includes('detain') ?? false);
   opts.push({
     action: 'detain',
-    label: innate ? 'DETAIN ATTACKER' : 'DETAIN',
+    // Same word either way. What differs is whether it is blocked, and the reason says why.
+    label: 'DETAIN',
     blocked: innate
       ? null
       : !missions.hasAuth('detain')
@@ -2718,7 +3269,9 @@ function openContactMenu(
   box.style.top = `${screenY}px`;
   box.innerHTML = `<div class="gc-head">${contact.id}</div>`;
 
-  const isAttacker = unitField?.isAttacker(contact.index) ?? false;
+  // Anything actively causing trouble — an obelisk attacker, a rioter, a brawler, an assassin.
+  const threat = unitField?.isThreatActor(contact.index) ?? false;
+  const isSiegeAttacker = unitField?.isAttacker(contact.index) ?? false;
   const garrisonInRange =
     !!theaterHome &&
     Math.hypot(
@@ -2726,7 +3279,7 @@ function openContactMenu(
       (contact.lat - theaterHome.lat) * 111_320,
     ) <= GARRISON_DETAIN_M;
 
-  for (const opt of contactOptions(kind, { isAttacker, garrisonInRange })) {
+  for (const opt of contactOptions(kind, { threat, garrisonInRange })) {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = `gc-item${opt.action === 'execute' || opt.action === 'strike' ? ' lethal' : ''}`;
@@ -2740,10 +3293,19 @@ function openContactMenu(
         if (!unitField) return;
         // The garrison doesn't travel — it acts, now.
         if (opt.immediate) {
-          if (siege?.detain()) {
+          // A siege attacker goes through the siege director, which owns the attack clock;
+          // anything else is an incident participant and is simply taken.
+          const from = garrisonThrowPoint();
+          const to = unitField.worldPositionOf(contact.index);
+          const took = isSiegeAttacker
+            ? !!siege?.detain()
+            : unitField.detainThreatActor(contact.index) !== null;
+          if (took) {
+            // The siege path throws its own round from the event; this one has to throw its own.
+            if (!isSiegeAttacker && from && to) cuffs?.fire(from, to);
             sound.play('order');
             reactCompany();
-            toast('◈ ATTACKER DETAINED · HOME GARRISON');
+            toast('◈ CONTACT DETAINED · HOME GARRISON');
             updateUnitHud();
           }
           return;
@@ -2788,9 +3350,15 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
   }
 
   closeContactMenu();
-  if (!sel) return; // a plain move order needs something to move
+  closeGroundMenu();
   const g = groundAt(m.position);
-  if (g && unitField.orderSelected(g.lon, g.lat, append)) {
+  if (!g) return;
+  // Once airdrop is commissioned, a click on empty ground is ambiguous and has to ask.
+  if (progression.has('airdrop')) {
+    openGroundMenu(m.position.x, m.position.y, g.lon, g.lat, append);
+    return;
+  }
+  if (unitField.orderSelected(g.lon, g.lat, append)) {
     sound.play('click');
     updateUnitPanel();
   }
@@ -2816,6 +3384,9 @@ window.addEventListener('blur', () => {
 el('g-exit')?.addEventListener('click', exitTheater);
 
 // The siege alert is a jump-to: an attack you can't see is one you can't do anything about.
+el('g-incident')?.addEventListener('click', () => {
+  if (incidentFocus) focusOn(incidentFocus.lon, incidentFocus.lat);
+});
 el('g-siege')?.addEventListener('click', () => {
   if (siegeFocus) focusOn(siegeFocus.lon, siegeFocus.lat, 6000);
 });
@@ -2971,6 +3542,23 @@ bindInterfaceSounds();
   const paintTokens = pct('dev-tokens', () => progression.tokens, (v) => progression.setTokens(v),
     () => progression.tokens.toLocaleString('en-US'));
 
+  // Grant buttons. The slider tops out at a million and steps in hundreds, which is fine for
+  // setting a figure and useless for topping up mid-theater — these add to whatever is there.
+  for (const [id, amount] of [
+    ['dev-funds-500', 500],
+    ['dev-funds-5k', 5_000],
+    ['dev-funds-50k', 50_000],
+    ['dev-funds-500k', 500_000],
+  ] as [string, number][]) {
+    el(id)?.addEventListener('click', () => {
+      progression.award(amount);
+      paintTokens();
+      sound.play('purchase');
+      toast(`◈ +${amount.toLocaleString('en-US')} TOKENS GRANTED`);
+      updateUnitHud();
+    });
+  }
+
   // Mission chain: one button per stage, plus a "nothing cleared" reset at the top.
   const chain = el('dev-chain');
   const paintChain = () => {
@@ -3080,11 +3668,34 @@ bindInterfaceSounds();
     toast('CAMPAIGN RESET · WASHINGTON DOWNTOWN');
   });
 
+  // Incident triggers. These fire the real thing, not a preview — same spawn, same consequences.
+  for (const kind of ['riot', 'chase', 'altercation', 'assassination'] as IncidentKind[]) {
+    el(`dev-inc-${kind}`)?.addEventListener('click', () => {
+      if (mode !== 'theater' || !incidents) {
+        sound.play('denied');
+        toast('◈ ENTER A THEATER FIRST');
+        return;
+      }
+      if (!incidents.open(kind)) {
+        sound.play('denied');
+        // Either something is already running, or the theater couldn't supply what it needs — an
+        // assassination with no protected asset on the board, for instance.
+        toast('◈ CANNOT OPEN INCIDENT · ONE MAY ALREADY BE RUNNING');
+      }
+    });
+  }
+
   el('dev-exit-title')?.addEventListener('click', () => {
     el('dev-panel')?.setAttribute('hidden', '');
     exitToTitle();
   });
 }
+el('ul-fine')?.addEventListener('click', () => {
+  if (liveShownFor >= 0) issueFine(liveShownFor);
+});
+el('ul-investigate')?.addEventListener('click', () => {
+  if (liveShownFor >= 0) investigateLive(liveShownFor);
+});
 el('up-close')?.addEventListener('click', () => {
   unitField?.deselect();
   hideUnitPanel();
@@ -3194,6 +3805,22 @@ if (import.meta.env.DEV) {
     get cuffs() {
       return cuffs;
     },
+    get pings() {
+      return pings;
+    },
+    get dropSites() {
+      return dropSites;
+    },
+    airdropAt,
+    openGroundMenu,
+    issueFine,
+    investigateLive,
+    VIOLATIONS,
+    get incidents() {
+      return incidents;
+    },
+    INCIDENTS,
+    AIRDROP_COST,
     throwCuffsAt,
     openContactMenu,
     contactOptions,

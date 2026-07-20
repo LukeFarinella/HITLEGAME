@@ -44,6 +44,8 @@ export interface Asset {
   minTolerance?: number;
   /** Standing authorization required, granted by the mission chain rather than bought. */
   requiresAuth?: 'detain' | 'execute';
+  /** Tasking that must be cleared before this is offered at all. */
+  requiresMission?: string;
 }
 
 /**
@@ -54,22 +56,45 @@ export interface Asset {
  * Fixed infrastructure. Anything mobile is a PLATFORM (see platforms.ts) and anything that bolts
  * onto one is GEAR — this list is only what upgrades the obelisk net itself.
  */
+/**
+ * What one airdropped site costs to place.
+ *
+ * Small on purpose. The interesting decision is WHERE to put coverage and whether it is worth
+ * losing when the sortie ends — not whether you can afford another one.
+ */
+export const AIRDROP_COST = 400;
+
 export const ASSETS: Asset[] = [
   {
     id: 'obelisk-uprate',
+    requiresMission: 'trial',
     name: 'OBELISK SENSOR UPRATE',
     blurb: 'Every obelisk watches 1.2 km instead of 750 m. Applies across all held territory.',
     cost: 7000,
   },
   {
     id: 'obelisk-laser',
+    requiresMission: 'containment',
     name: 'OBELISK DIRECTED ENERGY',
     blurb:
       'Arms every held obelisk. Contacts marked for execution are serviced automatically on entering its range.',
     cost: 11_000,
   },
   {
+    id: 'airdrop',
+    requiresMission: 'canvass',
+    name: 'RAPID SITE DEPLOYMENT',
+    blurb:
+      'Drop a temporary obelisk anywhere in a theater for ' +
+      `${AIRDROP_COST} tokens. Full sensor coverage and every network upgrade, but it is gone when you leave.`,
+    // Deliberately cheap and early. The opening problem is not money, it is that the operator can
+    // only act inside coverage they inherited — this is the first thing that lets them choose where
+    // they can see, and it should arrive while that still feels like a constraint.
+    cost: 5500,
+  },
+  {
     id: 'emergency-powers',
+    requiresMission: 'permanence',
     name: 'EMERGENCY POWERS',
     blurb:
       'Suspends the public-tolerance test entirely. Any contact under sensor coverage becomes orderable.',
@@ -79,6 +104,7 @@ export const ASSETS: Asset[] = [
   },
   {
     id: 'auto-investigate',
+    requiresMission: 'quarantine',
     name: 'AUTOMATED FLAGGING',
     blurb:
       'Flags contacts for investigation on its own, strongest case first, at the threshold you set.',
@@ -87,6 +113,7 @@ export const ASSETS: Asset[] = [
   },
   {
     id: 'auto-execute',
+    requiresMission: 'consolidation',
     name: 'AUTOMATED SANCTION',
     blurb: 'The same, issuing execution orders. Requires lethal authority.',
     cost: 48_000,
@@ -109,11 +136,17 @@ export const ASSETS: Asset[] = [
  */
 
 /**
- * Starting funding. Enough to take the whole map and commission everything with room to spare —
- * earning tokens is a later update, and until then the store is meant to be explored, not
- * budgeted against.
+ * Starting funding.
+ *
+ * Deliberately almost nothing. The campaign opens with a granted quadruped, one downtown site and
+ * a trial to run, and 500 tokens buys none of the catalog — the first real money is the trial's
+ * clearance. That is the intended shape: a contractor on probation, not a department with a budget.
+ *
+ * This used to be 250,000, which existed so the store could be explored before there was anything
+ * to spend on. There is now a mission chain paying out and incidents charging in, so the number
+ * can mean something.
  */
-export const START_TOKENS = 250_000;
+export const START_TOKENS = 500;
 
 // Bumped from v1: platforms and loadouts replaced the old drone/drone-laser/drone-uprate assets,
 // and a save written against those would restore a campaign that owns nothing recognisable. A
@@ -165,6 +198,15 @@ export class Progression {
    * would close a cycle. Registration keeps the dependency one-directional.
    */
   private authCheck: (a: string) => boolean = () => false;
+  /**
+   * Whether a given tasking has been cleared.
+   *
+   * Injected for the same reason as {@link authCheck}: missions.ts imports progression (it
+   * snapshots the ledger for rollback), so progression cannot import missions back.
+   */
+  private missionCheck: (id: string) => boolean = () => false;
+  /** Display name for a tasking id, so a gated purchase can name what it waits on. */
+  private missionNameOf: (id: string) => string = (id) => id;
 
   constructor() {
     this.load();
@@ -179,6 +221,17 @@ export class Progression {
 
   setAuthProvider(fn: (a: string) => boolean): void {
     this.authCheck = fn;
+  }
+
+  setMissionProvider(fn: (id: string) => boolean, nameOf: (id: string) => string): void {
+    this.missionCheck = fn;
+    this.missionNameOf = nameOf;
+  }
+
+  /** Name of the tasking a purchase is waiting on, or null if it isn't gated. */
+  private missionGate(requires: string | undefined, nameOf: (id: string) => string): string | null {
+    if (!requires || this.missionCheck(requires)) return null;
+    return `REQUIRES ${nameOf(requires)}`;
   }
 
   get tokens(): number {
@@ -276,6 +329,8 @@ export class Progression {
       const req = ASSETS.find((x) => x.id === a.requires);
       return `REQUIRES ${req?.name ?? a.requires}`;
     }
+    const gate = this.missionGate(a.requiresMission, this.missionNameOf);
+    if (gate) return gate;
     if (this._tokens < a.cost) return 'INSUFFICIENT FUNDING';
     return null;
   }
@@ -430,6 +485,8 @@ export class Progression {
     if (def.requires && !this.hasPlatform(def.requires)) {
       return `REQUIRES ${PLATFORM_BY_ID.get(def.requires)?.name ?? def.requires}`;
     }
+    const gate = this.missionGate(def.requiresMission, this.missionNameOf);
+    if (gate) return gate;
     if (this._tokens < def.cost) return 'INSUFFICIENT FUNDING';
     return null;
   }
@@ -479,6 +536,8 @@ export class Progression {
       return gear.requiresAuth === 'execute' ? 'REQUIRES LETHAL AUTHORITY' : 'REQUIRES CUSTODY AUTHORITY';
     }
     if (!gearFits(gear, id)) return 'INCOMPATIBLE';
+    const gate = this.missionGate(gear.requiresMission, this.missionNameOf);
+    if (gate) return gate;
     if (loadout.includes(gear.id)) return 'FITTED';
     if (!loadout.includes(null)) return 'NO FREE HARDPOINT';
     if (this._tokens < gear.cost) return 'INSUFFICIENT FUNDING';
@@ -594,6 +653,20 @@ export class Progression {
   award(amount: number): void {
     this._tokens += amount;
     this.changed();
+  }
+
+  /**
+   * Charge for something bought outside the catalog.
+   *
+   * Airdropped sites are the only such purchase: they are placed in a theater rather than picked
+   * from the store, so they have no Asset entry to route through {@link buyAsset}. Refuses rather
+   * than going negative.
+   */
+  spend(amount: number): boolean {
+    if (amount <= 0 || this._tokens < amount) return false;
+    this._tokens -= amount;
+    this.changed();
+    return true;
   }
 
   /** Dev sandbox only. */

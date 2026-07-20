@@ -1015,7 +1015,7 @@ body:has(#globe-ui) #hint { display: none; }
 /* ---------- contact menu (right-click a unit) ----------
    Asks what to do rather than guessing, and shows the unavailable options with the reason — the
    loadout screen shouldn't be the only place to learn what a platform is missing. */
-#g-context {
+#g-context, .g-context {
   position: fixed; z-index: 240;
   min-width: 208px;
   pointer-events: auto;
@@ -1495,3 +1495,115 @@ body.dev-open #c2-tasking { display: none; }
   #unit-panel { left: 12px; right: 12px; width: auto; bottom: auto; top: calc(140px + env(safe-area-inset-top, 0px)); }
   #g-roster { max-height: 22vh; }
 }
+
+/* ===== INCIDENT ALERT ===========================================================================
+   Same rail and same shape as the siege alert, docked directly beneath it. The two can run at once
+   — a riot during a siege is a real situation — so this gets its own fixed slot rather than
+   competing for one. Amber rather than red: the siege is an attack on us, an incident is the
+   theater doing something to itself. */
+
+#g-incident {
+  position: absolute;
+  /* Below the siege alert's slot, whether or not one is currently showing. */
+  top: calc(206px + 132px + env(safe-area-inset-top, 0px));
+  right: calc(clamp(20px, 4vw, 44px) + 42px);
+  z-index: 61;
+  width: 224px;
+  pointer-events: auto; cursor: pointer;
+  font-family: var(--mono);
+  border: 1px solid var(--warn); border-left: 2px solid var(--warn);
+  background: rgba(32, 24, 8, .78); backdrop-filter: blur(6px);
+  padding: 8px 11px;
+  display: flex; flex-direction: column; gap: 6px;
+  animation: up-in .16s ease-out;
+}
+#g-incident[hidden] { display: none; }
+#g-incident .gs-dot { background: var(--warn); }
+#g-incident #gi-brief { font-size: 9px; line-height: 1.4; text-align: right; }
+/* Time running out. The bar drains rather than fills, so this is the last stretch of it. */
+#g-incident.contact { border-color: var(--red); animation: siege-pulse 1.1s ease-in-out infinite; }
+#g-incident .gs-bar i { background: var(--warn); }
+#g-incident.contact .gs-bar i { background: var(--red); }
+
+@media (max-width: 860px) {
+  #g-incident { display: none; }
+}
+
+/* ---- what a tasking releases ----
+   Sits under the pay line in a chain row. Money is the least interesting half of a reward; this is
+   the half that changes what the operator can do. */
+.c2-unlocks {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
+  margin-top: 6px;
+}
+.c2-unlocks-k {
+  font: 600 8px/1 var(--mono);
+  letter-spacing: .22em;
+  color: var(--ash);
+  margin-right: 2px;
+}
+.c2-unlock {
+  font: 500 8.5px/1 var(--mono);
+  letter-spacing: .06em;
+  color: var(--steel);
+  border: 1px solid var(--gunmetal);
+  background: var(--graphite-2);
+  padding: 3px 5px;
+}
+.c2-row.mission.complete .c2-unlock { color: var(--ok); border-color: rgba(79,158,122,.4); }
+
+/* ===== LIVE VIOLATION BLOCK =====================================================================
+   The main thing an operator acts on, so it sits above the charge sheet and looks like an alert
+   rather than a readout. Amber when it clears the public bar, red-edged when it does not. */
+
+.up-live {
+  margin-top: 10px;
+  border: 1px solid var(--warn);
+  border-left: 2px solid var(--warn);
+  background: rgba(40, 31, 8, .55);
+  padding: 8px 10px;
+  display: flex; flex-direction: column; gap: 7px;
+  animation: up-in .14s ease-out;
+}
+.up-live[hidden] { display: none; }
+/* Below the bar: acting is allowed and will cost. The border says so before the note does. */
+.up-live.below { border-color: var(--red); border-left-color: var(--red); background: rgba(44, 14, 10, .55); }
+
+.ul-head { display: flex; justify-content: space-between; align-items: baseline; }
+.ul-tag {
+  font: 600 8px/1 var(--mono); letter-spacing: .26em; color: var(--warn);
+}
+.up-live.below .ul-tag { color: var(--red); }
+.ul-age { font: 600 9px/1 var(--mono); color: var(--ash); }
+
+.ul-what {
+  font: 700 12px/1.25 var(--sans); letter-spacing: .04em; color: var(--bone);
+}
+
+.ul-bars { display: flex; flex-direction: column; gap: 4px; }
+.ul-bar-row { display: flex; align-items: center; gap: 6px; }
+.ul-k { font: 600 8px/1 var(--mono); letter-spacing: .16em; color: var(--ash); width: 68px; flex: none; }
+.ul-bar { flex: 1; height: 4px; background: var(--gunmetal); position: relative; overflow: hidden; }
+.ul-bar i { position: absolute; inset: 0 auto 0 0; display: block; }
+.ul-bar i.ok { background: var(--ok); }
+.ul-bar i.bad { background: var(--red); }
+/* The bar itself is drawn as a marker rather than a fill: it is a threshold, not a quantity. */
+.ul-bar i.bar-tol { background: none; border-right: 2px solid var(--steel); }
+.ul-v { font: 600 9px/1 var(--mono); color: var(--bone); width: 30px; text-align: right; flex: none; }
+
+.ul-note { font: 400 9.5px/1.45 var(--sans); color: var(--ash); }
+.up-live.below .ul-note { color: var(--warn); }
+
+.ul-actions { display: flex; gap: 6px; }
+.ul-btn {
+  flex: 1; appearance: none; cursor: pointer;
+  font: 600 9px/1 var(--mono); letter-spacing: .14em;
+  padding: 8px 6px;
+  border: 1px solid var(--gunmetal);
+  background: var(--graphite-2);
+  color: var(--steel);
+  transition: background .14s ease, color .14s ease, border-color .14s ease;
+}
+.ul-btn.fine:hover:not(:disabled) { border-color: var(--ok); color: var(--ok); background: rgba(79,158,122,.12); }
+.ul-btn.investigate:hover:not(:disabled) { border-color: var(--warn); color: var(--warn); background: rgba(217,160,56,.12); }
+.ul-btn:disabled { cursor: not-allowed; color: var(--gunmetal); }

@@ -72,6 +72,19 @@ class Resistance {
     this.bump(TRANSGRESSION_WEIGHT * shortfall * shortfall * 4);
   }
 
+  /**
+   * Harden the ground by a flat amount.
+   *
+   * Distinct from {@link transgress}, which takes a tolerance SHORTFALL and squares it — that curve
+   * is right for judging an order against the public bar, and wrong for anything else. Incident
+   * consequences are already-decided costs, so they add directly. (Routing them through transgress
+   * squared a 0.06 charge down to 0.0008, which is to say: nothing happened.)
+   */
+  aggravate(by: number): void {
+    if (by <= 0) return;
+    this.bump(by);
+  }
+
   /** A cleared tasking buys back a little goodwill. */
   relieve(by = MISSION_RELIEF): void {
     this.bump(-by);

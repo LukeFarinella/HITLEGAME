@@ -168,6 +168,7 @@ const ROAD_VS = `
 in vec3 position3DHigh;
 in vec3 position3DLow;
 in vec3 tangent;    // unit direction of the line at this point (ECEF)
+in vec3 side;       // unit vector across the road, IN THE GROUND PLANE (ECEF)
 in vec3 params;     // x = side (-1/+1), y = half-width in metres, z = end-cap extend (-1/0/+1)
 in vec4 color;
 in float batchId;
@@ -177,32 +178,22 @@ uniform float u_minHalfPx;
 
 void main() {
   vec4 p = czm_computePosition();
-  vec4 clip = czm_modelViewProjectionRelativeToEye * p;
 
-  // Screen direction from projecting a second point a short way along the tangent. The offset is
-  // applied in the relative-to-eye frame, so it keeps the precision czm_computePosition() bought
-  // us, and 8 m is short enough that perspective skew over it is irrelevant even at the 400 m
-  // minimum zoom.
-  vec4 clipB = czm_modelViewProjectionRelativeToEye * vec4(p.xyz + tangent * 8.0, 1.0);
+  // Half-width in METRES, floored so the network stays legible when zoomed out. The floor is
+  // converted from pixels into metres here rather than applied in screen space, which is the whole
+  // difference: the ribbon is always a real surface lying on the ground, it just refuses to get
+  // thinner than u_minHalfPx on screen.
+  float mpp = czm_metersPerPixel(czm_modelViewRelativeToEye * p);
+  float halfM = max(params.y, u_minHalfPx * mpp);
 
-  if (clip.w > 0.0 && clipB.w > 0.0) {
-    vec2 sA = clip.xy / clip.w;
-    vec2 sB = clipB.xy / clipB.w;
-    vec2 d = (sB - sA) * czm_viewport.zw;
-    if (dot(d, d) > 0.0) {
-      vec2 t = normalize(d);
-      vec2 nrm = vec2(-t.y, t.x);
-      float mpp = czm_metersPerPixel(czm_modelViewRelativeToEye * p);
-      float halfPx = max(u_minHalfPx, params.y / mpp);
-      // Side offset builds the ribbon width; the cap term extends each end forward by half a width
-      // so separate road ways overlap and fill the gap at their shared intersection node.
-      vec2 off = nrm * params.x * halfPx + t * params.z * halfPx;
-      clip.xy += off * 2.0 / czm_viewport.zw * clip.w;
-    }
-  }
+  // Widen across the ground plane and extend the caps along the road, both in world space. Doing
+  // this on the screen — as this shader used to — drew roads as strokes ON TOP of the terrain
+  // rather than as surfaces lying in it, which is why they never read as flat however they were
+  // draped.
+  p.xyz += side * params.x * halfM + tangent * params.z * halfM;
 
   v_color = color;
-  gl_Position = clip;
+  gl_Position = czm_modelViewProjectionRelativeToEye * p;
 }`;
 
 const ROAD_FS = `
@@ -210,6 +201,60 @@ in vec4 v_color;
 void main() {
   out_FragColor = v_color;
 }`;
+
+/**
+ * Spacing to resample a road centreline to, in metres.
+ *
+ * Vector-tile roads carry only enough vertices to describe their SHAPE — often a single straight
+ * run across a valley. Draping those sparse points onto the terrain samples the ground where the
+ * points happen to be and interpolates through everything in between, so a road crossing any relief
+ * cuts into the hillside at one end and floats off it at the other. Resampling fixes that: every
+ * ~18 m the ribbon gets a vertex that actually knows how high the ground is there.
+ */
+const RESAMPLE_M = 18;
+
+/**
+ * Catmull-Rom through four control points.
+ *
+ * Chosen over a corner-cutting scheme (Chaikin) because it passes THROUGH the original vertices:
+ * road alignment stays exactly where the data says it is, and the smoothing only affects the curve
+ * between points. Corner cutting looked better in isolation and pulled junctions off the grid.
+ */
+function catmullRom(p0: number[], p1: number[], p2: number[], p3: number[], t: number): number[] {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  const out: number[] = [0, 0];
+  for (let k = 0; k < 2; k++) {
+    out[k] =
+      0.5 *
+      (2 * p1[k] +
+        (-p0[k] + p2[k]) * t +
+        (2 * p0[k] - 5 * p1[k] + 4 * p2[k] - p3[k]) * t2 +
+        (-p0[k] + 3 * p1[k] - 3 * p2[k] + p3[k]) * t3);
+  }
+  return out;
+}
+
+/** Smooth a centreline and resample it to roughly {@link RESAMPLE_M} spacing. */
+function resample(line: number[][]): number[][] {
+  const n = line.length;
+  if (n < 2) return line;
+  const mPerLat = 111_320;
+  const mLon = mPerLat * Math.cos((line[0][1] * Math.PI) / 180);
+  const out: number[][] = [];
+  for (let i = 0; i < n - 1; i++) {
+    const p0 = line[Math.max(0, i - 1)];
+    const p1 = line[i];
+    const p2 = line[i + 1];
+    const p3 = line[Math.min(n - 1, i + 2)];
+    const segM = Math.hypot((p2[0] - p1[0]) * mLon, (p2[1] - p1[1]) * mPerLat);
+    // Cap the subdivision so one absurdly long way can't blow the vertex budget on its own.
+    const steps = Math.max(1, Math.min(64, Math.ceil(segM / RESAMPLE_M)));
+    for (let sIdx = 0; sIdx < steps; sIdx++) out.push(catmullRom(p0, p1, p2, p3, sIdx / steps));
+  }
+  out.push(line[n - 1]);
+  return out;
+}
 
 export interface RoadGroup {
   /** lon/lat polylines, already clipped to whatever region should draw. */
@@ -234,20 +279,28 @@ export function buildRoadPrimitive(
 ): { primitive: Cesium.Primitive; segments: number } | undefined {
   // Every ribbon gets two extra "cap" points (one per end) that the shader extends outward by half
   // a width, so ways meeting at an intersection overlap instead of leaving a gap.
+  // Resample once, up front: the counts below and the emit pass must see identical geometry.
+  const shaped: { g: RoadGroup; lines: number[][][] }[] = [];
   let nPts = 0;
   let nSeg = 0;
   for (const g of groups) {
+    const lines: number[][][] = [];
     for (const line of g.lines) {
       if (line.length < 2) continue;
-      nPts += line.length + 2;
-      nSeg += line.length + 1;
+      const r = resample(line);
+      lines.push(r);
+      nPts += r.length + 2;
+      nSeg += r.length + 1;
     }
+    if (lines.length) shaped.push({ g, lines });
   }
   if (!nSeg) return undefined;
 
   // two vertices per point (side -1 / +1), six indices per segment
   const positions = new Float64Array(nPts * 2 * 3);
   const tangents = new Float32Array(nPts * 2 * 3);
+  /** Across-the-road unit vector in the ground plane. Computed here because both inputs are known. */
+  const sides = new Float32Array(nPts * 2 * 3);
   const params = new Float32Array(nPts * 2 * 3);
   const colors = new Uint8Array(nPts * 2 * 4);
   const indices = new Uint32Array(nSeg * 6);
@@ -257,6 +310,9 @@ export function buildRoadPrimitive(
 
   let v = 0;
   let ix = 0;
+
+  const up = new Cesium.Cartesian3();
+  const sideVec = new Cesium.Cartesian3();
 
   const emit = (
     pos: Cesium.Cartesian3,
@@ -268,6 +324,13 @@ export function buildRoadPrimitive(
     cb: number,
     ca: number,
   ) => {
+    // Ground-plane normal: up is geocentric here, which over a 200 mile theater is close enough to
+    // the surface normal that no one will ever measure the difference.
+    Cesium.Cartesian3.normalize(pos, up);
+    Cesium.Cartesian3.cross(up, t, sideVec);
+    if (Cesium.Cartesian3.magnitudeSquared(sideVec) === 0) Cesium.Cartesian3.clone(Cesium.Cartesian3.UNIT_X, sideVec);
+    Cesium.Cartesian3.normalize(sideVec, sideVec);
+
     for (let s = 0; s < 2; s++) {
       positions[v * 3] = pos.x;
       positions[v * 3 + 1] = pos.y;
@@ -275,6 +338,9 @@ export function buildRoadPrimitive(
       tangents[v * 3] = t.x;
       tangents[v * 3 + 1] = t.y;
       tangents[v * 3 + 2] = t.z;
+      sides[v * 3] = sideVec.x;
+      sides[v * 3 + 1] = sideVec.y;
+      sides[v * 3 + 2] = sideVec.z;
       params[v * 3] = s === 0 ? -1 : 1;
       params[v * 3 + 1] = half;
       params[v * 3 + 2] = cap;
@@ -286,14 +352,14 @@ export function buildRoadPrimitive(
     }
   };
 
-  for (const g of groups) {
+  for (const { g, lines } of shaped) {
     const cr = Math.round(g.color.red * 255);
     const cg = Math.round(g.color.green * 255);
     const cb = Math.round(g.color.blue * 255);
     const ca = Math.round(g.color.alpha * 255);
     const half = g.widthM / 2;
 
-    for (const line of g.lines) {
+    for (const line of lines) {
       if (line.length < 2) continue;
 
       pts.length = 0;
@@ -348,6 +414,11 @@ export function buildRoadPrimitive(
         componentDatatype: Cesium.ComponentDatatype.FLOAT,
         componentsPerAttribute: 3,
         values: tangents,
+      }),
+      side: new Cesium.GeometryAttribute({
+        componentDatatype: Cesium.ComponentDatatype.FLOAT,
+        componentsPerAttribute: 3,
+        values: sides,
       }),
       params: new Cesium.GeometryAttribute({
         componentDatatype: Cesium.ComponentDatatype.FLOAT,

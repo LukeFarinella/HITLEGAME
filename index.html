@@ -105,6 +105,14 @@
         <div class="gs-bar"><i id="gs-bar"></i></div>
       </div>
 
+      <!-- Incident alert: a riot, chase, brawl or assassination is running. Click to fly to it. -->
+      <div id="g-incident" hidden>
+        <div class="gs-head"><span class="gs-dot"></span><span id="gi-title">INCIDENT</span></div>
+        <div class="gs-row"><span class="gs-k">Detail</span><span class="gs-v" id="gi-brief">—</span></div>
+        <div class="gs-row"><span class="gs-k">Contacts</span><span class="gs-v" id="gi-count">—</span></div>
+        <div class="gs-bar"><i id="gi-bar"></i></div>
+      </div>
+
       <!-- Audio toggle -->
       <button id="snd-toggle" type="button" aria-label="Toggle sound" title="Toggle sound">♪</button>
 
@@ -148,8 +156,14 @@
           </label>
           <label class="dev-row" for="dev-tokens">
             <span class="dev-k">Funding tokens <span class="dev-v" id="dev-tokens-val">—</span></span>
-            <input type="range" id="dev-tokens" min="0" max="1000000" step="5000" value="250000" />
+            <input type="range" id="dev-tokens" min="0" max="1000000" step="100" value="500" />
           </label>
+          <div class="dev-grants">
+            <button class="dev-mini" id="dev-funds-500" type="button">+500</button>
+            <button class="dev-mini" id="dev-funds-5k" type="button">+5K</button>
+            <button class="dev-mini" id="dev-funds-50k" type="button">+50K</button>
+            <button class="dev-mini" id="dev-funds-500k" type="button">+500K</button>
+          </div>
 
           <div class="dev-k">Chain cleared through</div>
           <div class="dev-chain" id="dev-chain"></div>
@@ -164,6 +178,15 @@
 
           <button class="dev-regen" id="dev-reset" type="button">↺ RESET CAMPAIGN</button>
           <p class="dev-note">Reset clears everything, including the founding choice.</p>
+
+          <div class="dev-k">Trigger incident</div>
+          <div class="dev-grants">
+            <button class="dev-mini" id="dev-inc-riot" type="button">RIOT</button>
+            <button class="dev-mini" id="dev-inc-chase" type="button">CHASE</button>
+            <button class="dev-mini" id="dev-inc-altercation" type="button">ALTERCATION</button>
+            <button class="dev-mini" id="dev-inc-assassination" type="button">ASSASSIN</button>
+          </div>
+          <p class="dev-note">Fires the event immediately in the current theater. One at a time.</p>
 
           <div class="dev-sect">CAMPAIGN</div>
           <button class="dev-regen" id="dev-exit-title" type="button">◀ EXIT TO START MENU</button>
@@ -199,8 +222,33 @@
         <!-- Standing order + its rescind countdown; hidden when nothing is ordered -->
         <div class="up-row" id="up-order" hidden><span class="k">Order</span><span class="v" id="up-order-v">—</span></div>
         <div class="up-assess order-bar" id="up-order-bar" hidden><i></i></div>
+        <!-- Live accusation: what the net thinks this contact just did. The main thing acted on. -->
+        <div class="up-live" id="up-live" hidden>
+          <div class="ul-head">
+            <span class="ul-tag">LIVE VIOLATION</span>
+            <span class="ul-age" id="ul-age">—</span>
+          </div>
+          <div class="ul-what" id="ul-what">—</div>
+          <div class="ul-bars">
+            <div class="ul-bar-row">
+              <span class="ul-k">EVIDENCE</span>
+              <span class="ul-bar"><i id="ul-cert"></i></span>
+              <span class="ul-v" id="ul-cert-v">—</span>
+            </div>
+            <div class="ul-bar-row">
+              <span class="ul-k">PUBLIC BAR</span>
+              <span class="ul-bar"><i class="bar-tol" id="ul-tol"></i></span>
+              <span class="ul-v" id="ul-tol-v">—</span>
+            </div>
+          </div>
+          <div class="ul-note" id="ul-note">—</div>
+          <div class="ul-actions">
+            <button type="button" class="ul-btn fine" id="ul-fine">FINE</button>
+            <button type="button" class="ul-btn investigate" id="ul-investigate">INVESTIGATE</button>
+          </div>
+        </div>
         <div class="up-record" id="up-record">
-          <span class="k">Infractions</span>
+          <span class="k">Past infractions</span>
           <ul id="up-charges"></ul>
         </div>
         <!-- Platform hardpoints; fitting happens in the store, this is the in-theater readout -->

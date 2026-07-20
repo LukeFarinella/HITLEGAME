@@ -141,11 +141,14 @@ function pickFrom(tier: number[]): number {
  * everyone is the premise. The guaranteed entry is always petty; severity comes from what's
  * stacked on top.
  */
-export function rollRecord(state: UnitState): Record_ {
+export function rollRecord(state: UnitState, floor?: 'critical'): Record_ {
   const profile = RECORD_PROFILE[state];
   const out = new Set<number>([pickFrom(BY_SEVERITY[1])]);
   const n = Math.floor(Math.random() * (profile.extra + 1));
   for (let k = 0; k < n; k++) out.add(pickFrom(BY_SEVERITY[pickSeverity(profile.weights)]));
+  // A guaranteed top-severity charge, for the one contact the opening theater places deliberately.
+  // Everything else about that unit is rolled the same way as anybody else's.
+  if (floor === 'critical') out.add(pickFrom(BY_SEVERITY[4]));
   return [...out].sort((a, b) => INFRACTIONS[b].severity - INFRACTIONS[a].severity);
 }
 

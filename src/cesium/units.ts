@@ -10,6 +10,7 @@ import {
 } from './unitModels';
 import { PLATFORM_BY_ID, type PlatformId } from '../game/platforms';
 import type { RoadNet, RoadClass } from './roads';
+import { makeViolation, VIOLATION_TTL_S, type LiveViolation } from '../game/violations';
 import { RouteGraph } from './routeGraph';
 import type { SensorField } from './sensors';
 import { assessBand, rollAssessment, rollRecord, type Record_ } from '../game/intel';
@@ -28,6 +29,9 @@ import { caseStrength, tolerance } from '../game/tolerance';
  */
 
 export type UnitState = 'normal' | 'protected' | 'infected';
+
+/** What a unit is doing inside an incident. */
+export type IncidentRole = 'rioter' | 'runner' | 'brawler' | 'assassin';
 
 /** What a platform is being sent to DO when it gets there. */
 export type RouteAction = 'investigate' | 'detain' | 'execute' | 'strike' | null;
@@ -142,14 +146,15 @@ const SPEED: Record<UnitKind, number> = {
  * they ride at ground level and their height comes from the mesh.
  */
 const RIDE_HEIGHT: Record<UnitKind, number> = {
-  land: 14,
+  // Kept just above the road drape (now +4), so wheels sit ON the ribbon rather than through it.
+  land: 6,
   sea: 1,
   air: 0,
-  foot: 14,
+  foot: 6,
   drone: 0,
   // The dog walks the road ribbon like the traffic it shares it with, so it clears the drape the
   // same way a vehicle does. The quadcopter's height comes from its own cruise altitude.
-  dog: 14,
+  dog: 6,
   quad: 0,
   spider: 2,
   biped: 2,
@@ -242,10 +247,44 @@ export const SIEGE = {
    */
   speed: 60,
   /** Contact range — inside this, the attacker stops walking and starts working on the obelisk. */
-  contactM: 220,
+  /**
+   * How close an attacker gets before it starts working on the site.
+   *
+   * Small enough that it is visibly TOUCHING the obelisk. This was 220 m, which is a comfortable
+   * distance to stand and admire a building from — the attacker stopped a city block short and the
+   * assault read as a stand-off rather than as somebody taking a structure apart with their hands.
+   */
+  contactM: 14,
   /** Seconds in contact before the site falls. The player's whole reaction window. */
   assaultS: 30,
 };
+
+/**
+ * Incident timings and speeds. One place, because these are the difficulty dial for every event.
+ */
+export const INCIDENT = {
+  /** How close a participant has to get before its clock starts. */
+  contactM: 90,
+  /** Metres per second on foot, for rioters, brawlers and assassins. */
+  walkSpeed: 14,
+  /** A fleeing vehicle. Faster than traffic (80) and than the quadruped, slower than the arachnid. */
+  runnerSpeed: 96,
+};
+
+/**
+ * Live-violation cadence.
+ *
+ * BASE is the interval at a single site — the ~45 seconds that makes a one-obelisk opening feel
+ * attended rather than empty. The exponent damps it as coverage grows: at 1,800 sites the interval
+ * lands near three seconds rather than a fortieth of one.
+ */
+const VIOLATION_BASE_INTERVAL_S = 45;
+const VIOLATION_MIN_INTERVAL_S = 2.5;
+const VIOLATION_SCALE_EXP = 0.35;
+/** Grace on entering a theater, so the first event doesn't land during the fly-in. */
+const VIOLATION_FIRST_S = 8;
+/** Most accusations that can be open at once. */
+const VIOLATION_MAX_OPEN = 6;
 
 const DEG = Math.PI / 180;
 const mPerLat = 111_320;
@@ -413,6 +452,36 @@ interface Unit {
    * and how long it's been in contact once it arrives.
    */
   siege?: { tlon: number; tlat: number; local: number; assaultS: number };
+  /**
+   * A violation the net believes this contact just committed.
+   *
+   * The main thing the operator acts on. Transient: it lapses on its own, and a contact carries at
+   * most one at a time — a queue of accusations against one person would just be a worse charge
+   * sheet, and they already have one of those.
+   */
+  live?: LiveViolation;
+  /**
+   * Participation in a live incident — a riot, a chase, a brawl, an assassination.
+   *
+   * Deliberately the same shape as {@link siege}: walk at a point, then run a clock once you get
+   * there. Every incident in the game is some arrangement of that one behaviour, and reusing it
+   * means an incident participant is an ORDINARY contact in every other respect — selectable,
+   * markable, detainable, killable — with no special case in the order paths.
+   *
+   * The exception is `runner`, which flees instead of approaching. See {@link stepIncident}.
+   */
+  incident?: {
+    role: IncidentRole;
+    /** Where it is going, or what it is fighting. */
+    tlon: number;
+    tlat: number;
+    /** Seconds spent in contact with the target. The clock every incident resolves on. */
+    contactS: number;
+    /** The other party, for a brawl. */
+    partner?: number;
+    /** Seconds this participant has been on the board, for chases that time out. */
+    aliveS: number;
+  };
   /**
    * A walk-in destination. Used by the delivery pass to route a confirmed infected into sensor
    * coverage so the operator always has something actionable; cleared on arrival, after which the
@@ -1008,6 +1077,7 @@ export class UnitField {
       if (u.dead) continue;
       // An attacker walks a straight line at its target, off the road graph — it isn't traffic.
       if (u.siege) this.stepSiege(u, d);
+      else if (u.incident) this.stepIncident(u, d);
       else if (u.deliver) this.stepDeliver(u, d);
       else if (u.kind === 'land' || u.kind === 'foot') this.stepRoad(u, d);
       else if (PLATFORM_KINDS.includes(u.kind)) this.stepPlatform(u, d);
@@ -1174,6 +1244,75 @@ export class UnitField {
    * Walk a delivered contact toward coverage. Same straight-line march as a siege attacker, but it
    * simply rejoins the population on arrival — nothing is attacked and nothing is scored.
    */
+  /**
+   * Step one incident participant.
+   *
+   * Three of the four roles are the siege attacker's behaviour with a different target: close the
+   * distance, then run a clock. The clock is what the operator is racing — a rioter's clock burns
+   * down a building, a brawler's ends with one of them dead, an assassin's ends with a company
+   * asset dead.
+   *
+   * `runner` inverts it: a driver who will not stop, moving AWAY from the nearest platform at
+   * vehicle speed. It cannot be caught by chasing it with anything slower than it, which is the
+   * point of the incident — you either have something fast enough or you don't.
+   */
+  private stepIncident(u: Unit, dt: number): void {
+    const inc = u.incident!;
+    inc.aliveS += dt;
+    const mLon = mPerLat * Math.cos(u.lat * DEG);
+
+    if (inc.role === 'runner') {
+      // Flee the nearest platform; absent one, just keep going on the current heading.
+      let fleeFrom: { lon: number; lat: number } | null = null;
+      let bestD = Infinity;
+      for (const { index } of this.platformUnits()) {
+        const p = this.units[index];
+        if (p.dead) continue;
+        const d = Math.hypot((p.lon - u.lon) * mLon, (p.lat - u.lat) * mPerLat);
+        if (d < bestD) {
+          bestD = d;
+          fleeFrom = { lon: p.lon, lat: p.lat };
+        }
+      }
+      if (fleeFrom) u.heading = Math.atan2((u.lon - fleeFrom.lon) * mLon, (u.lat - fleeFrom.lat) * mPerLat);
+      const step = INCIDENT.runnerSpeed * dt;
+      u.lon += (step * Math.sin(u.heading)) / mLon;
+      u.lat += (step * Math.cos(u.heading)) / mPerLat;
+      return;
+    }
+
+    // A target that is a UNIT rather than a place moves, so follow it. Brawlers chase each other;
+    // an assassin follows its mark, which matters because a protected contact walks a route like
+    // anyone else and a killer that trudged to where the target used to be would never arrive.
+    if (inc.partner !== undefined) {
+      const other = this.units[inc.partner];
+      if (other && !other.dead) {
+        inc.tlon = other.lon;
+        inc.tlat = other.lat;
+      }
+    }
+
+    const dx = (inc.tlon - u.lon) * mLon;
+    const dy = (inc.tlat - u.lat) * mPerLat;
+    const dist = Math.hypot(dx, dy);
+
+    // In contact: the clock runs.
+    if (dist <= INCIDENT.contactM) inc.contactS += dt;
+
+    // Keep closing anyway, unless practically on top of the target.
+    //
+    // Freezing on arrival was the obvious implementation and it was wrong for anything that chases
+    // a UNIT rather than a place: the mark walks at 12 m/s, so a killer that stopped at 90 m simply
+    // watched it stroll out of range — measured drifting 40 m to 90 m while the clock stalled two
+    // seconds short of its fuse. Holding station inside the ring is what makes contact mean contact.
+    if (dist <= INCIDENT.contactM * 0.4) return;
+
+    u.heading = Math.atan2(dx, dy);
+    const step = Math.min(dist, INCIDENT.walkSpeed * dt);
+    u.lon += (step * (dx / dist)) / mLon;
+    u.lat += (step * (dy / dist)) / mPerLat;
+  }
+
   private stepDeliver(u: Unit, dt: number): void {
     const t = u.deliver!;
     const mLon = mPerLat * Math.cos(u.lat * DEG);
@@ -1220,6 +1359,46 @@ export class UnitField {
     const u = this.units[candidates[Math.floor(Math.random() * candidates.length)]];
     u.deliver = { tlon: toLon, tlat: toLat };
     return true;
+  }
+
+  /**
+   * Put one unmistakable target inside the opening coverage.
+   *
+   * A campaign's first theater has exactly one obelisk, watching one 750 m disc of a 200-mile
+   * circle, and the population inside it is 90% ordinary people. The operator could arrive, look
+   * at everything they could see, and correctly conclude there was nothing to do — which is a
+   * terrible opening even though every individual rule producing it is right.
+   *
+   * So one is placed. It is a REAL infected with a REAL charge sheet, not a scripted prop: flagging
+   * it scores as valid because it is valid. What is arranged is only that the theater's first
+   * contact is one the tolerance gate will actually let them act on, since at HOSTILE the bar wants
+   * a severe record AND a high reading together and a random infected rarely clears it.
+   */
+  seedStarterTarget(lon: number, lat: number, radiusM: number): number | null {
+    const mLon = mPerLat * Math.cos(lat * DEG);
+    const a = Math.random() * Math.PI * 2;
+    const r = radiusM * (0.25 + Math.random() * 0.5); // comfortably inside the disc, not on its rim
+    const at = { lon: lon + (Math.cos(a) * r) / mLon, lat: lat + (Math.sin(a) * r) / mPerLat };
+
+    const i = this.units.length;
+    this.units.push({
+      id: this.mkId('foot'),
+      kind: 'foot',
+      state: 'infected',
+      // Top of the band rather than a fixed 1.0: an absolute certainty would be the one reading in
+      // the game that cannot be wrong, and the operator learning to trust a number is the last
+      // thing this should teach.
+      assess: 0.9 + Math.random() * 0.08,
+      record: rollRecord('infected', 'critical'),
+      lon: at.lon,
+      lat: at.lat,
+      heading: Math.random() * Math.PI * 2,
+      mark: null,
+    });
+    const grown = new Float64Array(this.units.length * 3);
+    grown.set(this.ecef);
+    this.ecef = grown;
+    return i;
   }
 
   /**
@@ -1271,6 +1450,9 @@ export class UnitField {
     /** Metres still to walk. 0 once it's in contact. */
     rangeM: number;
     tracked: boolean;
+    /** The site being attacked. Effects belong here, not on the attacker. */
+    tlon: number;
+    tlat: number;
   } | null {
     if (this.attackerIdx < 0) return null;
     const u = this.units[this.attackerIdx];
@@ -1287,12 +1469,339 @@ export class UnitField {
       assaultS: u.siege.assaultS,
       rangeM: Math.max(0, Math.hypot(dx, dy) - SIEGE.contactM),
       tracked: this.isTracked(u),
+      tlon: u.siege.tlon,
+      tlat: u.siege.tlat,
     };
+  }
+
+  /**
+   * Put an incident participant on the board.
+   *
+   * `state` decides what killing it is worth on the ledger, and it is not always 'infected': a
+   * driver who will not stop is not necessarily a threat, and shooting one because it was easier
+   * than catching it should score exactly as badly as it deserves to.
+   */
+  spawnIncidentUnit(
+    lon: number,
+    lat: number,
+    kind: UnitKind,
+    role: IncidentRole,
+    target: { lon: number; lat: number },
+    state: UnitState = 'infected',
+    partner?: number,
+  ): number {
+    const i = this.units.length;
+    this.units.push({
+      id: this.mkId(kind),
+      kind,
+      state,
+      assess: rollAssessment(state),
+      record: rollRecord(state),
+      lon,
+      lat,
+      heading: bearing(lon, lat, target.lon, target.lat),
+      mark: null,
+      incident: { role, tlon: target.lon, tlat: target.lat, contactS: 0, aliveS: 0 },
+    });
+    if (partner !== undefined) this.units[i].incident!.partner = partner;
+    // The unit array grew, so the position cache has to grow with it.
+    const grown = new Float64Array(this.units.length * 3);
+    grown.set(this.ecef);
+    this.ecef = grown;
+    return i;
+  }
+
+  /** Live incident participants, for the director to score and resolve. */
+  incidentUnits(): {
+    index: number;
+    id: string;
+    role: IncidentRole;
+    lon: number;
+    lat: number;
+    contactS: number;
+    aliveS: number;
+    partner?: number;
+    tracked: boolean;
+  }[] {
+    const out: ReturnType<UnitField['incidentUnits']> = [];
+    for (let i = 0; i < this.units.length; i++) {
+      const u = this.units[i];
+      if (u.dead || !u.incident) continue;
+      out.push({
+        index: i,
+        id: u.id,
+        role: u.incident.role,
+        lon: u.lon,
+        lat: u.lat,
+        contactS: u.incident.contactS,
+        aliveS: u.incident.aliveS,
+        partner: u.incident.partner,
+        tracked: this.isTracked(u),
+      });
+    }
+    return out;
+  }
+
+  /** Point two brawlers at each other after both exist. */
+  setIncidentPartner(a: number, b: number): void {
+    const ua = this.units[a];
+    const ub = this.units[b];
+    if (ua?.incident) ua.incident.partner = b;
+    if (ub?.incident) ub.incident.partner = a;
+  }
+
+  /** Reset one participant's contact clock — what "you interrupted it" means mechanically. */
+  resetIncidentClock(index: number): void {
+    const u = this.units[index];
+    if (u?.incident) u.incident.contactS = 0;
+  }
+
+  /**
+   * Release a participant from its incident WITHOUT killing it.
+   *
+   * The winner of a brawl is still a person standing in the street. Removing them outright was the
+   * lazy cleanup and it deleted a live contact the operator might well have wanted to look at —
+   * they now carry whatever they just did on their record and rejoin the population.
+   */
+  releaseIncidentUnit(index: number): void {
+    const u = this.units[index];
+    if (!u) return;
+    u.incident = undefined;
+  }
+
+  /** Take a participant off the board without scoring it as anything. */
+  removeIncidentUnit(index: number): void {
+    const u = this.units[index];
+    if (!u || u.dead) return;
+    u.dead = true;
+    u.incident = undefined;
+    u.mark = null;
+    this.selection.delete(index);
+    this.rebuildMarks();
+  }
+
+  /** Clear every incident participant — used when a theater ends or an incident is cancelled. */
+  clearIncidents(): void {
+    let any = false;
+    for (let i = 0; i < this.units.length; i++) {
+      const u = this.units[i];
+      if (!u.incident) continue;
+      u.dead = true;
+      u.incident = undefined;
+      u.mark = null;
+      this.selection.delete(i);
+      any = true;
+    }
+    if (any) this.rebuildMarks();
+  }
+
+  /**
+   * A random live PROTECTED contact — what an assassin is sent after.
+   *
+   * `onFoot` restricts it to pedestrians, and the assassination uses that. A killer walks at
+   * 14 m/s and a protected contact in a car moves at 80, so a vehicle mark could never be reached:
+   * the clock never started and the incident hung until the theater ended. Somebody being walked
+   * up to on the street is also simply the right image for this.
+   */
+  randomProtected(onFoot = false): { index: number; lon: number; lat: number; id: string } | null {
+    const pool: number[] = [];
+    for (let i = 0; i < this.units.length; i++) {
+      const u = this.units[i];
+      if (u.dead || u.state !== 'protected' || PLATFORM_KINDS.includes(u.kind)) continue;
+      if (onFoot && u.kind !== 'foot') continue;
+      pool.push(i);
+      if (pool.length > 400) break;
+    }
+    if (!pool.length) return null;
+    const i = pool[Math.floor(Math.random() * pool.length)];
+    const u = this.units[i];
+    return { index: i, lon: u.lon, lat: u.lat, id: u.id };
+  }
+
+  /** Is this unit still alive? The director asks about targets it is protecting. */
+  isAlive(index: number): boolean {
+    const u = this.units[index];
+    return !!u && !u.dead;
+  }
+
+  /** Position of any unit, live or not. */
+  positionOf(index: number): { lon: number; lat: number } | null {
+    const u = this.units[index];
+    return u ? { lon: u.lon, lat: u.lat } : null;
+  }
+
+  /** Kill a unit outright, no ledger, no beam — one incident participant killing another. */
+  killQuietly(index: number): void {
+    const u = this.units[index];
+    if (!u || u.dead) return;
+    u.dead = true;
+    u.incident = undefined;
+    u.mark = null;
+    this.selection.delete(index);
+    this.rebuildMarks();
+  }
+
+  // --- live violations ---------------------------------------------------------------------------
+
+  /**
+   * Fire and age live violations.
+   *
+   * `sitesCovering` reports which installation watches a point, and doubles as the coverage test:
+   * an event can only happen where the net can see it, which is the rule the whole feature rests
+   * on. No coverage, no events, and buying coverage is buying things to do.
+   *
+   * Returns the events that lapsed unanswered this tick, so the caller can decide what ignoring
+   * costs.
+   */
+  stepViolations(
+    dt: number,
+    liveSites: number,
+    sitesCovering: (lon: number, lat: number) => { lon: number; lat: number } | null,
+  ): { index: number; live: LiveViolation }[] {
+    const lapsed: { index: number; live: LiveViolation }[] = [];
+
+    // Age what is already out, and retire anything nobody got to.
+    let open = 0;
+    for (const i of this.liveIdx) {
+      const u = this.units[i];
+      if (!u || u.dead || !u.live) continue;
+      u.live.ageS += dt;
+      if (u.live.ageS >= VIOLATION_TTL_S) {
+        lapsed.push({ index: i, live: u.live });
+        u.live = undefined;
+        continue;
+      }
+      open++;
+    }
+    if (lapsed.length) this.rebuildLiveIndex();
+
+    if (!liveSites) return lapsed;
+    // Hard ceiling on how many accusations can be on the board at once. Past a handful the operator
+    // stops reading them and starts clearing them, which is the opposite of the point.
+    if (open >= VIOLATION_MAX_OPEN) return lapsed;
+
+    // Sub-linear in coverage: a 1,800-site theater is busier than a 1-site one, but nowhere near
+    // 1,800 times busier. Without the damping a developed network produces events faster than
+    // anyone can read them and the feature turns into noise it is rational to ignore.
+    const interval = Math.max(
+      VIOLATION_MIN_INTERVAL_S,
+      VIOLATION_BASE_INTERVAL_S / Math.pow(liveSites, VIOLATION_SCALE_EXP),
+    );
+    this.violationTimer -= dt;
+    if (this.violationTimer > 0) return lapsed;
+    this.violationTimer = interval;
+
+    // Pick from the covered set the render pass already built, rather than darting at the whole
+    // field. Exact, and O(1) per attempt however sparse the network is.
+    const pool = this.covered;
+    if (!pool.length) return lapsed;
+    for (let tries = 0; tries < 24; tries++) {
+      const i = pool[Math.floor(Math.random() * pool.length)];
+      const u = this.units[i];
+      if (!u || u.dead || u.live || u.mark) continue;
+      if (u.siege || u.incident) continue; // already busy being a different kind of problem
+      const site = sitesCovering(u.lon, u.lat);
+      if (!site) continue; // moved out of cover since the harvest
+      u.live = makeViolation(site.lon, site.lat, u.state === 'infected');
+      this.liveIdx.add(i);
+      break;
+    }
+    return lapsed;
+  }
+
+  /**
+   * Contacts inside sensor coverage, harvested by the last render.
+   *
+   * Double-buffered so the render pass can fill one while the director reads the other.
+   */
+  private covered: number[] = [];
+  private coveredScratch: number[] = [];
+
+  /** How many contacts the net can currently see. Drives the HUD and the violation rate. */
+  get coveredCount(): number {
+    return this.covered.length;
+  }
+
+  /** Indices carrying a live violation. Kept as a set so ageing doesn't sweep 24,000 units. */
+  private liveIdx = new Set<number>();
+  private violationTimer = VIOLATION_FIRST_S;
+
+  private rebuildLiveIndex(): void {
+    for (const i of [...this.liveIdx]) {
+      const u = this.units[i];
+      if (!u || u.dead || !u.live) this.liveIdx.delete(i);
+    }
+  }
+
+  /** Everything currently accused, for the HUD queue. */
+  liveViolations(): {
+    index: number;
+    id: string;
+    lon: number;
+    lat: number;
+    live: LiveViolation;
+    tracked: boolean;
+  }[] {
+    const out: ReturnType<UnitField['liveViolations']> = [];
+    for (const i of this.liveIdx) {
+      const u = this.units[i];
+      if (!u || u.dead || !u.live) continue;
+      out.push({ index: i, id: u.id, lon: u.lon, lat: u.lat, live: u.live, tracked: this.isTracked(u) });
+    }
+    return out;
+  }
+
+  /** The live violation on one contact, if it has one. */
+  liveOf(index: number): LiveViolation | null {
+    const u = this.units[index];
+    return u && !u.dead ? (u.live ?? null) : null;
+  }
+
+  /** Close a live violation once it has been acted on. */
+  clearLive(index: number): void {
+    const u = this.units[index];
+    if (u) u.live = undefined;
+    this.liveIdx.delete(index);
+  }
+
+  /** True infection state — what an investigation is actually testing against. */
+  isInfected(index: number): boolean {
+    const u = this.units[index];
+    return !!u && !u.dead && u.state === 'infected';
   }
 
   /** Whether a given unit index is the live siege attacker. */
   isAttacker(index: number): boolean {
     return this.attackerIdx >= 0 && this.attackerIdx === index && !this.units[index]?.dead;
+  }
+
+  /**
+   * Whether this contact is actively causing an incident — a siege attacker, a rioter, a brawler,
+   * an assassin.
+   *
+   * This is the test that decides whether SELF-DEFENCE detain applies, and it deliberately covers
+   * everything the theater throws at the operator rather than just attacks on the network. The
+   * campaign opens with one quadruped and no custody authority for three missions; if "take them
+   * alive" only worked on obelisk attackers, then for that entire stretch the only answer to a riot
+   * or a killing in progress would be to watch it happen.
+   */
+  isThreatActor(index: number): boolean {
+    const u = this.units[index];
+    if (!u || u.dead) return false;
+    return !!u.siege || !!u.incident;
+  }
+
+  /**
+   * Take a threat actor into custody. Non-lethal, no ledger entry.
+   *
+   * Returns what it was, so the caller can tell the right director. Siege attackers are NOT handled
+   * here — those go through the siege director, which owns the attack clock.
+   */
+  detainThreatActor(index: number): 'incident' | null {
+    const u = this.units[index];
+    if (!u || u.dead || !u.incident) return null;
+    this.removeIncidentUnit(index);
+    return 'incident';
   }
 
   /** Take the attacker off the board — detained, serviced, or its target already gone. */
@@ -1801,11 +2310,28 @@ export class UnitField {
         PLATFORM_KINDS.includes(u.kind) ||
         (!sensor || sensor.isCovered(u.lon, u.lat)) ||
         this.platformCovers(u.lon, u.lat);
+      // Harvest the covered set while we are already asking the question.
+      //
+      // The violation director needs a contact INSIDE coverage, and sampling the whole field at
+      // random cannot find one when coverage is sparse: at the campaign's opening a single obelisk
+      // watches maybe three contacts out of 24,000, so sixty random darts hit one about three
+      // quarters of one percent of the time and the feature simply never fired. Reusing this test —
+      // which runs anyway, for every unit, to decide whether to draw it faint — makes the lookup
+      // exact and free.
+      if (seen && !PLATFORM_KINDS.includes(u.kind) && u.kind !== 'sea' && u.kind !== 'air') {
+        this.coveredScratch.push(i);
+      }
       const color = seen || selected ? base : Cesium.Color.fromAlpha(base, UNSEEN_ALPHA, this.scratchColor);
       const scale = UNIT_SCALE[u.kind] * (selected ? 1.7 : 1);
       this.batches[u.kind].setInstance(this.scratch, u.heading, scale, color);
     }
     for (const k of UNIT_KINDS) this.batches[k].endFrame();
+    // Swap rather than copy: the director reads last frame's set, which is a frame stale and
+    // completely fine for picking somebody to accuse.
+    const done = this.covered;
+    this.covered = this.coveredScratch;
+    this.coveredScratch = done;
+    this.coveredScratch.length = 0;
     this.updatePlatformVisuals();
 
     // move each investigate marker onto its (moving) unit
@@ -2309,14 +2835,23 @@ export class UnitField {
    * Returns the strikes that went off, so the caller can bill the collateral.
    */
   resolveArrivals(dt: number): {
-    strikes: { lon: number; lat: number; killed: number; collateral: number }[];
+    strikes: { lon: number; lat: number; killed: number; collateral: number; killedAttacker: boolean }[];
     /** A platform arrived on a DETAIN order and took the live siege attacker. */
     detainedAttacker: boolean;
+    /** Incident participants taken into custody by an arriving platform this frame. */
+    detainedIncidents: number;
     /** Detainments resolved this frame: who threw, and at what. */
     detainments: { from: Cesium.Cartesian3; to: Cesium.Cartesian3 }[];
   } {
-    const out: { lon: number; lat: number; killed: number; collateral: number }[] = [];
+    const out: {
+      lon: number;
+      lat: number;
+      killed: number;
+      collateral: number;
+      killedAttacker: boolean;
+    }[] = [];
     let detainedAttacker = false;
+    let detainedIncidents = 0;
     const detainments: { from: Cesium.Cartesian3; to: Cesium.Cartesian3 }[] = [];
 
     for (const { kind, index } of this.platformUnits()) {
@@ -2366,6 +2901,13 @@ export class UnitField {
           });
           t.dead = true;
           t.mark = null;
+          // Clear the incident role explicitly rather than relying on the dead flag: the director
+          // reads participants by role, and a corpse still holding one is a thing waiting to
+          // confuse somebody.
+          if (t.incident) {
+            t.incident = undefined;
+            detainedIncidents++;
+          }
           this.selection.delete(u.routeTarget!);
           // Report it as a DETAINMENT rather than letting the siege director notice the attacker
           // vanished and score it as a kill — the whole point of custody is that it isn't one.
@@ -2385,15 +2927,19 @@ export class UnitField {
       u.tlon = undefined;
       u.tlat = undefined;
     }
-    return { strikes: out, detainedAttacker, detainments };
+    return { strikes: out, detainedAttacker, detainedIncidents, detainments };
   }
 
   /** Everything inside the blast dies. Returns the toll, split into target and everyone else. */
-  private detonate(lon: number, lat: number): { lon: number; lat: number; killed: number; collateral: number } {
+  private detonate(
+    lon: number,
+    lat: number,
+  ): { lon: number; lat: number; killed: number; collateral: number; killedAttacker: boolean } {
     const mLon = mPerLat * Math.cos(lat * DEG);
     const r2 = INTERCEPT.blastM * INTERCEPT.blastM;
     let killed = 0;
     let collateral = 0;
+    let killedAttacker = false;
     for (let i = 0; i < this.units.length; i++) {
       const o = this.units[i];
       if (o.dead || PLATFORM_KINDS.includes(o.kind)) continue;
@@ -2403,13 +2949,16 @@ export class UnitField {
       o.dead = true;
       o.mark = null;
       this.selection.delete(i);
-      if (i === this.attackerIdx) this.attackerIdx = -1;
+      if (i === this.attackerIdx) {
+        this.attackerIdx = -1;
+        killedAttacker = true;
+      }
       killed++;
       // Anyone in the blast who was not attacking a site is collateral.
       if (!o.siege) collateral++;
     }
     this.rebuildMarks();
-    return { lon, lat, killed, collateral };
+    return { lon, lat, killed, collateral, killedAttacker };
   }
 
   /** Live (undead) unit count, for the HUD. */

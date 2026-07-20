@@ -68,7 +68,7 @@ export interface StateTerritory {
   center: { lon: number; lat: number };
   /** 1–10 for the headline economies, which are sold individually. Undefined for the rest. */
   gdpRank?: number;
-  /** Funding-token costs, scaled to how many obelisks the state can eventually field. */
+  /** Funding-token costs per tier. Flat — see {@link TIER_COSTS}. */
   costs: { unlock: number; city: number; full: number };
 }
 
@@ -79,6 +79,18 @@ export interface StateTerritory {
  * handful of times, so the map is grouped: the ten biggest prizes on their own, and everything else
  * split by where it is. A block is bought as a unit and upgrades as a unit.
  */
+/**
+ * What each tier of a state costs.
+ *
+ * Flat, not scaled by site count. Pricing off how much a state could eventually field meant
+ * California cost forty times what Wyoming did, which sounds principled and played badly: the
+ * interesting decision is WHERE to operate, and attaching a punitive price to the places worth
+ * operating in just pushed everyone to the cheap empty ones. A block of states still multiplies —
+ * taking twelve states at once costs twelve times one — so scale is still paid for, by breadth
+ * rather than by quality.
+ */
+export const TIER_COSTS = { unlock: 250, city: 500, full: 1000 } as const;
+
 export interface Region {
   id: string;
   name: string;
@@ -107,8 +119,6 @@ export interface Territory {
   totalObelisks: number;
 }
 
-/** Costs land on clean multiples so the store reads like a price list, not a hash. */
-const round50 = (x: number) => Math.max(50, Math.round(x / 50) * 50);
 
 /**
  * The ten largest state economies, by FIPS, in rank order — the headline territories.
@@ -129,9 +139,11 @@ const GDP_TOP: { fips: string; rank: number }[] = [
   { fips: '42', rank: 6 }, // Pennsylvania
   { fips: '39', rank: 7 }, // Ohio
   { fips: '13', rank: 8 }, // Georgia
-  { fips: '34', rank: 9 }, // New Jersey
-  { fips: '53', rank: 10 }, // Washington — where the campaign opens
+  { fips: '53', rank: 9 }, // Washington
 ];
+// New Jersey (34) is deliberately NOT here. It ranks on GDP but it is small, coastal and wedged
+// against New York, which made it the one headline state that played like a block member — so it
+// sits in the northern block with its neighbours and the headline list is nine.
 const GDP_RANK = new Map(GDP_TOP.map((g) => [g.fips, g.rank]));
 
 /**
@@ -414,13 +426,7 @@ export function surveyTerritory(field: ObeliskField): Promise<Territory> {
         downtown: reps[0],
         center: { lon: cLon / n, lat: cLat / n },
         gdpRank: GDP_RANK.get(meta[s].id),
-        // Priced off how much the state can eventually field, so taking Wyoming is cheap and
-        // taking California is a campaign.
-        costs: {
-          unlock: round50(80 + n * 0.05),
-          city: round50(n * 0.12),
-          full: round50(n * 0.3),
-        },
+        costs: { ...TIER_COSTS },
       };
       totalObelisks += n;
       states.push(st);

@@ -23,6 +23,9 @@ const mPerLat = 111_320;
 /** Grid resolution relative to sensor range — finer gives smoother coverage edges, at more cells. */
 const CELL_FRACTION = 0.5;
 
+/** How many airdropped sites a theater can carry on top of its fixed network. */
+const DROP_HEADROOM = 64;
+
 /** Faint ring drawn at each obelisk to show its range. Additive, so overlaps read as denser cover. */
 const RING_SEGMENTS = 40;
 const RING_COLOR = Cesium.Color.fromCssColorString('#E23A2E'); // company red, kept very low alpha
@@ -62,7 +65,16 @@ export class SensorField {
 
   private obLon: Float64Array;
   private obLat: Float64Array;
-  readonly obeliskCount: number;
+  /** Live site count, including anything airdropped this session. */
+  obeliskCount: number;
+  /**
+   * Sites the theater was built with, before any airdrops.
+   *
+   * The siege only ever aims at these. An airdropped site has no entry in the campaign's ownership
+   * mask, so "this obelisk fell" could not be recorded against it — and a temporary site the player
+   * can re-place for pocket change is the wrong thing to be defending anyway.
+   */
+  readonly fixedCount: number;
 
   /** Faint range rings, one merged primitive. */
   readonly rings: Cesium.Primitive | undefined;
@@ -80,8 +92,10 @@ export class SensorField {
   ) {
     this.range = range;
     this.obeliskCount = lonLat.length / 2;
-    this.obLon = new Float64Array(this.obeliskCount);
-    this.obLat = new Float64Array(this.obeliskCount);
+    this.fixedCount = this.obeliskCount;
+    // Over-allocated so airdrops can be appended without reallocating every time one lands.
+    this.obLon = new Float64Array(this.obeliskCount + DROP_HEADROOM);
+    this.obLat = new Float64Array(this.obeliskCount + DROP_HEADROOM);
     for (let i = 0; i < this.obeliskCount; i++) {
       this.obLon[i] = lonLat[i * 2];
       this.obLat[i] = lonLat[i * 2 + 1];
@@ -99,7 +113,9 @@ export class SensorField {
     this.coverage = new Uint8Array(this.w * this.h);
     this.threat = new Uint8Array(this.w * this.h);
     this.coverOwner = new Int32Array(this.w * this.h).fill(-1);
-    this.apex = apex;
+    const grownApex = new Float64Array((this.obeliskCount + DROP_HEADROOM) * 3);
+    grownApex.set(apex.subarray(0, this.obeliskCount * 3));
+    this.apex = grownApex;
 
     this.stampCoverage();
 
@@ -162,9 +178,76 @@ export class SensorField {
    * obelisk destroyed in the campaign-wide ownership mask.
    */
   randomSite(): { local: number; lon: number; lat: number } | null {
-    if (!this.obeliskCount) return null;
-    const i = Math.floor(Math.random() * this.obeliskCount);
+    if (!this.fixedCount) return null;
+    // Fixed sites only — see the note on `fixedCount`.
+    const i = Math.floor(Math.random() * this.fixedCount);
     return { local: i, lon: this.obLon[i], lat: this.obLat[i] };
+  }
+
+  /**
+   * Add a site to the live network, at runtime.
+   *
+   * Everything the network does is driven by the coverage grid and the apex table, so a site added
+   * here inherits ALL of it for free: units inside its disc become visible and orderable, an armed
+   * network services contacts from its apex, and it lights up when it sees an infected. There is no
+   * separate code path for a dropped site, which is the point — it is an obelisk.
+   *
+   * Returns the new local index, or -1 if the field is full.
+   */
+  addSite(lon: number, lat: number, apex: Cesium.Cartesian3): number {
+    if (this.obeliskCount >= this.obLon.length) return -1;
+    const i = this.obeliskCount++;
+    this.obLon[i] = lon;
+    this.obLat[i] = lat;
+    this.apex[i * 3] = apex.x;
+    this.apex[i * 3 + 1] = apex.y;
+    this.apex[i * 3 + 2] = apex.z;
+    this.stampOne(i);
+    this.glowPoints.push(
+      this.glow.add({
+        position: Cesium.Cartesian3.clone(apex),
+        color: Cesium.Color.fromCssColorString('#F2C13B').withAlpha(0.85),
+        pixelSize: 14,
+        show: false,
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
+      }),
+    );
+    return i;
+  }
+
+  /**
+   * Stamp one site's disc into the coverage grid.
+   *
+   * Claims a cell when it is uncovered, or when this site is nearer than whatever owns it. That
+   * second test is what keeps {@link servicingApex} honest after a drop: without it a new site
+   * would either never service anything, or would steal cells from an obelisk standing closer.
+   */
+  private stampOne(i: number): void {
+    const rCells = Math.ceil(this.range / this.cell);
+    const r2 = rCells * rCells;
+    const cx = this.cellX(this.obLon[i]);
+    const cy = this.cellY(this.obLat[i]);
+    for (let dy = -rCells; dy <= rCells; dy++) {
+      const y = cy + dy;
+      if (y < 0 || y >= this.h) continue;
+      for (let dx = -rCells; dx <= rCells; dx++) {
+        const x = cx + dx;
+        if (x < 0 || x >= this.w) continue;
+        const d2 = dx * dx + dy * dy;
+        if (d2 > r2) continue;
+        const k = y * this.w + x;
+        this.coverage[k] = 1;
+        const owner = this.coverOwner[k];
+        if (owner < 0) {
+          this.coverOwner[k] = i;
+          continue;
+        }
+        // Compare in cells against the current owner — same units the initial stamp used.
+        const ox = this.cellX(this.obLon[owner]) - x;
+        const oy = this.cellY(this.obLat[owner]) - y;
+        if (d2 < ox * ox + oy * oy) this.coverOwner[k] = i;
+      }
+    }
   }
 
   /** Apex of one site, by local index. Shared scratch — clone it if you need to keep it. */
@@ -176,6 +259,21 @@ export class SensorField {
       this.apex[local * 3 + 2],
       this.apexScratch,
     );
+  }
+
+  /**
+   * The SITE watching a point — position, not apex.
+   *
+   * servicingApex answers "where would a beam come from"; this answers "which installation saw
+   * this", which is what a ping needs to be drawn on.
+   */
+  servicingSite(lon: number, lat: number): { lon: number; lat: number } | null {
+    const x = this.cellX(lon);
+    const y = this.cellY(lat);
+    if (x < 0 || y < 0 || x >= this.w || y >= this.h) return null;
+    const i = this.coverOwner[y * this.w + x];
+    if (i < 0) return null;
+    return { lon: this.obLon[i], lat: this.obLat[i] };
   }
 
   /** Is a point inside any obelisk's range? */

@@ -1,4 +1,5 @@
 import { MISSIONS, missions, type MissionDef } from '../game/missions';
+import { unlockName } from '../game/catalog';
 import { icon } from './icons';
 import { tolerance, toleranceLabel } from '../game/tolerance';
 import { resistance, resistanceLabel } from '../game/resistance';
@@ -263,9 +264,20 @@ export class MissionPanel {
     const pay = document.createElement('div');
     pay.className = 'c2-meta';
     pay.innerHTML =
-      `<span class="ok">+${fmt.format(m.reward)}</span>` +
+      `<span class="ok">+${fmt.format(m.reward)} TOKENS</span>` +
       `<span class="bad">FAIL −${fmt.format(m.penalty)}</span>`;
     row.append(pay);
+
+    // What clearing it actually opens up. Money is the least interesting half of a reward, and a
+    // locked catalog entry is far more legible when the thing that unlocks it says so first.
+    if (m.unlocks?.length) {
+      const rel = document.createElement('div');
+      rel.className = 'c2-unlocks';
+      rel.innerHTML =
+        `<span class="c2-unlocks-k">RELEASES</span>` +
+        m.unlocks.map((id) => `<span class="c2-unlock">${unlockName(id)}</span>`).join('');
+      row.append(rel);
+    }
 
     if (m.grants) {
       const grant = document.createElement('div');

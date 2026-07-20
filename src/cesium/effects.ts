@@ -370,6 +370,86 @@ export class Blasts {
   }
 }
 
+/**
+ * Violation pings — a marker over every contact the net has just accused.
+ *
+ * Screen-space, like everything else that has to survive being zoomed out, and yellow because that
+ * is already this game's colour for "the machine has noticed something" rather than "the company is
+ * acting". Two rings per event: one on the contact and one on the installation that saw it, so the
+ * operator can read WHO from WHERE without hunting.
+ *
+ * These are the primary call to action, so they pulse. Everything else in the effects layer fires
+ * once and fades; a ping persists until it is answered or lapses, and a static marker in a field of
+ * 24,000 moving units is genuinely hard to find.
+ */
+const PING_POOL = 16;
+const PING_COLOR = Cesium.Color.fromCssColorString('#F2C13B');
+/** Seconds per pulse. */
+const PING_PERIOD = 1.4;
+
+export class ViolationPings {
+  readonly collection = new Cesium.BillboardCollection();
+  private contact: Cesium.Billboard[] = [];
+  private site: Cesium.Billboard[] = [];
+  private used = 0;
+  private t = 0;
+
+  constructor() {
+    const ring = ringTexture(128, '#F2C13B', 10) as unknown as string;
+    const dot = discTexture(128, 'rgba(242,193,59,0.95)', 'rgba(242,193,59,0.35)') as unknown as string;
+    for (let i = 0; i < PING_POOL; i++) {
+      this.contact.push(
+        this.collection.add({ position: Cesium.Cartesian3.ZERO, image: ring, width: 26, height: 26, show: false, disableDepthTestDistance: 1e12 }),
+      );
+      this.site.push(
+        this.collection.add({ position: Cesium.Cartesian3.ZERO, image: dot, width: 14, height: 14, show: false, disableDepthTestDistance: 1e12 }),
+      );
+    }
+  }
+
+  begin(): void {
+    this.used = 0;
+  }
+
+  /** Mark one accusation. `at` is the contact, `from` the installation that saw it. */
+  add(at: Cesium.Cartesian3, from: Cesium.Cartesian3 | null): void {
+    if (this.used >= PING_POOL) return;
+    const i = this.used++;
+    this.contact[i].position = at;
+    this.contact[i].show = true;
+    if (from) {
+      this.site[i].position = from;
+      this.site[i].show = true;
+    } else {
+      this.site[i].show = false;
+    }
+  }
+
+  end(dt: number): void {
+    this.t += dt;
+    // Breathe between 22 and 40 px. Large enough to spot across a theater, small enough that six of
+    // them at once doesn't wallpaper the screen.
+    const k = 0.5 + 0.5 * Math.sin((this.t / PING_PERIOD) * Math.PI * 2);
+    const px = 22 + k * 18;
+    const alpha = 0.65 + k * 0.35;
+    for (let i = 0; i < this.used; i++) {
+      const c = this.contact[i];
+      c.width = px;
+      c.height = px;
+      c.color = PING_COLOR.withAlpha(alpha);
+      this.site[i].color = PING_COLOR.withAlpha(alpha * 0.8);
+    }
+    for (let i = this.used; i < PING_POOL; i++) {
+      this.contact[i].show = false;
+      this.site[i].show = false;
+    }
+  }
+
+  destroy(): void {
+    this.collection.destroy();
+  }
+}
+
 // --- restraint projectile ---------------------------------------------------------------------
 
 /**

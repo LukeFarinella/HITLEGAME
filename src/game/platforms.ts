@@ -48,6 +48,8 @@ export interface PlatformDef {
   expansion?: Expansion;
   /** Must be fielded first — this is what makes a platform a late slot rather than just a dear one. */
   requires?: PlatformId;
+  /** Tasking that must be cleared before this can be bought at all. */
+  requiresMission?: string;
   /** Gear slots. Bigger platforms carry more. Shared across every unit of the type. */
   hardpoints: number;
   /** Base sensor disc radius, metres, before any gear. */
@@ -113,6 +115,7 @@ export const PLATFORMS: PlatformDef[] = [
   },
   {
     id: 'quad',
+    requiresMission: 'trial',
     name: 'KITE QUADCOPTER',
     blurb:
       'The quadruped’s aerial counterpart: the same sensor at the same modest pace, but it crosses rivers, rail and rooftops instead of driving around them.',
@@ -132,6 +135,7 @@ export const PLATFORMS: PlatformDef[] = [
   },
   {
     id: 'spider',
+    requiresMission: 'canvass',
     name: 'ARACHNID PURSUIT',
     blurb:
       'Six-legged walker at vehicle scale. Outruns everything on the road and goes where the road does not — the first platform that can actually chase a contact down.',
@@ -153,6 +157,7 @@ export const PLATFORMS: PlatformDef[] = [
   },
   {
     id: 'biped',
+    requiresMission: 'custody',
     name: 'MARSHAL BIPED',
     blurb:
       'Digitigrade two-legged walker, twice the mass of a ground vehicle. Fast enough to chase and armed enough to matter.',
@@ -171,6 +176,7 @@ export const PLATFORMS: PlatformDef[] = [
   },
   {
     id: 'naval',
+    requiresMission: 'dragnet',
     name: 'LITTORAL DRONE',
     blurb:
       'Trimaran hull that works the coast and the crossings. The only platform that can hold station over water, where the ground platforms cannot follow.',
@@ -189,6 +195,7 @@ export const PLATFORMS: PlatformDef[] = [
   },
   {
     id: 'interceptor',
+    requiresMission: 'attrition',
     name: 'RAPTOR INTERCEPTOR',
     blurb:
       'Flying wing that dives on obelisk attackers without being tasked. Its strike is an area effect and it does not distinguish — everyone standing nearby is in it.',
@@ -207,6 +214,7 @@ export const PLATFORMS: PlatformDef[] = [
   },
   {
     id: 'walker',
+    requiresMission: 'pressure',
     name: 'COLOSSUS SIEGE WALKER',
     blurb:
       'Four-legged siege platform spanning several city blocks. Slow, enormous, and carries four hardpoints.',
@@ -219,6 +227,7 @@ export const PLATFORMS: PlatformDef[] = [
   },
   {
     id: 'drone',
+    requiresMission: 'consolidation',
     name: 'DISC OBSERVER',
     blurb:
       'High-altitude disc. The only airborne platform and the fastest thing on the board — it crosses a theater while a walker crosses a city.',
@@ -247,11 +256,14 @@ export interface GearDef {
    * the mission chain, not by money — the rig is useless without the power to use it.
    */
   requiresAuth?: 'detain' | 'execute';
+  /** Tasking that must be cleared before this can be bought at all. */
+  requiresMission?: string;
 }
 
 export const GEAR: GearDef[] = [
   {
     id: 'laser',
+    requiresMission: 'containment',
     name: 'DIRECTED ENERGY EMITTER',
     blurb: 'Services contacts marked for execution that come inside the platform’s sensor envelope.',
     cost: 9000,
@@ -260,6 +272,7 @@ export const GEAR: GearDef[] = [
   },
   {
     id: 'sensor-pod',
+    requiresMission: 'mandate',
     name: 'WIDE-APERTURE SENSOR POD',
     blurb: 'Widens the platform’s sensor envelope by 65%.',
     cost: 5500,
@@ -268,6 +281,7 @@ export const GEAR: GearDef[] = [
   },
   {
     id: 'detainer',
+    requiresMission: 'custody',
     name: 'DETAINMENT RIG',
     blurb:
       'Takes obelisk attackers non-lethally inside the platform’s envelope. Needs no execution authority and never touches the ledger.',
@@ -280,6 +294,7 @@ export const GEAR: GearDef[] = [
   },
   {
     id: 'deep-scan',
+    requiresMission: 'sanction',
     name: 'DEEP-SCAN ARRAY',
     blurb:
       'Tightens assessment on contacts inside the envelope — fewer false readings to act on.',
