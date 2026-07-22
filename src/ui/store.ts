@@ -3,6 +3,7 @@ import { GEAR, GEAR_BY_ID, PLATFORMS, gearFits, type PlatformDef, type PlatformI
 import { TIER_LABEL, type Region, type StateTerritory, type Territory } from '../game/territory';
 import { icon } from './icons';
 import { tolerance, toleranceLabel } from '../game/tolerance';
+import { policy, policyLabel } from '../game/policy';
 
 /**
  * The command store: two tabbed floating panels on the theater-select screen.
@@ -302,7 +303,9 @@ export class Store {
     // What the network can be used FOR is capped by the climate, so say where it stands here too.
     const note = document.createElement('div');
     note.className = 'c2-section';
-    note.textContent = `PUBLIC TOLERANCE ${Math.round(tolerance.level * 100)}% Â· ${toleranceLabel(tolerance.level)}`;
+    note.textContent =
+      `PUBLIC ${Math.round(tolerance.level * 100)}% ${toleranceLabel(tolerance.level)} · ` +
+      `POLICY ${Math.round(policy.level * 100)}% ${policyLabel(policy.level)}`;
     frag.append(note);
     for (const a of ASSETS) frag.append(this.assetRow(a));
     return frag;
@@ -380,11 +383,27 @@ export class Store {
       frag.append(note);
       return frag;
     }
-    // The ten largest economies one at a time, then everything else in blocks.
-    frag.append(sectionLabel('HEADLINE TERRITORIES'));
-    for (const s of this.territory.headline) frag.append(this.stateRow(s));
-    frag.append(sectionLabel('REMAINING BLOCKS'));
-    for (const r of this.territory.regions) frag.append(this.regionRow(r));
+    // Anything already taken floats to the top, states and blocks together. Once a dozen tiers are
+    // in hand the interesting rows are the ones being built out, not the ones still on the shelf,
+    // and scrolling past held territory to find the next tier is the wrong way round.
+    const heldStates = this.territory.headline.filter((s) => progression.tierOf(s) > 0);
+    const heldRegions = this.territory.regions.filter((r) => progression.tierOfRegion(r) > 0);
+    if (heldStates.length || heldRegions.length) {
+      frag.append(sectionLabel('HELD TERRITORY'));
+      for (const s of heldStates) frag.append(this.stateRow(s));
+      for (const r of heldRegions) frag.append(this.regionRow(r));
+    }
+    // Then what's left: the ten largest economies one at a time, everything else in blocks.
+    const openStates = this.territory.headline.filter((s) => progression.tierOf(s) === 0);
+    const openRegions = this.territory.regions.filter((r) => progression.tierOfRegion(r) === 0);
+    if (openStates.length) {
+      frag.append(sectionLabel('HEADLINE TERRITORIES'));
+      for (const s of openStates) frag.append(this.stateRow(s));
+    }
+    if (openRegions.length) {
+      frag.append(sectionLabel('REMAINING BLOCKS'));
+      for (const r of openRegions) frag.append(this.regionRow(r));
+    }
     frag.append(this.countriesRow());
     return frag;
   }

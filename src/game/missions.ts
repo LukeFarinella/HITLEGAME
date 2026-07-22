@@ -1,5 +1,6 @@
 import { progression, type Saved } from './progression';
 import { tolerance } from './tolerance';
+import { policy, AUTH_FLOOR } from './policy';
 import { slotKey, onSlotChange } from './saves';
 
 /**
@@ -542,6 +543,11 @@ export class Missions {
       // Every clearance normalises the programme a little — this is what lowers the bar on
       // who can be ordered against at all.
       tolerance.advance(def.toleranceGain);
+      // And widens what the chain has signed. The two dials move together but not in step: the
+      // licence lags the street, except where a tasking grants an authorization outright, which
+      // sets a floor rather than adding to the running total.
+      policy.advance(def.toleranceGain * 0.8);
+      if (def.grants) policy.raiseTo(AUTH_FLOOR[def.grants] ?? 0);
       this.active = null;
       progression.award(def.reward);
       // The next tasking is on the books before the completion notice has finished animating.
@@ -633,7 +639,7 @@ export class Missions {
 
   /**
    * Dev sandbox only: put the chain in the state it would be in after clearing everything up to
-   * and including `id`, with the rewards, authorizations and tolerance those clearances carry — so
+   * and including `id`, with the rewards, authorizations and BOTH dials those clearances carry — so
    * a jumped-to campaign behaves like a played one rather than an inconsistent half-state.
    */
   devCompleteThrough(id: string | null): void {
@@ -641,11 +647,17 @@ export class Missions {
     this.completed.clear();
     this.auths.clear();
     tolerance.reset();
+    policy.reset();
     if (id !== null) {
       for (const m of MISSIONS) {
         this.completed.add(m.id);
         if (m.grants) this.auths.add(m.grants);
         tolerance.advance(m.toleranceGain);
+        // Replay the licence exactly as clearing it would — advance then floor, in that order —
+        // or a jumped-to campaign gets the powers without the latitude that came with them, and
+        // every sanction reads as outside policy for reasons the operator can't see.
+        policy.advance(m.toleranceGain * 0.8);
+        if (m.grants) policy.raiseTo(AUTH_FLOOR[m.grants] ?? 0);
         progression.award(m.reward);
         if (m.id === id) break;
       }
@@ -655,6 +667,7 @@ export class Missions {
 
   reset(): void {
     tolerance.reset();
+    policy.reset();
     this.completed.clear();
     this.auths.clear();
     this.active = null;

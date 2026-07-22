@@ -25,7 +25,7 @@ const LIFT_M = 45;
 const SAMPLES = 24;
 const MARKER_PX = 7;
 
-export type RouteAction = 'investigate' | 'detain' | 'execute' | 'strike' | null;
+export type RouteAction = 'investigate' | 'detain' | 'prison' | 'execute' | 'strike' | null;
 
 export class RouteLayer {
   readonly lines = new Cesium.PolylineCollection();
@@ -57,7 +57,12 @@ export class RouteLayer {
     if (!from || !legs.length) return;
 
     // Lethal intent is red whether it's a single beam or an area weapon.
-    const colour = action === 'execute' || action === 'strike' ? RED : action === 'detain' ? AMBER : WHITE;
+    const colour =
+      action === 'execute' || action === 'strike'
+        ? RED
+        : action === 'detain' || action === 'prison'
+          ? AMBER
+          : WHITE;
     const points = [from, ...legs];
     // A closed route draws the return leg too, so the patrol reads as a circuit rather than a line
     // that happens to end near where it started.

@@ -2,6 +2,7 @@ import { MISSIONS, missions, type MissionDef } from '../game/missions';
 import { unlockName } from '../game/catalog';
 import { icon } from './icons';
 import { tolerance, toleranceLabel } from '../game/tolerance';
+import { policy, policyLabel } from '../game/policy';
 import { resistance, resistanceLabel } from '../game/resistance';
 
 /**
@@ -21,11 +22,19 @@ const fmt = new Intl.NumberFormat('en-US');
  */
 function toleranceBar(): string {
   const pct = Math.round(tolerance.level * 100);
+  const pol = Math.round(policy.level * 100);
+  // Both dials, stacked, because every decision in the theater is read against both and showing one
+  // of them here was quietly teaching that there is only one. The old caption named a single case
+  // percentage that orders "need" — there is no such number any more: what a call needs depends on
+  // which rung it is and who it is against.
   return (
     `<div class="c2-bar-row tolerance"><span class="c2-bar-k">PUBLIC</span>` +
     `<span class="c2-bar thin"><i class="tol" style="width:${pct}%"></i></span>` +
     `<span class="c2-bar-v">${pct}%</span></div>` +
-    `<div class="c2-tol-note">${toleranceLabel(tolerance.level)} · ORDERS NEED ${Math.round(tolerance.threshold * 100)}% CASE</div>` +
+    `<div class="c2-bar-row policy"><span class="c2-bar-k">POLICY</span>` +
+    `<span class="c2-bar thin"><i class="pol" style="width:${pol}%"></i></span>` +
+    `<span class="c2-bar-v">${pol}%</span></div>` +
+    `<div class="c2-tol-note">${toleranceLabel(tolerance.level)} STREET · ${policyLabel(policy.level)} LICENCE</div>` +
     resistanceBar()
   );
 }

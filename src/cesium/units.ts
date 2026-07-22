@@ -34,30 +34,48 @@ export type UnitState = 'normal' | 'protected' | 'infected';
 export type IncidentRole = 'rioter' | 'runner' | 'brawler' | 'assassin';
 
 /** What a platform is being sent to DO when it gets there. */
-export type RouteAction = 'investigate' | 'detain' | 'execute' | 'strike' | null;
+export type RouteAction = 'investigate' | 'detain' | 'prison' | 'execute' | 'strike' | null;
 
 /**
- * Units are coloured by the ASSESSED band, not by their true state.
+ * The field's colour language. Four channels, and each one answers a different question.
  *
- * That distinction is the whole game. C2 never sees the contagion sim's ground truth — it sees an
- * estimate — and if the field rendered the truth, the assessment percentage on the card would be
- * decoration and every mark would be free. Because the assessment correlates strongly with the
- * truth, the field still reads the way it always has (white countryside, red pooling in the dark);
- * it's just that a red contact is now *probably* infected rather than certainly.
+ * The old scheme banded contacts into clear/suspect/threat and painted them white/green/yellow,
+ * which quietly spent THREE colours on one axis and left nothing to say what a contact was DOING.
+ * Green in particular was carrying "inoculated", which is a fact about the sim that C2 should never
+ * have been able to read off the map at a glance.
+ *
+ *   RAMP (white → yellow)  the assessed threat figure, continuously. No bands, because the number
+ *                          is continuous and banding it hid exactly the near-misses worth looking at.
+ *   RED                    the company: its hardware AND the people its policy protects. The same
+ *                          red on purpose — a protected contact IS company property in every way
+ *                          that matters to the operator, and the map should say so in one colour.
+ *   GREEN                  something attacking, right now: a siege attacker or an assassin mid-act.
+ *   BLUE                   everyone else caught up in a live incident — riots, chases, brawls.
+ *
+ * Precedence runs event → identity → assessment: what a contact is doing this second outranks what
+ * it is, which outranks what the net thinks of it. A protected contact in a riot renders as the
+ * riot, because that is the thing the operator has to answer in the next ten seconds.
  */
-const BAND_COLOR: Record<'clear' | 'suspect' | 'threat', Cesium.Color> = {
-  clear: Cesium.Color.fromCssColorString('#EDEFF2'),
-  // Green reads as inoculated, yellow as suspected. Red is deliberately NOT used here — it belongs
-  // to the company's own hardware, so the map never confuses a threat with a GORGON asset.
-  suspect: Cesium.Color.fromCssColorString('#4F9E7A'),
-  threat: Cesium.Color.fromCssColorString('#F2C13B'),
-};
+const CONTACT_CLEAR = Cesium.Color.fromCssColorString('#FFFFFF');
+const CONTACT_HOT = Cesium.Color.fromCssColorString('#FFD21E');
+const HOSTILE_COLOR = Cesium.Color.fromCssColorString('#3FBF6F');
+const EVENT_COLOR = Cesium.Color.fromCssColorString('#3F8FE0');
 
 /** Out-of-sensor-range units render faint (a stand-in for fog of war). */
 const UNSEEN_ALPHA = 0.3;
 
-/** Company hardware, in the company's colour. */
+/** Company hardware, and the company's protected people, in the company's colour. */
 const DRONE_COLOR = Cesium.Color.fromCssColorString('#E23A2E');
+
+/** The same four channels as CSS hex, for the card's dot and tag. Kept beside the Colors above so
+ *  the panel and the field can never drift apart. */
+export const TINT_HEX = {
+  company: '#E23A2E',
+  hostile: '#3FBF6F',
+  event: '#3F8FE0',
+  clear: '#FFFFFF',
+  hot: '#FFD21E',
+};
 
 /**
  * How strongly infected units avoid obelisk-watched roads at junctions. Tuned by measuring the
@@ -594,12 +612,21 @@ export interface SelectionInfo {
     mark: MarkKind | null;
     /** Seconds left to rescind, or undefined once the order has committed. */
     markTimer?: number;
-    /** Case strength 0-1, against the current public tolerance bar. */
-    caseStrength: number;
-    /** Whether this contact clears public tolerance. */
-    clearsTolerance: boolean;
     /** Inside sensor coverage right now. */
     tracked: boolean;
+    /**
+     * Whether this contact is under company protection.
+     *
+     * The one piece of ground truth the card is now allowed to show, and it is a deliberate reversal
+     * of this module's usual rule. Protection is not a fact about the contagion — it is a fact about
+     * a POLICY, and a policy the operator is expected to obey has to be one they can see. Infection
+     * stays hidden, because that is the thing they are being asked to guess at.
+     */
+    protectedAsset: boolean;
+    /** What this contact is doing inside a live incident, for the header tag. */
+    role?: IncidentRole | 'attacker';
+    /** The colour this contact renders in the field, so the card's dot can agree with the map. */
+    tint: string;
     /** Drone only: whether it's transiting to an ordered point or holding station. */
     order?: 'MOVING' | 'ON STATION';
   };
@@ -1883,6 +1910,95 @@ export class UnitField {
   }
 
   /**
+   * Send whichever platform SHOULD take this sanction, without making the operator pick one.
+   *
+   * The card offers a decision about a person; which airframe services it is logistics, and making
+   * the operator select hardware first was the single biggest thing standing between reading a case
+   * and answering it. So C2 assigns.
+   *
+   * The preference order is the whole of the intelligence here, and it is deliberately dumb:
+   *
+   *   1. A platform that is NOT already tasked, nearest first. An idle unit is the free one.
+   *   2. Failing that, the nearest tasked unit — reassigning it, which silently drops whatever it
+   *      was doing. That is a real cost and the card says so before the operator commits.
+   *
+   * Returns what was sent and whether it had to be pulled off an existing order, or null when
+   * nothing can physically take it — a littoral hull ordered inland, a quadruped with no road to
+   * the contact, or simply no platform carrying the right rig.
+   */
+  dispatch(
+    target: number,
+    action: RouteAction,
+    kinds: PlatformId[],
+  ): { kind: PlatformId; index: number; reassigned: boolean } | null {
+    const t = this.units[target];
+    if (!t || t.dead) return null;
+    const allowed = new Set(kinds);
+
+    const candidates: { kind: PlatformId; index: number; busy: boolean; d: number }[] = [];
+    for (const { kind, index } of this.platformUnits()) {
+      if (!allowed.has(kind)) continue;
+      const u = this.units[index];
+      if (u.dead) continue;
+      candidates.push({
+        kind,
+        index,
+        busy: u.routeAction !== null && u.routeAction !== undefined,
+        d: this.metresBetween(u.lon, u.lat, t.lon, t.lat),
+      });
+    }
+    // Idle before busy, then nearest. Sorting once and walking it means an idle unit on the far side
+    // of the theater still beats a busy one standing next to the contact — being free matters more
+    // than being close, because the close one's current order is also somebody's decision.
+    candidates.sort((a, b) => (a.busy === b.busy ? a.d - b.d : a.busy ? 1 : -1));
+
+    for (const c of candidates) {
+      if (this.orderUnit(c.index, c.kind, t.lon, t.lat, action, target)) {
+        return { kind: c.kind, index: c.index, reassigned: c.busy };
+      }
+    }
+    return null;
+  }
+
+  /** Whether any fielded unit of these kinds exists at all — the card's "no hardware" case. */
+  anyFielded(kinds: PlatformId[]): boolean {
+    const allowed = new Set(kinds);
+    return this.platformUnits().some(({ kind, index }) => allowed.has(kind) && !this.units[index].dead);
+  }
+
+  /**
+   * Point one specific platform at a target. The mechanics of {@link orderSelected} without the
+   * selection, so C2 can task a unit the operator never clicked on.
+   */
+  private orderUnit(
+    index: number,
+    kind: PlatformId,
+    lon: number,
+    lat: number,
+    action: RouteAction,
+    target?: number,
+  ): boolean {
+    if (kind === 'naval' && this.shoreAt(lon, lat) > -60) return false;
+    const u = this.units[index];
+    if (!u || u.dead) return false;
+    // Reassignment starts from a clean sheet: the old route is dropped before pathing, so a
+    // road-bound unit paths from where it IS rather than from the end of an order it won't finish.
+    u.route = [];
+    u.tlon = undefined;
+    u.tlat = undefined;
+    u.loop = false;
+    const drive = this.roadRouteFor(kind, u, lon, lat);
+    if (drive === null) return false;
+    const [first, ...rest] = drive ?? [{ lon, lat }];
+    u.tlon = first.lon;
+    u.tlat = first.lat;
+    u.route = rest;
+    u.routeAction = action;
+    u.routeTarget = target;
+    return true;
+  }
+
+  /**
    * Expand an order into road geometry, for the platforms that are confined to it.
    *
    * Three outcomes, and they are all meaningful:
@@ -2048,6 +2164,71 @@ export class UnitField {
 
   /** Set by the scene when EMERGENCY POWERS is held — the tolerance gate stops applying. */
   toleranceOverride = false;
+
+  /**
+   * What colour one unit renders. See the colour-language note at the top of this file.
+   *
+   * Returns a SHARED scratch for the ramp case, so it must be consumed before the next call — which
+   * the render loop does, and nothing else calls this per-frame. The four flat channels return their
+   * own constants and are safe to hold.
+   */
+  private tintOf(u: Unit): Cesium.Color {
+    if (PLATFORM_KINDS.includes(u.kind)) return DRONE_COLOR;
+    // Doing something, right now. A siege attacker and an assassin are the same category to an
+    // operator — somebody is being harmed unless this is answered — so they share a colour.
+    if (u.siege || u.incident?.role === 'assassin') return HOSTILE_COLOR;
+    if (u.incident) return EVENT_COLOR;
+    if (u.state === 'protected') return DRONE_COLOR;
+    // The assessment, continuously. Squared so the ramp holds white through the low end and only
+    // starts reading yellow where the figure is worth a second look — a linear ramp made a 20%
+    // contact look meaningfully warmer than a 5% one, which is noise wearing a colour.
+    const t = Math.min(1, Math.max(0, u.assess));
+    return Cesium.Color.lerp(CONTACT_CLEAR, CONTACT_HOT, t * t, this.tintScratch);
+  }
+
+  private tintScratch = new Cesium.Color();
+
+  /** The same decision as {@link tintOf}, as CSS hex, for the card's dot. */
+  tintHexOf(index: number): string {
+    const u = this.units[index];
+    if (!u) return TINT_HEX.clear;
+    if (PLATFORM_KINDS.includes(u.kind)) return TINT_HEX.company;
+    if (u.siege || u.incident?.role === 'assassin') return TINT_HEX.hostile;
+    if (u.incident) return TINT_HEX.event;
+    if (u.state === 'protected') return TINT_HEX.company;
+    const t = Math.min(1, Math.max(0, u.assess));
+    const c = Cesium.Color.lerp(CONTACT_CLEAR, CONTACT_HOT, t * t, new Cesium.Color());
+    return c.toCssHexString();
+  }
+
+  /** Whether one contact is inside sensor coverage — the card's only hard gate on acting. */
+  isTrackedPublic(index: number): boolean {
+    const u = this.units[index];
+    return !!u && !u.dead && this.isTracked(u);
+  }
+
+  /** Everything a sanction is judged on, for one contact. Null when it isn't a live contact. */
+  contactSummary(index: number): { assess: number; record: Record_; protectedAsset: boolean } | null {
+    const u = this.units[index];
+    if (!u || u.dead || PLATFORM_KINDS.includes(u.kind)) return null;
+    return { assess: u.assess, record: u.record, protectedAsset: u.state === 'protected' };
+  }
+
+  /**
+   * Put a standing mark on ONE contact, on the usual rescind timer.
+   *
+   * The single-contact counterpart to {@link markSelected}. It charges nothing and checks nothing —
+   * the card has already judged and billed the decision by the time this is called, and having two
+   * places that both decide what an order costs is how the two of them end up disagreeing.
+   */
+  markContact(index: number, kind: MarkKind): boolean {
+    const u = this.units[index];
+    if (!u || u.dead || !this.isOrderable(u)) return false;
+    u.mark = kind;
+    u.markTimer = ORDER_DELAY[kind];
+    this.rebuildMarks();
+    return true;
+  }
 
   /** A contact's case strength, for the panel to show against the current bar. */
   caseOf(index: number): number {
@@ -2303,7 +2484,7 @@ export class UnitField {
       this.ecef[i * 3 + 2] = this.scratch.z;
 
       const selected = this.selection.has(i);
-      const base = PLATFORM_KINDS.includes(u.kind) ? DRONE_COLOR : BAND_COLOR[assessBand(u.assess)];
+      const base = this.tintOf(u);
       // The drone is its own sensor: anything under its disc is seen even with no obelisk nearby.
       // That's the point of flying it into the dark between cities.
       const seen =
@@ -2541,9 +2722,13 @@ export class UnitField {
         heading: one.heading,
         mark: one.mark,
         markTimer: one.markTimer,
-        caseStrength: caseStrength(one.assess, one.record),
-        clearsTolerance: tolerance.clears(one.assess, one.record, this.toleranceOverride),
         tracked: this.isTracked(one),
+        // A platform is stored as 'protected' so the contagion sweep leaves it alone. That is an
+        // implementation detail, not a policy, and tagging the operator's own drone as a protected
+        // asset would be nonsense — so the flag is contacts-only.
+        protectedAsset: !PLATFORM_KINDS.includes(one.kind) && one.state === 'protected',
+        role: one.siege ? 'attacker' : one.incident?.role,
+        tint: this.tintHexOf(oneIdx),
         order: PLATFORM_KINDS.includes(one.kind)
           ? one.tlon !== undefined
             ? 'MOVING'
@@ -2840,6 +3025,8 @@ export class UnitField {
     detainedAttacker: boolean;
     /** Incident participants taken into custody by an arriving platform this frame. */
     detainedIncidents: number;
+    /** Contacts carried off under a sentence rather than into custody, this frame. */
+    imprisoned: number;
     /** Detainments resolved this frame: who threw, and at what. */
     detainments: { from: Cesium.Cartesian3; to: Cesium.Cartesian3 }[];
   } {
@@ -2852,6 +3039,7 @@ export class UnitField {
     }[] = [];
     let detainedAttacker = false;
     let detainedIncidents = 0;
+    let imprisoned = 0;
     const detainments: { from: Cesium.Cartesian3; to: Cesium.Cartesian3 }[] = [];
 
     for (const { kind, index } of this.platformUnits()) {
@@ -2887,8 +3075,12 @@ export class UnitField {
         u.strikeCooldown = INTERCEPT.cooldownS;
         out.push(this.detonate(u.tlon, u.tlat));
       } else if (t) {
-        // Investigate / detain / execute all land on the one contact that was picked.
-        if (action === 'detain') {
+        // Investigate / detain / prison / execute all land on the one contact that was picked.
+        // Custody and a sentence are the same arrival — a platform arrives and somebody is carried
+        // away. What separates them is what happens after, which this layer doesn't model and
+        // shouldn't pretend to: the difference is counted here and spoken about by the scene.
+        if (action === 'detain' || action === 'prison') {
+          if (action === 'prison') imprisoned++;
           // from = the platform that arrived, to = the contact it was sent at.
           const targetIdx = u.routeTarget!;
           detainments.push({
@@ -2927,7 +3119,7 @@ export class UnitField {
       u.tlon = undefined;
       u.tlat = undefined;
     }
-    return { strikes: out, detainedAttacker, detainedIncidents, detainments };
+    return { strikes: out, detainedAttacker, detainedIncidents, imprisoned, detainments };
   }
 
   /** Everything inside the blast dies. Returns the toll, split into target and everyone else. */

@@ -150,6 +150,12 @@
             <span class="dev-k">Public tolerance <span class="dev-v" id="dev-tolerance-val">—</span></span>
             <input type="range" id="dev-tolerance" min="0" max="100" step="1" value="28" />
           </label>
+          <!-- The second bar. Driving these two apart is how the interesting cases are reached:
+               a permissive street under a narrow licence, or the reverse. -->
+          <label class="dev-row" for="dev-policy">
+            <span class="dev-k">Policy latitude <span class="dev-v" id="dev-policy-val">—</span></span>
+            <input type="range" id="dev-policy" min="0" max="100" step="1" value="20" />
+          </label>
           <label class="dev-row" for="dev-resistance">
             <span class="dev-k">Resistance <span class="dev-v" id="dev-resistance-val">—</span></span>
             <input type="range" id="dev-resistance" min="0" max="100" step="1" value="0" />
@@ -200,6 +206,9 @@
       <div class="up-head">
         <span class="up-dot" id="up-dot"></span>
         <span class="up-id" id="up-id">—</span>
+        <!-- What this contact is, when it is something: a company asset, or a role in a live
+             incident. Empty for an ordinary contact — a tag on everybody is a tag on nobody. -->
+        <span class="up-tag" id="up-tag" hidden></span>
         <button class="up-close" id="up-close" type="button" aria-label="Deselect">✕</button>
       </div>
       <div class="up-body" id="up-single">
@@ -209,47 +218,39 @@
           <div class="up-mug" id="up-mug"></div>
           <div class="up-top-rows">
             <div class="up-row"><span class="k">Type</span><span class="v" id="up-type">—</span></div>
-            <!-- Assessment, not ground truth: C2 sees a confidence, never the sim's answer -->
+            <!-- The contact's standing case, read against the two bars the selected sanction sets.
+                 Assessment, not ground truth: C2 sees a confidence, never the sim's answer. -->
+            <div class="up-row"><span class="k">Overall threat confidence</span><span class="v" id="up-conf">—</span></div>
+            <div class="up-track" id="up-conf-track"><i></i><u class="tick-policy"></u><u class="tick-public"></u></div>
+            <div class="up-row"><span class="k">Public tolerance</span><span class="v tol-public" id="up-pub">—</span></div>
+            <div class="up-row"><span class="k">Policy tolerance</span><span class="v tol-policy" id="up-pol">—</span></div>
             <div class="up-row"><span class="k">Assessment</span><span class="v" id="up-status">—</span></div>
-            <div class="up-assess" id="up-assess-bar"><i></i></div>
-            <!-- Case strength vs the public-tolerance line: why a contact can or can't be ordered -->
-            <div class="up-case" id="up-case" hidden><span class="bar"><i></i><u></u></span><span class="v">—</span></div>
           </div>
         </div>
-        <div class="up-row"><span class="k">Position</span><span class="v" id="up-pos">—</span></div>
+        <div class="up-row"><span class="k">Location</span><span class="v" id="up-pos">—</span></div>
         <div class="up-row"><span class="k">Heading</span><span class="v" id="up-hdg">—</span></div>
         <div class="up-row"><span class="k">Sensor</span><span class="v" id="up-sensor">—</span></div>
         <!-- Standing order + its rescind countdown; hidden when nothing is ordered -->
         <div class="up-row" id="up-order" hidden><span class="k">Order</span><span class="v" id="up-order-v">—</span></div>
         <div class="up-assess order-bar" id="up-order-bar" hidden><i></i></div>
-        <!-- Live accusation: what the net thinks this contact just did. The main thing acted on. -->
-        <div class="up-live" id="up-live" hidden>
-          <div class="ul-head">
-            <span class="ul-tag">LIVE VIOLATION</span>
-            <span class="ul-age" id="ul-age">—</span>
-          </div>
-          <div class="ul-what" id="ul-what">—</div>
-          <div class="ul-bars">
-            <div class="ul-bar-row">
-              <span class="ul-k">EVIDENCE</span>
-              <span class="ul-bar"><i id="ul-cert"></i></span>
-              <span class="ul-v" id="ul-cert-v">—</span>
-            </div>
-            <div class="ul-bar-row">
-              <span class="ul-k">PUBLIC BAR</span>
-              <span class="ul-bar"><i class="bar-tol" id="ul-tol"></i></span>
-              <span class="ul-v" id="ul-tol-v">—</span>
-            </div>
-          </div>
-          <div class="ul-note" id="ul-note">—</div>
-          <div class="ul-actions">
-            <button type="button" class="ul-btn fine" id="ul-fine">FINE</button>
-            <button type="button" class="ul-btn investigate" id="ul-investigate">INVESTIGATE</button>
-          </div>
-        </div>
         <div class="up-record" id="up-record">
           <span class="k">Past infractions</span>
           <ul id="up-charges"></ul>
+        </div>
+        <!-- Live accusation: what the net thinks this contact just did. When one is up, THIS is the
+             figure a sanction is judged against — you are answering the event, not the person. -->
+        <div class="up-live" id="up-live" hidden>
+          <div class="ul-head">
+            <span class="ul-tag">LIVE VIOLATION</span>
+            <span class="ul-what" id="ul-what">—</span>
+            <span class="ul-age" id="ul-age">—</span>
+          </div>
+          <div class="up-track" id="ul-track"><i></i><u class="tick-policy"></u><u class="tick-public"></u></div>
+          <div class="ul-figures">
+            <span class="ul-fig"><span class="ul-k">EVIDENCE</span><span class="ul-v" id="ul-cert-v">—</span></span>
+            <span class="ul-fig"><span class="ul-k">PUBLIC TOLERANCE</span><span class="ul-v tol-public" id="ul-tol-v">—</span></span>
+            <span class="ul-fig"><span class="ul-k">POLICY TOLERANCE</span><span class="ul-v tol-policy" id="ul-pol-v">—</span></span>
+          </div>
         </div>
         <!-- Platform hardpoints; fitting happens in the store, this is the in-theater readout -->
         <div class="up-record up-loadout" id="up-loadout" hidden>
@@ -264,7 +265,15 @@
         <div class="up-row"><span class="k">Tracked</span><span class="v" id="up-tracked">—</span></div>
       </div>
       <div class="up-actions">
-        <button class="up-mark" id="up-mark" type="button">◈ MARK INVESTIGATE</button>
+        <!-- The sanction ladder. Every rung is offered against every contact, always: selecting one
+             is a QUESTION ("what would this cost?"), and only ACTIVATE DECISION answers it. -->
+        <div class="up-decide" id="up-decide" hidden>
+          <div class="up-ladder" id="up-ladder"></div>
+          <div class="up-verdict" id="up-verdict">—</div>
+          <div class="up-consequence" id="up-consequence">—</div>
+          <button class="up-activate" id="up-activate" type="button">ACTIVATE DECISION</button>
+        </div>
+        <button class="up-mark" id="up-mark" type="button" hidden>◈ MARK INVESTIGATE</button>
       </div>
     </div>
 

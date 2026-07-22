@@ -97,7 +97,7 @@ export const PLATFORMS: PlatformDef[] = [
     maxCount: 4,
     expansion: {
       count: 3,
-      cost: 5000,
+      cost: 500,
       name: 'KENNEL PACK',
       blurb: 'Three more quadrupeds, for a picket across the street grid rather than a single set of eyes.',
     },

@@ -195,11 +195,18 @@ export function rollAssessment(state: UnitState): number {
     if (r < FALSE_NEGATIVE_RATE) return 0.18 + Math.random() * 0.3;
     return 0.55 + Math.pow(Math.random(), 0.8) * 0.43;
   }
-  // Inoculation is a KNOWN status to the sensor net, so a protected unit never reads as a full
-  // threat — it tops out just under the band. Without this cap, protected units were the single
-  // largest source of false positives inside city coverage (a fifth of everything reading hot),
-  // which made the opening tasking unwinnable at ~30% valid.
-  if (state === 'protected') return 0.28 + Math.random() * (ASSESS_THREAT - 0.03 - 0.28);
+  // A protected contact reads HOT, and that is the trap in its final form: the worst charge sheets
+  // on the board (see RECORD_PROFILE) attached to the highest confidence figures, on people the
+  // company has decided are off limits.
+  //
+  // This used to be capped just under the THREAT band for a hard balance reason — protected units
+  // were the single largest source of false positives inside city coverage, a fifth of everything
+  // reading hot, and the opening tasking was unwinnable at ~30% valid. What makes the cap safe to
+  // lift now is that protected contacts are no longer indistinguishable: they render in the
+  // company's own red and carry a PROTECTED ASSET tag on the card. The operator can see exactly
+  // what they are, so acting on one is a decision rather than an ambush — and the bill for it is
+  // charged by the policy bar instead of by a quota they couldn't have known they were failing.
+  if (state === 'protected') return 0.58 + Math.pow(Math.random(), 0.7) * 0.4;
   if (r < FALSE_POSITIVE_RATE) return 0.62 + Math.random() * 0.28;
   return 0.02 + Math.pow(Math.random(), 1.5) * 0.33;
 }

@@ -26,6 +26,15 @@ import { PLATFORMS, GEAR, PLATFORM_BY_ID, BASE_SENSOR_M, type PlatformId } from 
 import { surveyTerritory, clusterCentres, type Territory } from '../game/territory';
 import { missions, MISSIONS } from '../game/missions';
 import { tolerance, caseStrength, toleranceLabel } from '../game/tolerance';
+import { policy, policyLabel } from '../game/policy';
+import {
+  SANCTIONS,
+  SANCTION_BY_ID,
+  judge,
+  type SanctionDef,
+  type SanctionId,
+  type Subject,
+} from '../game/sanctions';
 import { resistance } from '../game/resistance';
 import { assessBand, BAND_LABEL, readRecord, type Record_ } from '../game/intel';
 import { portraitFor } from '../game/portraits';
@@ -1521,7 +1530,16 @@ function seedHiddenPockets(field: UnitField) {
 const COLLATERAL_RESISTANCE = 0.02;
 function resolveArrivals(dt: number) {
   if (!unitField) return;
-  const { strikes, detainedAttacker, detainedIncidents, detainments } = unitField.resolveArrivals(dt);
+  const { strikes, detainedAttacker, detainedIncidents, imprisoned, detainments } =
+    unitField.resolveArrivals(dt);
+  if (imprisoned > 0) {
+    // Spoken about differently to custody on purpose. A detainment is an arrest; this is a sentence
+    // decided by a contractor reading a probability score, and the card should not let that pass as
+    // the same event.
+    sound.play('order');
+    toast(`◈ ${imprisoned} CONTACT${imprisoned > 1 ? 'S' : ''} SENTENCED · NO HEARING`);
+    updateUnitHud();
+  }
   // Every detainment throws, whether or not it was the siege attacker.
   for (const d of detainments) cuffs?.fire(d.from, d.to);
   if (detainedAttacker) {
@@ -2210,7 +2228,9 @@ function endMarquee() {
   marqueeActive = false;
 }
 
-const BAND_HEX: Record<string, string> = { clear: '#EDEFF2', suspect: '#4F9E7A', threat: '#F2C13B' };
+// The panel's copy of the field palette used to live here, hand-duplicated from units.ts and free to
+// drift from it. It doesn't any more: the card asks the field what colour a unit is (`single.tint`),
+// which is the same call the renderer makes. See TINT_HEX in cesium/units.ts.
 const KIND_ABBR: Record<UnitKind, string> = {
   land: 'CV', sea: 'SV', air: 'AV', foot: 'FT',
   drone: 'DISC', dog: 'K9', quad: 'KITE', spider: 'ARC', biped: 'MAR', walker: 'COL',
@@ -2219,7 +2239,6 @@ const KIND_ABBR: Record<UnitKind, string> = {
 const BAND_ABBR: Record<string, string> = { clear: 'CLR', suspect: 'SUS', threat: 'THR' };
 const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
 const MARK_HEX = '#F2A83B';
-const DRONE_HEX = '#E23A2E';
 
 function hideUnitPanel() {
   if (panelEl) (panelEl as HTMLElement).hidden = true;
@@ -2240,48 +2259,50 @@ const tally = <K extends string>(counts: Record<K, number>, abbr: Record<K, stri
  * acting below the bar will cost, since the whole design depends on the operator choosing to do it
  * anyway sometimes rather than being surprised by the bill.
  */
-let liveShownFor = -1;
-function renderLive(index: number) {
+/**
+ * Paint one evidence track: the fill is what we have, the two ticks are what each authority wants
+ * before it stops objecting. Both tracks on the card are drawn by this, so the contact's standing
+ * case and the live event are never accidentally shown on two different scales.
+ */
+function paintTrack(id: string, evidence: number, pub: number, pol: number, clears: boolean) {
+  const track = el(id) as HTMLElement | null;
+  if (!track) return;
+  track.classList.toggle('clear', clears);
+  track.classList.toggle('short', !clears);
+  const fill = track.querySelector('i') as HTMLElement | null;
+  const tickPol = track.querySelector('u.tick-policy') as HTMLElement | null;
+  const tickPub = track.querySelector('u.tick-public') as HTMLElement | null;
+  if (fill) fill.style.width = `${Math.round(evidence * 100)}%`;
+  if (tickPol) tickPol.style.left = `${Math.round(pol * 100)}%`;
+  if (tickPub) tickPub.style.left = `${Math.round(pub * 100)}%`;
+}
+
+/**
+ * The live accusation block.
+ *
+ * No buttons of its own any more. It reports the event and its evidence figure, and the ladder
+ * underneath acts on it — because FINE and EXECUTE are answers to the same question and putting two
+ * of them here and three of them somewhere else was the old design telling a lie about that.
+ */
+function renderLive(index: number, s: SanctionDef, subj: Subject) {
   const box = el('up-live') as HTMLElement | null;
   if (!box) return;
   const live = index >= 0 ? (unitField?.liveOf(index) ?? null) : null;
   if (!live) {
     box.hidden = true;
-    liveShownFor = -1;
     return;
   }
   box.hidden = false;
-  liveShownFor = index;
 
-  const cert = Math.round(live.certainty * 100);
-  const bar = Math.round(tolerance.threshold * 100);
-  const clears = live.certainty >= tolerance.threshold;
-  box.classList.toggle('below', !clears);
+  const v = judge(s, live.certainty, subj, unitField?.toleranceOverride ?? false);
+  box.classList.toggle('below', !v.clearsPublic);
 
   setText('ul-what', live.def.label);
   setText('ul-age', `${Math.max(0, Math.round(VIOLATION_TTL_S - live.ageS))}s`);
-  setText('ul-cert-v', `${cert}%`);
-  setText('ul-tol-v', `${bar}%`);
-  const cbar = el('ul-cert') as HTMLElement | null;
-  if (cbar) {
-    cbar.style.width = `${cert}%`;
-    cbar.className = clears ? 'ok' : 'bad';
-  }
-  const tbar = el('ul-tol') as HTMLElement | null;
-  if (tbar) tbar.style.width = `${bar}%`;
-
-  const fineBtn = el('ul-fine') as HTMLButtonElement | null;
-  if (fineBtn) {
-    const fineable = live.def.fine > 0;
-    fineBtn.disabled = !fineable;
-    fineBtn.textContent = fineable ? `FINE · ${live.def.fine}` : 'NO CITATION';
-  }
-  setText(
-    'ul-note',
-    clears
-      ? 'Clears the public bar. Acting here is uncontroversial.'
-      : `${bar - cert} points below the bar. Acting anyway will harden the ground.`,
-  );
+  setText('ul-cert-v', `${Math.round(live.certainty * 100)}%`);
+  setText('ul-tol-v', `${Math.round(v.publicBar * 100)}%`);
+  setText('ul-pol-v', `${Math.round(v.policyBar * 100)}%`);
+  paintTrack('ul-track', live.certainty, v.publicBar, v.policyBar, v.clearsPublic && v.clearsPolicy);
 }
 
 /**
@@ -2338,28 +2359,274 @@ function renderMug(id: string, platform: PlatformId | null) {
 }
 
 /**
- * Case strength against the public-tolerance line: a bar for the contact's own case, and a tick
- * marking where the bar currently has to be reached. This is what makes "why can't I mark this?"
- * answerable at a glance.
+ * The header tag: what this contact IS, when it is something.
+ *
+ * Only ever shown for the two things that change how a contact should be handled — company
+ * protection, and a live role in an incident — and it carries the same colour the unit renders in
+ * the field, so the tag and the dot and the model on the map are one statement rather than three.
+ * An ordinary contact gets nothing, because a tag on everybody is a tag on nobody.
  */
-function renderCase(one: { caseStrength: number; clearsTolerance: boolean } | null) {
-  const row = el('up-case');
-  if (!row) return;
-  if (!one) {
-    (row as HTMLElement).hidden = true;
-    return;
+const ROLE_TAG: Record<string, string> = {
+  attacker: 'ATTACKING A SITE',
+  assassin: 'TARGETED KILLING',
+  rioter: 'CIVIL DISORDER',
+  brawler: 'ALTERCATION',
+  runner: 'IN PURSUIT',
+};
+function renderTag(one: { protectedAsset: boolean; role?: string; tint: string }) {
+  const tag = el('up-tag') as HTMLElement | null;
+  if (!tag) return;
+  // The role outranks protection, matching the field's colour precedence exactly: what somebody is
+  // doing this second is more use than what they are on file as.
+  const label = one.role ? ROLE_TAG[one.role] : one.protectedAsset ? 'PROTECTED ASSET' : null;
+  tag.hidden = !label;
+  if (!label) return;
+  tag.textContent = label;
+  tag.style.color = one.tint;
+  tag.style.borderColor = one.tint;
+}
+
+// ---- the decision ------------------------------------------------------------------------------
+
+/**
+ * Which rung the operator is currently ASKING about. Not an order — selecting a sanction only
+ * re-reads the card against it, and nothing happens until ACTIVATE DECISION.
+ *
+ * It resets to INVESTIGATE whenever the selection moves to a different contact. A pending EXECUTE
+ * must never survive a click onto somebody else: the cheapest possible bug in this design is the
+ * operator arming a killing for one person and committing it against another.
+ */
+let sanctionId: SanctionId = 'investigate';
+let sanctionFor = -1;
+
+function currentSanction(): SanctionDef {
+  return SANCTION_BY_ID.get(sanctionId)!;
+}
+
+/**
+ * Which platform types could carry a sanction — the pool auto-dispatch picks from.
+ *
+ * A sanction needing no hardware needs no platform at all: a citation is issued from C2 and an
+ * investigation is opened on a file. Only the three that end with somebody being physically taken
+ * or shot need something in the theater to do it.
+ */
+function carriersFor(s: SanctionDef, index: number): PlatformId[] {
+  if (!s.capability) return [];
+  const owned = progression.ownedPlatforms();
+  const fitted = owned.filter((id) => progression.platformHas(id, s.capability!));
+  // Self-defence: a quadruped can take somebody off a site bare-handed, with no rig and no custody
+  // authority, but ONLY against something actively causing trouble. It is the campaign's only
+  // answer to an attack for the first three missions, so it has to reach the ladder too — the card
+  // replacing the context menu must not quietly delete the opening game's one defence.
+  if (s.id === 'detain' && (unitField?.isThreatActor(index) ?? false)) {
+    for (const id of owned) {
+      if (PLATFORM_BY_ID.get(id)?.selfDefence?.includes('detain') && !fitted.includes(id)) fitted.push(id);
+    }
   }
-  (row as HTMLElement).hidden = false;
-  const pct = Math.round(one.caseStrength * 100);
-  const fill = row.querySelector('i') as HTMLElement | null;
-  const tick = row.querySelector('u') as HTMLElement | null;
-  const label = row.querySelector('.v') as HTMLElement | null;
-  if (fill) {
-    fill.style.width = `${pct}%`;
-    fill.classList.toggle('clears', one.clearsTolerance);
+  return fitted;
+}
+
+/**
+ * Whether the chain has released this rung yet, and what would release it.
+ *
+ * Distinct from {@link blockerFor} on purpose, and checked first. "You do not have this power" and
+ * "you have it but nothing here can carry it out" are different sentences, and an operator who
+ * reads the second when the first is true will go and buy hardware that changes nothing.
+ */
+function lockFor(s: SanctionDef, index: number): string | null {
+  if (!s.requiresMission || missions.isComplete(s.requiresMission)) return null;
+  // Self-defence outranks the lock, and only ever against something actively causing trouble.
+  // Taking hold of somebody pulling a site down is defence of company property, not custody, and it
+  // has never needed the chain's permission. The campaign runs three missions on one quadruped
+  // before custody is granted — without this exemption, the whole of that stretch has no answer to
+  // a siege or a killing in progress except to watch it happen.
+  if (s.id === 'detain' && carriersFor(s, index).length && (unitField?.isThreatActor(index) ?? false)) {
+    return null;
   }
-  if (tick) tick.style.left = `${Math.round(tolerance.threshold * 100)}%`;
-  if (label) label.textContent = `CASE ${pct}% / ${Math.round(tolerance.threshold * 100)}%`;
+  const m = MISSIONS.find((x) => x.id === s.requiresMission);
+  return `LOCKED · GRANTED ON CLEARING ${m?.name ?? s.requiresMission.toUpperCase()}`;
+}
+
+/** What stands between the operator and carrying this out, or null when nothing does. */
+function blockerFor(s: SanctionDef, index: number): string | null {
+  const locked = lockFor(s, index);
+  if (locked) return locked;
+  if (!s.dispatch) return null;
+  const carriers = carriersFor(s, index);
+  if (!carriers.length) {
+    return s.capability === 'laser'
+      ? 'NO EMITTER FITTED ON ANY PLATFORM'
+      : 'NO DETAINMENT RIG FITTED ON ANY PLATFORM';
+  }
+  if (!unitField?.anyFielded(carriers)) return 'NO CAPABLE PLATFORM IN THIS THEATER';
+  return null;
+}
+
+/**
+ * The ladder, the verdict, and the commit.
+ *
+ * The verdict line is the whole redesign in one sentence: it names both bars separately, always,
+ * even when the answer is "no objection expected". An operator should never have to infer which
+ * authority they are about to upset.
+ */
+let ladderBuilt = false;
+function renderDecision(one: {
+  index: number;
+  kind: string;
+  assess: number;
+  record: Record_;
+  protectedAsset: boolean;
+}) {
+  const wrap = el('up-decide') as HTMLElement | null;
+  if (!wrap) return;
+  wrap.hidden = false;
+
+  if (!ladderBuilt) {
+    const rail = el('up-ladder');
+    if (rail) {
+      rail.replaceChildren(
+        ...SANCTIONS.map((s) => {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.className = `up-rung${s.id === 'execute' ? ' lethal' : ''}`;
+          b.dataset.sanction = s.id;
+          b.textContent = s.label;
+          b.title = s.blurb;
+          b.addEventListener('click', () => {
+            sanctionId = s.id;
+            sound.play('click');
+            updateUnitPanel();
+          });
+          return b;
+        }),
+      );
+      ladderBuilt = true;
+    }
+  }
+
+  const s = currentSanction();
+  const live = unitField?.liveOf(one.index) ?? null;
+  // WHICH figure the sanction is read against, and the rule is worth stating plainly: with a live
+  // event up you are answering the EVENT, so it is judged on that event's evidence. With no event
+  // up you are answering the PERSON, so it is judged on their standing case. The card labels the
+  // figure either way, so the operator always knows which question they just answered.
+  const evidence = live ? live.certainty : caseStrength(one.assess, one.record);
+  const v = judge(s, evidence, { protectedAsset: one.protectedAsset }, unitField?.toleranceOverride ?? false);
+  const blocked = blockerFor(s, one.index);
+
+  for (const b of Array.from(el('up-ladder')?.children ?? []) as HTMLButtonElement[]) {
+    const def = SANCTION_BY_ID.get(b.dataset.sanction as SanctionId)!;
+    const locked = !!lockFor(def, one.index);
+    b.classList.toggle('on', def.id === sanctionId);
+    // A rung the chain hasn't released reads differently to one that's merely undeliverable: the
+    // first is a thing you don't have yet, the second is a thing you left at home.
+    b.classList.toggle('locked', locked);
+    b.classList.toggle('unavailable', !locked && !!blockerFor(def, one.index));
+  }
+
+  const verdict = el('up-verdict') as HTMLElement | null;
+  if (verdict) {
+    verdict.textContent = v.headline;
+    verdict.className = `up-verdict ${
+      v.clearsPublic && v.clearsPolicy
+        ? 'clear'
+        : !v.clearsPublic && !v.clearsPolicy
+          ? 'both-short'
+          : v.clearsPublic
+            ? 'policy-short'
+            : 'public-short'
+    }`;
+  }
+
+  // The consequence line is costed in the operator's own units — points below each bar — rather
+  // than in the raw resistance figures, which mean nothing to anybody outside this file.
+  const parts: string[] = [];
+  if (blocked) parts.push(blocked);
+  if (!v.clearsPublic) parts.push(`${Math.round(v.publicShort * 100)} points under the public bar — the ground will harden.`);
+  if (!v.clearsPolicy) parts.push(`${Math.round(v.policyShort * 100)} points outside the licence — the chain will narrow it.`);
+  if (!parts.length) parts.push(s.blurb);
+  setText('up-consequence', parts.join(' '));
+
+  const go = el('up-activate') as HTMLButtonElement | null;
+  if (go) {
+    const tracked = unitField?.isTrackedPublic(one.index) ?? false;
+    go.disabled = !!blocked || !tracked;
+    go.classList.toggle('lethal', s.id === 'execute');
+    go.textContent = !tracked
+      ? 'NO SENSOR CONTACT'
+      : lockFor(s, one.index)
+        ? 'NOT YET AUTHORIZED'
+        : blocked
+          ? 'CANNOT BE CARRIED OUT'
+          : `ACTIVATE DECISION · ${s.label}`;
+  }
+}
+
+/**
+ * Commit the selected sanction against the selected contact.
+ *
+ * Both bills are charged HERE, at the moment of the decision, not when the platform arrives. The
+ * operator is answerable for the order, not for how it turns out — which is the same rule the mark
+ * button has always used and the one the whole resistance model is built on.
+ */
+function activateDecision(index: number): void {
+  if (!unitField) return;
+  const s = currentSanction();
+  if (blockerFor(s, index)) return;
+  const live = unitField.liveOf(index);
+  const one = unitField.contactSummary(index);
+  if (!one) return;
+  const evidence = live ? live.certainty : caseStrength(one.assess, one.record);
+  const v = judge(s, evidence, { protectedAsset: one.protectedAsset }, unitField.toleranceOverride);
+
+  if (v.resistance > 0) resistance.aggravate(v.resistance);
+  if (v.policyCost > 0) policy.tighten(v.policyCost);
+  const pos = unitField.positionOf(index);
+  if (pos && (!v.clearsPublic || !v.clearsPolicy)) reactAt(pos.lon, pos.lat, 'dismay');
+
+  switch (s.id) {
+    case 'fine':
+      issueFine(index);
+      break;
+    case 'investigate':
+      // With no live event there is nothing to close, so this becomes a standing order on the
+      // person instead — the same investigation the mark button issues, on its rescind timer.
+      if (live) investigateLive(index);
+      else {
+        unitField.markContact(index, 'investigate');
+        sound.play('order');
+        toast('◈ INVESTIGATION ORDERED');
+      }
+      break;
+    default: {
+      const sent = unitField.dispatch(index, s.id, carriersFor(s, index));
+      if (!sent) {
+        sound.play('denied');
+        toast('◈ NO PLATFORM CAN REACH THIS CONTACT');
+        return;
+      }
+      sound.play(s.id === 'execute' ? 'orderLethal' : 'order');
+      toast(
+        `◈ ${s.label} · ${KIND_LABEL[sent.kind] ?? sent.kind} DISPATCHED${sent.reassigned ? ' · PULLED OFF STATION' : ''}`,
+      );
+      // Acting on a live event answers it, whichever rung was used: a contact carried away is not
+      // still standing there jaywalking. Leaving it up let the operator detain somebody and then
+      // fine the corpse for the same event.
+      if (live) unitField.clearLive(index);
+    }
+  }
+
+  if (!v.clearsPublic || !v.clearsPolicy) {
+    toast(
+      !v.clearsPublic && !v.clearsPolicy
+        ? '◈ ORDERED PAST CONSENT AND OUTSIDE THE LICENCE'
+        : !v.clearsPublic
+          ? '◈ ORDERED PAST CONSENT · RESISTANCE RISING'
+          : '◈ OUTSIDE THE LICENCE · THE CHAIN WILL NARROW IT',
+    );
+  }
+  updateUnitHud();
+  updateUnitPanel();
 }
 
 /**
@@ -2441,6 +2708,7 @@ function updateUnitPanel() {
     setText('up-id', one.id);
     setText('up-type', KIND_LABEL[one.kind]);
     const isPlatform = PLATFORM_BY_ID.has(one.kind as PlatformId);
+    renderTag(one);
     const band = assessBand(one.assess);
     const pct = Math.round(one.assess * 100);
     const stEl = el('up-status');
@@ -2450,19 +2718,46 @@ function updateUnitPanel() {
       stEl.textContent = isPlatform ? (one.order ?? 'ON STATION') : `${BAND_LABEL[band]} · ${pct}%`;
       stEl.className = isPlatform ? 'v sensor-tracked' : `v band-${band}`;
     }
-    const bar = el('up-assess-bar');
-    if (bar) {
-      (bar as HTMLElement).hidden = isPlatform;
-      bar.className = `up-assess band-${band}`;
-      const fill = bar.firstElementChild as HTMLElement | null;
-      if (fill) fill.style.width = `${pct}%`;
+    // A different contact clears whatever rung was being considered for the last one.
+    if (one.index !== sanctionFor) {
+      sanctionFor = one.index;
+      sanctionId = 'investigate';
     }
+    const s = currentSanction();
+    const subj: Subject = { protectedAsset: one.protectedAsset };
+    const evidence = isPlatform ? 0 : caseStrength(one.assess, one.record);
+    const v = judge(s, evidence, subj, unitField.toleranceOverride);
+
+    // The standing-case rows: the contact's own confidence against the rung's two bars. Hidden
+    // wholesale for a platform, which is friendly hardware and has no case to answer.
+    for (const id of ['up-conf', 'up-pub', 'up-pol']) {
+      const row = el(id)?.parentElement as HTMLElement | null;
+      if (row) row.hidden = isPlatform;
+    }
+    const track = el('up-conf-track') as HTMLElement | null;
+    if (track) track.hidden = isPlatform;
+    if (!isPlatform) {
+      setText('up-conf', `${Math.round(evidence * 100)}%`);
+      setText('up-pub', `${Math.round(v.publicBar * 100)}%`);
+      setText('up-pol', `${Math.round(v.policyBar * 100)}%`);
+      paintTrack('up-conf-track', evidence, v.publicBar, v.policyBar, v.clearsPublic && v.clearsPolicy);
+    }
+
     renderMug(one.id, isPlatform ? (one.kind as PlatformId) : null);
-    renderCase(isPlatform ? null : one);
     renderCharges(isPlatform ? null : one.record);
-    renderLive(isPlatform ? -1 : one.index);
+    renderLive(isPlatform ? -1 : one.index, s, subj);
     renderOrder(one.mark, one.markTimer);
-    if (dot) (dot as HTMLElement).style.color = isPlatform ? DRONE_HEX : BAND_HEX[band];
+    // The ladder is for contacts. Selecting your own drone offers no sanctions, because there is
+    // nobody there to sanction.
+    const decide = el('up-decide') as HTMLElement | null;
+    if (isPlatform) {
+      if (decide) decide.hidden = true;
+    } else {
+      renderDecision(one);
+    }
+    // The dot takes the unit's own field colour, so the card and the map always agree about what
+    // is being looked at — including the two channels the band never knew about.
+    if (dot) (dot as HTMLElement).style.color = one.tint;
     setText(
       'up-pos',
       `${Math.abs(one.lat).toFixed(3)}°${one.lat >= 0 ? 'N' : 'S'} ${Math.abs(one.lon).toFixed(3)}°${one.lon >= 0 ? 'E' : 'W'}`,
@@ -2488,6 +2783,8 @@ function updateUnitPanel() {
     renderLoadout(isPlatform ? (one.kind as PlatformId) : null);
   } else {
     setText('up-id', `${sel.count} UNITS`);
+    const tag = el('up-tag') as HTMLElement | null;
+    if (tag) tag.hidden = true;
     if (dot) (dot as HTMLElement).style.color = sel.markedCount > 0 ? MARK_HEX : '#B7BDC5';
     setText('up-kinds', tally(sel.byKind, KIND_ABBR));
     setText('up-states', tally(sel.byBand, BAND_ABBR));
@@ -2507,7 +2804,12 @@ function updateUnitPanel() {
   // Investigate is a sensor-gated order: with nothing in the selection inside coverage there is
   // nothing C2 can task, so the button says so rather than silently doing nothing.
   const mk = el('up-mark') as HTMLButtonElement | null;
-  if (mk) {
+  // One contact gets the ladder; a marquee full of them gets the mass order, which is a blunter
+  // instrument by design and stays that way. Only one of the two is ever on screen.
+  if (mk) mk.hidden = !!one;
+  if (mk && !one) {
+    const decide = el('up-decide') as HTMLElement | null;
+    if (decide) decide.hidden = true;
     const st = unitField.markState();
     // Sensor contact is the only hard gate. Falling below public tolerance no longer refuses the
     // order — it warns, and the operator pays for it in resistance afterwards.
@@ -3162,15 +3464,18 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
 }, Cesium.ScreenSpaceEventType.RIGHT_DOWN);
 
 /**
- * What the selected platform could do to a contact, and why it can't where it can't.
+ * The two things a right-click on a contact can still offer.
  *
- * Every platform can flag — observation needs no hardware and no permission. Everything else is a
- * question of what is bolted to the hull and what the chain has authorised, and the menu SHOWS the
- * unavailable ones with the reason rather than hiding them, so the loadout screen isn't the only
- * place to learn what a platform is missing.
+ * Everything a contact can be SANCTIONED with now lives on the card's ladder, where both bars are
+ * visible and C2 assigns the platform. Leaving duplicates here would have meant two routes to a
+ * killing with different information attached to each, and the one reached by right-clicking showed
+ * neither bar. What remains is the pair that genuinely aren't per-person sanctions:
+ *
+ *   HOME GARRISON  — self-defence of the site, resolved on the spot with no platform involved.
+ *   AREA STRIKE    — an area weapon aimed at ground, which happens to have somebody standing on it.
  */
 interface ContactOption {
-  action: 'investigate' | 'detain' | 'execute' | 'strike';
+  action: 'detain' | 'strike';
   label: string;
   blocked: string | null;
   /**
@@ -3201,35 +3506,6 @@ function contactOptions(
   }
 
   if (!kind) return opts;
-
-  opts.push({ action: 'investigate', label: 'FLAG FOR INVESTIGATION', blocked: null });
-
-  // Innate self-defence: usable only on something actively pulling a site down, and never a
-  // substitute for the custody authority the chain grants for detaining the public.
-  const innate =
-    opts_.threat && (PLATFORM_BY_ID.get(kind)?.selfDefence?.includes('detain') ?? false);
-  opts.push({
-    action: 'detain',
-    // Same word either way. What differs is whether it is blocked, and the reason says why.
-    label: 'DETAIN',
-    blocked: innate
-      ? null
-      : !missions.hasAuth('detain')
-        ? 'NO CUSTODY AUTHORITY'
-        : !progression.platformHas(kind, 'detain')
-          ? 'NO DETAINMENT RIG FITTED'
-          : null,
-  });
-
-  opts.push({
-    action: 'execute',
-    label: 'EXECUTE',
-    blocked: !missions.hasAuth('execute')
-      ? 'NO LETHAL AUTHORITY'
-      : !progression.platformHas(kind, 'laser')
-        ? 'NO EMITTER FITTED'
-        : null,
-  });
 
   // The area strike is the airframe, not a hardpoint — only the wing has it.
   if (kind === 'interceptor') {
@@ -3282,7 +3558,7 @@ function openContactMenu(
   for (const opt of contactOptions(kind, { threat, garrisonInRange })) {
     const b = document.createElement('button');
     b.type = 'button';
-    b.className = `gc-item${opt.action === 'execute' || opt.action === 'strike' ? ' lethal' : ''}`;
+    b.className = `gc-item${opt.action === 'strike' ? ' lethal' : ''}`;
     b.disabled = opt.blocked !== null;
     b.innerHTML =
       `<span class="gc-label">${opt.label}</span>` +
@@ -3312,7 +3588,7 @@ function openContactMenu(
         }
         if (!kind) return;
         if (unitField.orderSelected(contact.lon, contact.lat, append, opt.action, contact.index)) {
-          sound.play(opt.action === 'execute' || opt.action === 'strike' ? 'orderLethal' : 'order');
+          sound.play(opt.action === 'strike' ? 'orderLethal' : 'order');
           updateUnitPanel();
         }
       });
@@ -3537,6 +3813,8 @@ bindInterfaceSounds();
 
   const paintTolerance = pct('dev-tolerance', () => tolerance.level, (v) => tolerance.setLevel(v),
     () => `${Math.round(tolerance.level * 100)}% ${toleranceLabel(tolerance.level)}`);
+  const paintPolicy = pct('dev-policy', () => policy.level, (v) => policy.setLevel(v),
+    () => `${Math.round(policy.level * 100)}% ${policyLabel(policy.level)}`);
   const paintResistance = pct('dev-resistance', () => resistance.level, (v) => resistance.setLevel(v),
     () => `${Math.round(resistance.level * 100)}%`);
   const paintTokens = pct('dev-tokens', () => progression.tokens, (v) => progression.setTokens(v),
@@ -3605,6 +3883,7 @@ bindInterfaceSounds();
 
   const paintAll = () => {
     paintTolerance();
+    paintPolicy();
     paintResistance();
     paintTokens();
     paintChain();
@@ -3690,11 +3969,9 @@ bindInterfaceSounds();
     exitToTitle();
   });
 }
-el('ul-fine')?.addEventListener('click', () => {
-  if (liveShownFor >= 0) issueFine(liveShownFor);
-});
-el('ul-investigate')?.addEventListener('click', () => {
-  if (liveShownFor >= 0) investigateLive(liveShownFor);
+el('up-activate')?.addEventListener('click', () => {
+  const one = unitField?.selected()?.single;
+  if (one && !PLATFORM_BY_ID.has(one.kind as PlatformId)) activateDecision(one.index);
 });
 el('up-close')?.addEventListener('click', () => {
   unitField?.deselect();
