@@ -55,6 +55,7 @@ import { RtsBuildLayer, type BuildSite } from './rtsBuild';
 import { RtsCommandBar } from '../ui/rtsCommand';
 import { STRUCTURES, BUILDABLE, BUILD_RULES, metresBetween, type StructureType, type Structure } from '../game/rts/structures';
 import { RTS_UNITS, unitsFrom, producesUnits, type RtsUnitId } from '../game/rts/units';
+import { RESEARCH, researchFrom, type ResearchId } from '../game/rts/research';
 import { showLoading, setStage, hideLoading } from '../ui/loading';
 import { setActiveSlot, migrateLegacySave } from '../game/saves';
 import { LaserBeams } from './lasers';
@@ -1274,6 +1275,9 @@ scene.preUpdate.addEventListener(() => {
       for (const c of produced) spawnProducedUnit(c.structureId, c.unit);
       // Advance any structures a worker is building on site.
       rtsConstructionTick(dt);
+      rtsGame.tickResearch(dt);
+      // Traffic-incident economy: obelisks catch violations; auto-fine collects them, else they ping.
+      runRtsViolations(dt);
       updateRtsHud();
       // The queue progress bar animates, so repaint the card while the selected building is building.
       if (rtsSelectedStructure && rtsGame.queueAt(rtsSelectedStructure.id).length) rtsCmd?.render();
@@ -2175,6 +2179,12 @@ function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
         ? `NEEDS ${STRUCTURES[def.requiresStructure].name}`
         : null;
     },
+    onResearch: (id) => startResearchAt(id),
+    researchBlocker: (id) => rtsGame?.researchBlocker(id) ?? null,
+    researchProgress: (sid) => {
+      const r = rtsGame?.researchAt(sid);
+      return r ? { id: r.id, pct: Math.round((1 - r.remainingS / r.totalS) * 100) } : null;
+    },
   });
   rtsCmd.show();
   // The command card greys chips by affordability and shows queue progress, so it repaints on every
@@ -2208,7 +2218,10 @@ function teardownRtsBuild(): void {
 
 /** The command card's context, from the current selection: a producing building, a worker, or nothing. */
 function rtsCommandContext(): { kind: 'none' } | { kind: 'build' } | { kind: 'produce'; structureId: number; structureType: StructureType } {
-  if (rtsSelectedStructure && producesUnits(rtsSelectedStructure.type)) {
+  if (
+    rtsSelectedStructure &&
+    (producesUnits(rtsSelectedStructure.type) || researchFrom(rtsSelectedStructure.type).length > 0)
+  ) {
     return { kind: 'produce', structureId: rtsSelectedStructure.id, structureType: rtsSelectedStructure.type };
   }
   if (selectedIsWorker()) return { kind: 'build' };
@@ -2271,6 +2284,97 @@ function enqueueUnit(unit: RtsUnitId): void {
   rtsGame.enqueue(rtsSelectedStructure.id, unit);
   sound.play('purchase');
   rtsCmd?.render();
+}
+
+/** Begin a research project at the selected building. */
+function startResearchAt(id: ResearchId): void {
+  if (!rtsGame || !rtsSelectedStructure) return;
+  const blocker = rtsGame.researchBlocker(id);
+  if (blocker) {
+    sound.play('denied');
+    toast(blocker === 'DONE' ? `◈ ${RESEARCH[id].name} ALREADY RESEARCHED` : `◈ ${blocker}`);
+    return;
+  }
+  rtsGame.startResearch(rtsSelectedStructure.id, id);
+  sound.play('purchase');
+  toast(`◈ RESEARCHING ${RESEARCH[id].name}`);
+  rtsCmd?.render();
+}
+
+// ---- RTS traffic incidents (economy) -----------------------------------------------------------
+//
+// Obelisks catch traffic violations on the contacts under their coverage. Each is an alert on the
+// map (a ping) you click to decide: FINE it for money, or release it. AUTO-FINE (researched at the
+// Tech facility) collects them for you — passive income, no alerts to answer. Reuses the campaign's
+// violation director wholesale; only the resolution is RTS-specific.
+
+function runRtsViolations(dt: number): void {
+  if (!unitField || !sensorField || !rtsGame) return;
+  unitField.stepViolations(dt, sensorField.obeliskCount, (lon, lat) => sensorField?.servicingSite(lon, lat) ?? null);
+  if (rtsGame.hasResearch('auto-fine')) {
+    // Sweep every open fineable violation into money — the whole point of the upgrade.
+    for (const v of unitField.liveViolations()) {
+      if (v.live.def.fine > 0) {
+        rtsGame.award(v.live.def.fine);
+        unitField.clearLive(v.index);
+      }
+    }
+  }
+  updatePings(dt); // draw the alert markers over whatever is still open
+}
+
+/** The decide-fate popup for a caught violator: fine it for money, or let it go. */
+function openViolationMenu(screenX: number, screenY: number, index: number): void {
+  if (!rtsGame || !unitField) return;
+  const live = unitField.liveOf(index);
+  if (!live) return;
+  closeContactMenu();
+  closeGroundMenu();
+  const box = document.createElement('div');
+  box.id = 'g-context';
+  box.style.left = `${screenX}px`;
+  box.style.top = `${screenY}px`;
+  box.innerHTML = `<div class="gc-head">${live.def.label} · ${Math.round(live.certainty * 100)}%</div>`;
+
+  const fine = live.def.fine;
+  const fineBtn = document.createElement('button');
+  fineBtn.type = 'button';
+  fineBtn.className = 'gc-item';
+  fineBtn.disabled = fine <= 0;
+  fineBtn.innerHTML =
+    `<span class="gc-label">FINE</span>` +
+    (fine > 0 ? `<span class="gc-why" style="color:var(--warn)">+${fine}</span>` : `<span class="gc-why">NO FINE VALUE</span>`);
+  if (fine > 0) {
+    fineBtn.addEventListener('click', () => {
+      closeContactMenu();
+      if (!unitField || !rtsGame) return;
+      rtsGame.award(fine);
+      unitField.clearLive(index);
+      sound.play('purchase');
+      reactAt(live.siteLon, live.siteLat, 'approve');
+      toast(`◈ FINED · +${fine}`);
+      updateRtsHud();
+    });
+  }
+  box.append(fineBtn);
+
+  const release = document.createElement('button');
+  release.type = 'button';
+  release.className = 'gc-item';
+  release.innerHTML = `<span class="gc-label">RELEASE</span>`;
+  release.addEventListener('click', () => {
+    closeContactMenu();
+    unitField?.clearLive(index);
+    sound.play('click');
+  });
+  box.append(release);
+
+  document.body.append(box);
+  const dismiss = () => {
+    closeContactMenu();
+    window.removeEventListener('pointerdown', dismiss, true);
+  };
+  window.setTimeout(() => window.addEventListener('pointerdown', dismiss, true), 0);
 }
 
 /** Roll a finished unit out of its building and send it to the rally point (or just clear of the building). */
@@ -4416,8 +4520,14 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
     if (carto) tryEnterTheater(carto);
     return;
   }
-  // RTS: a structure is pickable too, and takes priority — clicking one shows its command card.
-  if (rtsGame) {
+  // RTS: a click on a caught violator opens the decide-fate popup; a structure shows its command
+  // card. Both take priority over selecting your own units.
+  if (rtsGame && unitField) {
+    const contact = unitField.contactAt(scene, m.position.x, m.position.y, SELECT_PX);
+    if (contact && unitField.liveOf(contact.index)) {
+      openViolationMenu(m.position.x, m.position.y, contact.index);
+      return;
+    }
     const st = pickStructure(m.position.x, m.position.y);
     if (st) {
       selectStructure(st);
@@ -5175,6 +5285,11 @@ window.addEventListener('keydown', (e) => {
           enqueueUnit(u.id);
           return;
         }
+        const r = researchFrom(ctx.structureType).find((x) => x.hotkey === k);
+        if (r) {
+          startResearchAt(r.id);
+          return;
+        }
       } else if (ctx.kind === 'build') {
         const hit = BUILDABLE.find((t) => STRUCTURES[t].hotkey === k);
         if (hit) {
@@ -5237,6 +5352,9 @@ if (import.meta.env.DEV) {
     rtsConstructionTick,
     finishConstruction,
     maybeOpenAllSites,
+    runRtsViolations,
+    startResearchAt,
+    openViolationMenu,
     inTheaterObeliskSites,
     get rtsConstruction() {
       return rtsConstruction;

@@ -15,6 +15,7 @@
 
 import { STRUCTURES, type Structure, type StructureType } from './structures';
 import { RTS_UNITS, type RtsUnitId } from './units';
+import { RESEARCH, type ResearchId } from './research';
 
 /** Economy tuning. One place, so the whole balance of the opening is a handful of readable numbers. */
 export const RTS_ECON = {
@@ -64,6 +65,11 @@ export class RtsGame {
   readonly rally = new Map<number, { lon: number; lat: number }>();
   /** Supply consumed by living + queued units. Cap comes from the structures (see supplyCap). */
   private _supplyUsed = 0;
+
+  /** Research completed — a set of standing capabilities (e.g. auto-fine). */
+  private _researched = new Set<ResearchId>();
+  /** Research in progress, keyed by the researching structure's id: {id, remaining, total}. */
+  readonly researching = new Map<number, { id: ResearchId; remainingS: number; totalS: number }>();
 
   constructor(nexusIndex: number, nexusLon: number, nexusLat: number) {
     this.nexusIndex = nexusIndex;
@@ -206,6 +212,49 @@ export class RtsGame {
   setRally(structureId: number, lon: number, lat: number): void {
     this.rally.set(structureId, { lon, lat });
     this.changed();
+  }
+
+  // ---- research ------------------------------------------------------------------------------
+
+  hasResearch(id: ResearchId): boolean {
+    return this._researched.has(id);
+  }
+
+  /** Why a research can't be started right now, or null. */
+  researchBlocker(id: ResearchId): string | null {
+    if (this._researched.has(id)) return 'DONE';
+    if ([...this.researching.values()].some((r) => r.id === id)) return 'IN PROGRESS';
+    if (this._money < RESEARCH[id].cost) return 'INSUFFICIENT FUNDS';
+    return null;
+  }
+
+  /** Begin a research project at a structure. Charges up front, like production. */
+  startResearch(structureId: number, id: ResearchId): boolean {
+    if (this.researchBlocker(id)) return false;
+    const def = RESEARCH[id];
+    this._money -= def.cost;
+    this.researching.set(structureId, { id, remainingS: def.timeS, totalS: def.timeS });
+    this.changed();
+    return true;
+  }
+
+  /** Advance research; mark anything finished as done. */
+  tickResearch(dt: number): void {
+    let changed = false;
+    for (const [sid, r] of this.researching) {
+      r.remainingS -= dt;
+      if (r.remainingS <= 0) {
+        this._researched.add(r.id);
+        this.researching.delete(sid);
+        changed = true;
+      }
+    }
+    if (changed) this.changed();
+  }
+
+  /** The research a structure is working on, for the command card's progress. */
+  researchAt(structureId: number): { id: ResearchId; remainingS: number; totalS: number } | undefined {
+    return this.researching.get(structureId);
   }
 
   /** Banked money, floored — fractional accrual is real but never shown as a fraction. */

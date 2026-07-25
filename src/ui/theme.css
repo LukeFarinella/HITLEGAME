@@ -1621,6 +1621,7 @@ body.dev-open #c2-tasking { display: none; }
 .grc-chip.cat-infantry .grc-key { background: var(--warn); }
 .grc-chip.cat-aerial .grc-key { background: #3fa0e0; }
 .grc-chip.cat-special .grc-key { background: #8b6fe0; }
+.grc-chip.cat-research .grc-key { background: #8b6fe0; }
 .grc-chip.type-supply .grc-key { background: var(--ok); }
 /* the context label at the left of the bar ("BUILD", "ROBOTICS", …) */
 .grc-label {

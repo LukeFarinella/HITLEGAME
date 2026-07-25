@@ -1,5 +1,6 @@
 import { STRUCTURES, BUILDABLE, type StructureType } from '../game/rts/structures';
 import { RTS_UNITS, unitsFrom, type RtsUnitId } from '../game/rts/units';
+import { researchFrom, type ResearchId } from '../game/rts/research';
 import type { QueueItem } from '../game/rts/rtsGame';
 
 /**
@@ -34,6 +35,12 @@ export interface RtsCommandHooks {
   buildBlocker(type: StructureType): string | null;
   /** A tech-tree reason this unit can't be built yet, or null. Locks the chip. */
   produceBlocker(unit: RtsUnitId): string | null;
+  /** A research project was chosen at the selected building. */
+  onResearch(id: ResearchId): void;
+  /** A reason a research can't start (done / in progress / cost), or null. */
+  researchBlocker(id: ResearchId): string | null;
+  /** Research in progress at a structure, for the progress strip. */
+  researchProgress(structureId: number): { id: ResearchId; pct: number } | null;
 }
 
 export class RtsCommandBar {
@@ -102,9 +109,30 @@ export class RtsCommandBar {
         onClick: () => this.hooks.onProduce(u.id),
       });
     });
-    const children: (HTMLElement | Node)[] = [this.label(STRUCTURES[structureType].name.replace(' FACILITY', '')), ...chips];
+    // Research chips (the Tech facility): an upgrade the building works on instead of a unit.
+    const research = researchFrom(structureType).map((r) => {
+      const blocked = this.hooks.researchBlocker(r.id);
+      const locked = blocked === 'DONE' ? '✓ DONE' : blocked === 'IN PROGRESS' ? '◷ …' : null;
+      return this.chip({
+        cls: `cat-research${blocked && blocked !== 'INSUFFICIENT FUNDS' ? ' locked' : money >= r.cost ? '' : ' broke'}`,
+        hotkey: r.hotkey,
+        name: r.name,
+        cost: r.cost,
+        locked,
+        title: `${r.name} — ${r.blurb}`,
+        onClick: () => this.hooks.onResearch(r.id),
+      });
+    });
+
+    const children: (HTMLElement | Node)[] = [
+      this.label(STRUCTURES[structureType].name.replace(' FACILITY', '')),
+      ...chips,
+      ...research,
+    ];
     const queue = this.hooks.queueOf(structureId);
     if (queue.length) children.push(this.queueStrip(queue));
+    const rp = this.hooks.researchProgress(structureId);
+    if (rp) children.push(this.researchStrip(rp.pct));
     this.root.replaceChildren(...children);
   }
 
@@ -149,6 +177,14 @@ export class RtsCommandBar {
         `<span class="grc-qbar"><i style="width:${pct}%"></i></span>`;
       box.append(cell);
     });
+    return box;
+  }
+
+  /** A single progress bar for the research currently running. */
+  private researchStrip(pct: number): HTMLElement {
+    const box = document.createElement('div');
+    box.className = 'grc-queue';
+    box.innerHTML = `<div class="grc-qitem"><span class="grc-qname">⚙</span><span class="grc-qbar"><i style="width:${pct}%"></i></span></div>`;
     return box;
   }
 }
