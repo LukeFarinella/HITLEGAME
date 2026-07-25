@@ -13,7 +13,7 @@ import type { UnitKind } from '../cesium/unitModels';
  */
 
 export type PlatformId = UnitKind &
-  ('drone' | 'dog' | 'quad' | 'spider' | 'biped' | 'walker' | 'naval' | 'interceptor');
+  ('drone' | 'dog' | 'quad' | 'spider' | 'biped' | 'walker' | 'naval' | 'interceptor' | 'skid');
 
 /** What a piece of gear grants. The scene asks for these by name. */
 export type Capability = 'laser' | 'wide-sensor' | 'deep-scan' | 'detain';

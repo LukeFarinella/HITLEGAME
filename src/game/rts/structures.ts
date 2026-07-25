@@ -33,6 +33,8 @@ export interface StructureDef {
   footprintM: number;
   /** Supply this structure adds to the cap. The Nexus opens some; the supply building is the rest. */
   supplyProvided?: number;
+  /** Seconds a worker spends building it on site. 0 for the Nexus (never built). */
+  buildTimeS: number;
 }
 
 export const STRUCTURES: Record<StructureType, StructureDef> = {
@@ -46,6 +48,7 @@ export const STRUCTURES: Record<StructureType, StructureDef> = {
     hotkey: '',
     footprintM: 260,
     supplyProvided: 10,
+    buildTimeS: 0,
   },
   obelisk: {
     type: 'obelisk',
@@ -56,6 +59,7 @@ export const STRUCTURES: Record<StructureType, StructureDef> = {
     placement: 'site',
     hotkey: 'E',
     footprintM: 220,
+    buildTimeS: 8,
   },
   robotics: {
     type: 'robotics',
@@ -66,6 +70,7 @@ export const STRUCTURES: Record<StructureType, StructureDef> = {
     placement: 'free',
     hotkey: 'R',
     footprintM: 300,
+    buildTimeS: 22,
   },
   aviation: {
     type: 'aviation',
@@ -76,6 +81,7 @@ export const STRUCTURES: Record<StructureType, StructureDef> = {
     placement: 'free',
     hotkey: 'V',
     footprintM: 300,
+    buildTimeS: 26,
   },
   tech: {
     type: 'tech',
@@ -86,6 +92,7 @@ export const STRUCTURES: Record<StructureType, StructureDef> = {
     placement: 'free',
     hotkey: 'T',
     footprintM: 280,
+    buildTimeS: 20,
   },
   supply: {
     type: 'supply',
@@ -97,6 +104,7 @@ export const STRUCTURES: Record<StructureType, StructureDef> = {
     hotkey: 'D',
     footprintM: 260,
     supplyProvided: 10,
+    buildTimeS: 14,
   },
 };
 

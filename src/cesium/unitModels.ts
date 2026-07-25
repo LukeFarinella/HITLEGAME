@@ -113,6 +113,22 @@ function vehicleMesh(): ModelMesh {
   return m.build();
 }
 
+/**
+ * The worker: a skid-steer loader, nose (bucket) toward +y. Compact body, a set-back operator cab,
+ * two lift arms reaching forward to a wide bucket, four stubby wheels. The one construction machine
+ * in the roster — it reads as "builder", not "combatant".
+ */
+function skidMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  m.box(0, -1, 4, 8, 10, 6); // main body
+  m.box(0, -2.5, 9, 6.5, 6, 5); // cab, set back and raised
+  m.box(4.2, 4, 5, 1.4, 10, 1.8); // right lift arm, reaching forward
+  m.box(-4.2, 4, 5, 1.4, 10, 1.8); // left lift arm
+  m.box(0, 9.5, 2.6, 9, 2.4, 4); // bucket scoop at the nose
+  for (const sx of [-4.6, 4.6]) for (const sy of [-3.5, 3.5]) m.box(sx, sy, 2, 1.8, 3.4, 4); // wheels
+  return m.build();
+}
+
 /** Sea vessel: a hull that tapers to a bow at +y, with a small superstructure. ~48 m. */
 function shipMesh(): ModelMesh {
   const m = new MeshBuilder();
@@ -440,20 +456,23 @@ export type UnitKind =
   | 'biped'
   | 'walker'
   | 'naval'
-  | 'interceptor';
+  | 'interceptor'
+  | 'skid';
 
 /** Every kind, in one place — iterate this instead of re-listing the literals. */
 export const UNIT_KINDS: UnitKind[] = [
   'land', 'sea', 'air', 'foot',
-  'drone', 'dog', 'quad', 'spider', 'biped', 'walker', 'naval', 'interceptor',
+  'drone', 'dog', 'quad', 'spider', 'biped', 'walker', 'naval', 'interceptor', 'skid',
 ];
 
 /**
  * The player-controlled kinds. These are hero units — one of each at most, purchased, ordered
  * directly and carrying gear — as opposed to the ambient population the sim spawns in thousands.
+ * (The skidsteer worker is RTS-only; it's a platform for selection/ordering but has no campaign
+ * catalog entry.)
  */
 export const PLATFORM_KINDS: UnitKind[] = [
-  'drone', 'dog', 'quad', 'spider', 'biped', 'walker', 'naval', 'interceptor',
+  'drone', 'dog', 'quad', 'spider', 'biped', 'walker', 'naval', 'interceptor', 'skid',
 ];
 
 export const UNIT_MESHES: Record<UnitKind, ModelMesh> = {
@@ -469,6 +488,7 @@ export const UNIT_MESHES: Record<UnitKind, ModelMesh> = {
   walker: walkerMesh(),
   naval: navalMesh(),
   interceptor: interceptorMesh(),
+  skid: skidMesh(),
 };
 
 /** Per-kind display scale so each reads at theater zoom without being absurd up close. */
@@ -492,6 +512,7 @@ export const UNIT_SCALE: Record<UnitKind, number> = {
   walker: 3,
   naval: 3, // ~180 m — reads as a ship against the 78 m ground vehicles
   interceptor: 3, // ~210 m span, between a ground vehicle and the disc
+  skid: 2.4, // ~40 m — a small work vehicle, a touch bigger than the dog
 };
 
 /**
@@ -631,6 +652,19 @@ const PLATFORM_ICONS: Partial<Record<UnitKind, HTMLCanvasElement>> = {
     g.beginPath();
     g.rect(-10, -10, 20, 20);
     g.fill();
+    g.stroke();
+  }),
+  // Skidsteer: a boxy body with a bucket reaching forward (up), and four wheels.
+  skid: iconCanvas((g) => {
+    g.beginPath();
+    g.rect(-8, -6, 16, 14); // body
+    g.fill();
+    g.stroke();
+    g.beginPath();
+    g.moveTo(-9, -6); g.lineTo(-9, -14); g.lineTo(9, -14); g.lineTo(9, -6); // bucket, forward
+    g.stroke();
+    g.beginPath();
+    for (const sx of [-9, 9]) for (const sy of [-3, 5]) { g.moveTo(sx - 2, sy - 3); g.rect(sx - 2, sy - 3, 4, 6); }
     g.stroke();
   }),
 };

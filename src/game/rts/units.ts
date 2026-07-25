@@ -36,9 +36,9 @@ export interface RtsUnitDef {
 export const RTS_UNITS: Record<RtsUnitId, RtsUnitDef> = {
   worker: {
     id: 'worker',
-    name: 'WORKER DRONE',
+    name: 'WORKER',
     category: 'worker',
-    meshKind: 'quad', // a small quadcopter — the builder drone
+    meshKind: 'skid', // a skid-steer loader — the ground construction unit
     cost: 50,
     buildTimeS: 8,
     supply: 1,

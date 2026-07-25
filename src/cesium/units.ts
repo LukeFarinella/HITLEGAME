@@ -175,6 +175,9 @@ const SPEED: Record<UnitKind, number> = {
   walker: PLATFORM_BY_ID.get('walker')!.speed,
   naval: PLATFORM_BY_ID.get('naval')!.speed,
   interceptor: PLATFORM_BY_ID.get('interceptor')!.speed,
+  // The worker skidsteer is RTS-only and has no campaign catalog entry, so its speed is set here
+  // directly. Brisk — it has to cross a base to build without feeling like a chore.
+  skid: 300,
 };
 /**
  * Height above the sampled ground, metres. Land/foot clear the road ribbon (draped at +12) so
@@ -197,6 +200,7 @@ const RIDE_HEIGHT: Record<UnitKind, number> = {
   walker: 2,
   naval: 1, // floats on the water plane, like the ambient shipping
   interceptor: 0,
+  skid: 5, // a wheeled vehicle sitting on the road drape
 };
 
 /**
@@ -586,7 +590,7 @@ interface Unit {
 const CALLSIGN: Record<UnitKind, string> = {
   land: 'CV', sea: 'SV', air: 'AV', foot: 'FT',
   drone: 'GORGON', dog: 'K9', quad: 'KITE', spider: 'ARC', biped: 'MAR', walker: 'COL',
-  naval: 'LIT', interceptor: 'RAP',
+  naval: 'LIT', interceptor: 'RAP', skid: 'WRK',
 };
 /** Human label per kind, for the panel. */
 export const KIND_LABEL: Record<UnitKind, string> = {
@@ -602,6 +606,7 @@ export const KIND_LABEL: Record<UnitKind, string> = {
   walker: 'COLOSSUS SIEGE WALKER',
   naval: 'LITTORAL DRONE',
   interceptor: 'RAPTOR INTERCEPTOR',
+  skid: 'WORKER SKIDSTEER',
 };
 
 /** Metres/second per kind (mirrors SPEED) surfaced for the panel. */
@@ -806,7 +811,7 @@ export class UnitField {
   private scratch = new Cesium.Cartesian3();
   private nextId: Record<UnitKind, number> = {
     land: 0, sea: 0, air: 0, foot: 0, drone: 0, dog: 0, quad: 0, spider: 0, biped: 0, walker: 0,
-    naval: 0, interceptor: 0,
+    naval: 0, interceptor: 0, skid: 0,
   };
   /** Obelisk coverage test, used both to seed infection and to steer it toward the dark. */
   private isCovered?: (lon: number, lat: number) => boolean;
@@ -867,7 +872,9 @@ export class UnitField {
     // simply never gets an instance written, and costs nothing at draw time.
     // Platform batch capacity: the RTS override sizes every hero-platform batch for an army; the
     // campaign leaves it undefined and each batch is sized to that platform's catalog maxCount.
-    const pcap = (id: PlatformId) => counts.platformCap ?? PLATFORM_BY_ID.get(id)!.maxCount;
+    // Fall back to 1 for a kind with no catalog entry (the RTS-only skidsteer): the campaign never
+    // fields it, so its batch just sits empty; the RTS override sizes every platform batch anyway.
+    const pcap = (id: PlatformId) => counts.platformCap ?? PLATFORM_BY_ID.get(id)?.maxCount ?? 1;
     this.batches = {
       land: new InstancedModelBatch(UNIT_MESHES.land, counts.land, bounds, true),
       sea: new InstancedModelBatch(UNIT_MESHES.sea, counts.sea, bounds, true),
@@ -881,6 +888,7 @@ export class UnitField {
       walker: new InstancedModelBatch(UNIT_MESHES.walker, pcap('walker'), bounds, true),
       naval: new InstancedModelBatch(UNIT_MESHES.naval, pcap('naval'), bounds, true),
       interceptor: new InstancedModelBatch(UNIT_MESHES.interceptor, pcap('interceptor'), bounds, true),
+      skid: new InstancedModelBatch(UNIT_MESHES.skid, pcap('skid'), bounds, true),
     };
 
     // Vehicles favour freeways heavily (constant motorway flow); pedestrians stay on surface streets.
@@ -2975,7 +2983,7 @@ export class UnitField {
     if (this.selection.size === 0) return null;
     const byKind: Record<UnitKind, number> = {
       land: 0, sea: 0, air: 0, foot: 0, drone: 0, dog: 0, quad: 0, spider: 0, biped: 0, walker: 0,
-      naval: 0, interceptor: 0,
+      naval: 0, interceptor: 0, skid: 0,
     };
     const byBand: Record<'clear' | 'suspect' | 'threat', number> = { clear: 0, suspect: 0, threat: 0 };
     let markedCount = 0;

@@ -159,6 +159,9 @@ export class RtsBuildLayer {
   readonly ghost = new Cesium.PolylineCollection();
   /** The selected producing structure's rally point, if it has one. */
   readonly rallyDots = new Cesium.PointPrimitiveCollection();
+  /** In-progress construction sites — an amber ring while a worker builds. */
+  readonly construction = new Cesium.PolylineCollection();
+  private constructionLines = new Map<number, Cesium.Polyline>();
 
   private roadGrid: RoadGrid;
   private ghostLine: Cesium.Polyline | undefined;
@@ -245,6 +248,26 @@ export class RtsBuildLayer {
 
   clearRally(): void {
     this.rallyDots.removeAll();
+  }
+
+  /** Draw an amber "under construction" ring at a site, keyed by construction id. */
+  addConstruction(id: number, lon: number, lat: number, radiusM: number): void {
+    const line = this.construction.add({
+      positions: ringPositions(lon, lat, radiusM, this.heightAt(lon, lat) + 25),
+      width: 2,
+      material: Cesium.Material.fromType('Color', {
+        color: Cesium.Color.fromCssColorString('#E7A13B').withAlpha(0.75),
+      }),
+    });
+    this.constructionLines.set(id, line);
+  }
+
+  clearConstruction(id: number): void {
+    const line = this.constructionLines.get(id);
+    if (line) {
+      this.construction.remove(line);
+      this.constructionLines.delete(id);
+    }
   }
 
   /** Whether a point is close enough to a road for a facility. */

@@ -706,10 +706,10 @@ function platformStations(center: { lon: number; lat: number }, map: TheaterMap)
   if (rtsGame && obelisks) {
     const i = rtsGame.nexusIndex;
     const mLon = 111_320 * Math.cos((obelisks.lat[i] * Math.PI) / 180);
-    // Two worker drones flanking the Nexus — enough to build with and still keep one on economy.
+    // Two skidsteer workers flanking the Nexus — enough to build with and still keep one on economy.
     return [
-      { id: 'quad' as PlatformId, lon: obelisks.lon[i] + 220 / mLon, lat: obelisks.lat[i] },
-      { id: 'quad' as PlatformId, lon: obelisks.lon[i] - 220 / mLon, lat: obelisks.lat[i] },
+      { id: 'skid' as PlatformId, lon: obelisks.lon[i] + 220 / mLon, lat: obelisks.lat[i] },
+      { id: 'skid' as PlatformId, lon: obelisks.lon[i] - 220 / mLon, lat: obelisks.lat[i] },
     ];
   }
   // One entry per fielded UNIT, so four arachnids get four different cities rather than one.
@@ -1272,6 +1272,8 @@ scene.preUpdate.addEventListener(() => {
       // Advance production and roll finished units out to their rally points.
       const produced = rtsGame.tickProduction(dt);
       for (const c of produced) spawnProducedUnit(c.structureId, c.unit);
+      // Advance any structures a worker is building on site.
+      rtsConstructionTick(dt);
       updateRtsHud();
       // The queue progress bar animates, so repaint the card while the selected building is building.
       if (rtsSelectedStructure && rtsGame.queueAt(rtsSelectedStructure.id).length) rtsCmd?.render();
@@ -2071,6 +2073,8 @@ async function startRtsMatch(): Promise<void> {
   fallenObelisks = new Set();
   sensorRangeM = SENSOR_RANGE_BASE;
   for (const p of PLATFORMS) PLATFORM_SENSOR[p.id] = PLATFORM_BY_ID.get(p.id)?.sensorM ?? BASE_SENSOR_M;
+  // The skidsteer worker has no catalog entry; give it a modest disc so it has some vision of its own.
+  PLATFORM_SENSOR['skid'] = BASE_SENSOR_M;
 
   el('g-rts')?.removeAttribute('hidden');
   updateRtsHud();
@@ -2138,6 +2142,9 @@ function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
   scene.primitives.add(rtsBuild.icons);
   scene.primitives.add(rtsBuild.ghost);
   scene.primitives.add(rtsBuild.rallyDots);
+  scene.primitives.add(rtsBuild.construction);
+  rtsSitesAllOpen = false;
+  rtsConstruction = [];
   rtsBuild.setSites(rtsSites, rtsBuiltSites);
 
   // The opening worker drones were spawned by the UnitField constructor (as 'quad' platforms) — tag
@@ -2146,7 +2153,7 @@ function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
   rtsUnitRole.clear();
   if (unitField) {
     for (const u of unitField.platformUnits()) {
-      if (u.kind === 'quad') {
+      if (u.kind === 'skid') {
         rtsUnitRole.set(u.index, 'worker');
         rtsGame.reserveSupply(RTS_UNITS.worker.supply);
       }
@@ -2178,8 +2185,10 @@ function teardownRtsBuild(): void {
     scene.primitives.remove(rtsBuild.icons);
     scene.primitives.remove(rtsBuild.ghost);
     scene.primitives.remove(rtsBuild.rallyDots);
+    scene.primitives.remove(rtsBuild.construction);
     rtsBuild = null;
   }
+  rtsConstruction = [];
   rtsCmd?.hide();
   rtsCmd = null;
   rtsSites = [];
@@ -2277,22 +2286,29 @@ function spawnProducedUnit(structureId: number, unit: RtsUnitId): void {
  * expand". Clustering it into ~40 well-separated nodes and snapping each back to a real obelisk index
  * gives a handful of meaningful expansion sites that still render + gain coverage when built on.
  */
-function computeRtsSites(): BuildSite[] {
-  if (!obelisks || !theaterCenter || !rtsGame) return [];
+/** Every surveyed obelisk position inside the theater disc — the full field, uncurated. */
+function inTheaterObeliskSites(): BuildSite[] {
+  if (!obelisks || !theaterCenter) return [];
   const rLat = (THEATER_RADIUS_M * RIM_FADE_START) / 111_320;
   const rLon = rLat / Math.max(0.15, Math.cos((theaterCenter.lat * Math.PI) / 180));
-  const inTheater: BuildSite[] = [];
-  const coords: number[] = [];
+  const out: BuildSite[] = [];
   for (let i = 0; i < obelisks.count; i++) {
     const dLon = obelisks.lon[i] - theaterCenter.lon;
     if (dLon < -rLon || dLon > rLon) continue;
     const dLat = obelisks.lat[i] - theaterCenter.lat;
     if (dLat < -rLat || dLat > rLat) continue;
     if ((dLon / rLon) ** 2 + (dLat / rLat) ** 2 > 1) continue;
-    inTheater.push({ index: i, lon: obelisks.lon[i], lat: obelisks.lat[i] });
-    coords.push(obelisks.lon[i], obelisks.lat[i]);
+    out.push({ index: i, lon: obelisks.lon[i], lat: obelisks.lat[i] });
   }
+  return out;
+}
+
+function computeRtsSites(): BuildSite[] {
+  if (!rtsGame) return [];
+  const inTheater = inTheaterObeliskSites();
   if (!inTheater.length) return [];
+  const coords: number[] = [];
+  for (const s of inTheater) coords.push(s.lon, s.lat);
 
   const centres = clusterCentres(new Float64Array(coords), { separationM: 6500, max: 40, minCount: 1 });
   const sites: BuildSite[] = [];
@@ -2420,9 +2436,13 @@ function updatePlacementGhost(screen: Cesium.Cartesian2): void {
   rtsBuild.showGhost(r.lon, r.lat, r.radiusM, r.valid);
 }
 
-/** Commit a placement at a click, if it's legal and affordable. */
+/**
+ * Commit a placement at a click: dispatch the selected worker to the spot and start a construction
+ * site. The structure isn't real until the worker arrives and finishes building it — see
+ * rtsConstructionTick. Money is spent up front (the commit), the way an RTS charges on placement.
+ */
 function tryPlaceAt(screen: Cesium.Cartesian2): void {
-  if (!rtsPlacing || !rtsGame) return;
+  if (!rtsPlacing || !rtsGame || !unitField) return;
   const type = rtsPlacing;
   const def = STRUCTURES[type];
   const r = resolvePlacement(screen);
@@ -2431,23 +2451,84 @@ function tryPlaceAt(screen: Cesium.Cartesian2): void {
     toast(`◈ CANNOT BUILD · ${r?.reason ?? 'INVALID SPOT'}`);
     return;
   }
+  // A structure is built BY a worker — you must have one selected, and it's the one dispatched.
+  const worker = unitField.selectedPlatform();
+  if (!worker || rtsUnitRole.get(worker.index) !== 'worker') {
+    sound.play('denied');
+    toast('◈ SELECT A WORKER TO BUILD');
+    return;
+  }
   if (!rtsGame.spend(def.cost)) {
     sound.play('denied');
     toast('◈ INSUFFICIENT FUNDS');
     return;
   }
-  if (def.placement === 'site' && r.siteIndex !== undefined) {
-    buildObeliskAt(r.siteIndex, r.lon, r.lat);
-  } else {
-    const s = rtsGame.addStructure(type, r.lon, r.lat);
-    rtsBuild?.addFacility(s);
+  // Reserve an obelisk site immediately so a second worker can't be sent to the same one.
+  if (r.siteIndex !== undefined) {
+    rtsBuiltSites.add(r.siteIndex);
+    rtsBuild?.setSites(rtsSites, rtsBuiltSites);
   }
+  const cs: ConstructionSite = {
+    id: rtsConstructionId++,
+    type,
+    lon: r.lon,
+    lat: r.lat,
+    siteIndex: r.siteIndex,
+    remainingS: def.buildTimeS,
+    totalS: def.buildTimeS,
+    workerIndex: worker.index,
+  };
+  rtsConstruction.push(cs);
+  rtsBuild?.addConstruction(cs.id, r.lon, r.lat, def.footprintM);
+  unitField.moveUnitTo(worker.index, r.lon, r.lat); // send the builder to the site
   sound.play('purchase');
-  toast(`◈ ${def.name} BUILT · −${def.cost}`);
-  // One build per arm — cancel so the next click selects again, the way an RTS drops out of build
-  // mode after placing (shift-to-keep-placing can come later).
+  toast(`◈ ${def.name} · WORKER DISPATCHED · −${def.cost}`);
   cancelPlacement();
   updateRtsHud();
+}
+
+/**
+ * Advance construction. A site only builds while its assigned worker is standing on it — the worker
+ * drives over, then works the clock down. When it's done the structure becomes real.
+ */
+function rtsConstructionTick(dt: number): void {
+  if (!rtsGame || !unitField || !rtsConstruction.length) return;
+  const still: ConstructionSite[] = [];
+  for (const cs of rtsConstruction) {
+    const st = unitField.platformStatus(cs.workerIndex);
+    const onSite = !!st && metresBetween(st.lon, st.lat, cs.lon, cs.lat) <= BUILD_CONTACT_M;
+    if (onSite) cs.remainingS -= dt;
+    if (cs.remainingS <= 0) finishConstruction(cs);
+    else still.push(cs);
+  }
+  rtsConstruction = still;
+}
+
+/** Turn a finished construction site into a real structure. */
+function finishConstruction(cs: ConstructionSite): void {
+  if (!rtsGame) return;
+  rtsBuild?.clearConstruction(cs.id);
+  if (STRUCTURES[cs.type].placement === 'site' && cs.siteIndex !== undefined) {
+    buildObeliskAt(cs.siteIndex, cs.lon, cs.lat);
+    maybeOpenAllSites();
+  } else {
+    const s = rtsGame.addStructure(cs.type, cs.lon, cs.lat);
+    rtsBuild?.addFacility(s);
+  }
+  sound.play('success');
+  toast(`◈ ${STRUCTURES[cs.type].name} COMPLETE`);
+  rtsCmd?.render();
+  updateRtsHud();
+}
+
+/** Once RTS_ALL_SITES_AT obelisks stand, throw the whole surveyed field open as build sites. */
+function maybeOpenAllSites(): void {
+  if (rtsSitesAllOpen || !rtsGame) return;
+  if (rtsGame.structuresOfType('obelisk').length < RTS_ALL_SITES_AT) return;
+  rtsSitesAllOpen = true;
+  rtsSites = inTheaterObeliskSites();
+  rtsBuild?.setSites(rtsSites, rtsBuiltSites);
+  toast('◈ FULL SURVEY UNLOCKED · EVERY SITE IS NOW BUILDABLE');
 }
 
 /**
@@ -2864,7 +2945,7 @@ function endMarquee() {
 const KIND_ABBR: Record<UnitKind, string> = {
   land: 'CV', sea: 'SV', air: 'AV', foot: 'FT',
   drone: 'DISC', dog: 'K9', quad: 'KITE', spider: 'ARC', biped: 'MAR', walker: 'COL',
-  naval: 'LIT', interceptor: 'RAP',
+  naval: 'LIT', interceptor: 'RAP', skid: 'WRK',
 };
 const BAND_ABBR: Record<string, string> = { clear: 'CLR', suspect: 'SUS', threat: 'THR' };
 const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
@@ -3721,6 +3802,25 @@ let rtsSelectedStructure: Structure | null = null;
 const rtsUnitRole = new Map<number, RtsUnitId>();
 /** Screen-space radius for clicking a structure. */
 const STRUCTURE_PICK_PX = 30;
+
+/** A structure a worker is currently building on site. */
+interface ConstructionSite {
+  id: number;
+  type: StructureType;
+  lon: number;
+  lat: number;
+  siteIndex?: number;
+  remainingS: number;
+  totalS: number;
+  workerIndex: number;
+}
+let rtsConstruction: ConstructionSite[] = [];
+let rtsConstructionId = 1;
+/** How close a worker must be to its site to be actively building it. */
+const BUILD_CONTACT_M = 300;
+/** Once this many obelisks stand, EVERY surveyed site opens for building, not just the cluster nodes. */
+const RTS_ALL_SITES_AT = 20;
+let rtsSitesAllOpen = false;
 let theaterCenter: { lon: number; lat: number } | null = null;
 
 // Function declarations (not const arrows): these are called during module evaluation by the
@@ -5118,6 +5218,16 @@ if (import.meta.env.DEV) {
     spawnProducedUnit,
     selectStructure,
     rtsCommandContext,
+    rtsConstructionTick,
+    finishConstruction,
+    maybeOpenAllSites,
+    inTheaterObeliskSites,
+    get rtsConstruction() {
+      return rtsConstruction;
+    },
+    get rtsSitesList() {
+      return rtsSites;
+    },
     get rtsSelectedStructure() {
       return rtsSelectedStructure;
     },
