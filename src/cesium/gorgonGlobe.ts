@@ -4275,11 +4275,15 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
 // LMB up: finish a marquee box (multi-select). A non-drag falls through to LEFT_CLICK (single pick).
 handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
   if (marqueeStart && marqueeActive) {
-    if (unitField && unitField.pickBox(scene, marqueeStart.x, marqueeStart.y, m.position.x, m.position.y) > 0) {
+    // In an RTS match a marquee grabs ONLY your own units — never civilians on foot or in vehicles.
+    if (unitField && unitField.pickBox(scene, marqueeStart.x, marqueeStart.y, m.position.x, m.position.y, !!rtsGame) > 0) {
+      if (rtsGame) clearStructureSelection();
       updateUnitPanel();
+      rtsCmd?.render();
     } else {
       unitField?.deselect();
       hideUnitPanel();
+      rtsCmd?.render();
     }
   }
   endMarquee();
@@ -4305,7 +4309,7 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
     }
     clearStructureSelection();
   }
-  if (unitField && unitField.pick(scene, m.position.x, m.position.y, SELECT_PX)) {
+  if (unitField && unitField.pick(scene, m.position.x, m.position.y, SELECT_PX, !!rtsGame)) {
     updateUnitPanel();
     rtsCmd?.render(); // a worker selection opens the BUILD card
   } else {

@@ -1189,6 +1189,9 @@ export class UnitField {
     const grown = new Float64Array(this.units.length * 3);
     grown.set(this.ecef);
     this.ecef = grown;
+    // Give it the same ring + map icon the opening units have, so it's visible (and findable at the
+    // theater overview, where units are icons rather than sub-pixel meshes) the instant it rolls out.
+    this.addPlatformVisual(kind, i);
     return i;
   }
 
@@ -2586,34 +2589,44 @@ export class UnitField {
 
   /** One sensor ring and one map icon per fielded platform UNIT. */
   private buildPlatformVisuals(): void {
+    for (const { kind, index } of this.platformUnits()) this.addPlatformVisual(kind, index);
+  }
+
+  /**
+   * Give ONE platform unit its sensor ring + map icon. Factored out of {@link buildPlatformVisuals}
+   * so a mid-match RTS spawn ({@link spawnRtsUnit}) gets the same visuals the opening units do —
+   * without it, a produced unit renders as a sub-pixel mesh and is invisible at the theater overview.
+   *
+   * The two collections stay index-aligned with {@link platformUnitOrder} because every platform kind
+   * has an icon; that alignment is what updatePlatformVisuals relies on.
+   */
+  private addPlatformVisual(kind: PlatformId, index: number): void {
     const SEG = 72;
-    for (const { kind, index } of this.platformUnits()) {
-      this.platformUnitOrder.push(index);
+    this.platformUnitOrder.push(index);
 
-      const pts: Cesium.Cartesian3[] = [];
-      for (let i = 0; i <= SEG; i++) pts.push(new Cesium.Cartesian3());
-      this.ringPts.push(pts);
-      this.droneRing.add({
-        positions: pts,
-        width: 2,
-        material: Cesium.Material.fromType('Color', {
-          color: Cesium.Color.fromCssColorString('#E23A2E').withAlpha(0.55),
-        }),
+    const pts: Cesium.Cartesian3[] = [];
+    for (let i = 0; i <= SEG; i++) pts.push(new Cesium.Cartesian3());
+    this.ringPts.push(pts);
+    this.droneRing.add({
+      positions: pts,
+      width: 2,
+      material: Cesium.Material.fromType('Color', {
+        color: Cesium.Color.fromCssColorString('#E23A2E').withAlpha(0.55),
+      }),
+    });
+
+    const image = platformIcon(kind);
+    if (image) {
+      this.platformIcons.add({
+        position: Cesium.Cartesian3.ZERO, // set each frame in render()
+        image,
+        width: 24,
+        height: 24,
+        pixelOffset: new Cesium.Cartesian2(0, -18),
+        distanceDisplayCondition: new Cesium.DistanceDisplayCondition(ICON_FROM_M, Number.MAX_VALUE),
+        // Stays visible through terrain; see the note in rebuildMarks about Infinity here.
+        disableDepthTestDistance: 1e12,
       });
-
-      const image = platformIcon(kind);
-      if (image) {
-        this.platformIcons.add({
-          position: Cesium.Cartesian3.ZERO, // set each frame in render()
-          image,
-          width: 24,
-          height: 24,
-          pixelOffset: new Cesium.Cartesian2(0, -18),
-          distanceDisplayCondition: new Cesium.DistanceDisplayCondition(ICON_FROM_M, Number.MAX_VALUE),
-          // Stays visible through terrain; see the note in rebuildMarks about Infinity here.
-          disableDepthTestDistance: 1e12,
-        });
-      }
     }
   }
 
@@ -2841,7 +2854,7 @@ export class UnitField {
    * Select the single unit nearest a window point (within `maxPx`); returns whether one was picked.
    * Projects the cached world positions, so call after at least one render().
    */
-  pick(scene: Cesium.Scene, x: number, y: number, maxPx: number): boolean {
+  pick(scene: Cesium.Scene, x: number, y: number, maxPx: number, platformsOnly = false): boolean {
     const toWin = this.toWin();
     if (!toWin) return false;
     const c = this.pickScratchC;
@@ -2850,6 +2863,8 @@ export class UnitField {
     let bestD = maxPx * maxPx;
     for (let i = 0; i < this.units.length; i++) {
       if (this.units[i].dead) continue;
+      // RTS: you command your own hardware, not the crowd — a click never selects a civilian.
+      if (platformsOnly && !PLATFORM_KINDS.includes(this.units[i].kind)) continue;
       c.x = this.ecef[i * 3];
       c.y = this.ecef[i * 3 + 1];
       c.z = this.ecef[i * 3 + 2];
@@ -2915,8 +2930,12 @@ export class UnitField {
    * those. Dragging over a city to grab a walker would otherwise return four thousand civilians
    * with the walker buried among them, and "select my units" is overwhelmingly what a box drag
    * over your own hardware means.
+   *
+   * `platformsOnly` hardens that into a rule: a marquee selects ONLY your platforms and never a
+   * civilian, even over ground where you have no units. That's the RTS contract — a box drag is
+   * "select my army", full stop.
    */
-  pickBox(scene: Cesium.Scene, x0: number, y0: number, x1: number, y1: number): number {
+  pickBox(scene: Cesium.Scene, x0: number, y0: number, x1: number, y1: number, platformsOnly = false): number {
     const toWin = this.toWin();
     this.selection.clear();
     if (!toWin) return 0;
@@ -2928,6 +2947,7 @@ export class UnitField {
     const w = this.pickScratchW;
     for (let i = 0; i < this.units.length; i++) {
       if (this.units[i].dead) continue;
+      if (platformsOnly && !PLATFORM_KINDS.includes(this.units[i].kind)) continue;
       c.x = this.ecef[i * 3];
       c.y = this.ecef[i * 3 + 1];
       c.z = this.ecef[i * 3 + 2];
@@ -2936,10 +2956,12 @@ export class UnitField {
       if (win.x >= lx && win.x <= hx && win.y >= ly && win.y <= hy) this.selection.add(i);
     }
 
-    const friendly = [...this.selection].filter((i) => PLATFORM_KINDS.includes(this.units[i].kind));
-    if (friendly.length) {
-      this.selection.clear();
-      for (const i of friendly) this.selection.add(i);
+    if (!platformsOnly) {
+      const friendly = [...this.selection].filter((i) => PLATFORM_KINDS.includes(this.units[i].kind));
+      if (friendly.length) {
+        this.selection.clear();
+        for (const i of friendly) this.selection.add(i);
+      }
     }
     return this.selection.size;
   }
