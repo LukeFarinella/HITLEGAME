@@ -51,6 +51,9 @@ import { ProcessPanel } from '../ui/process';
 import { showStartWindow } from '../ui/start';
 import { showTitle, setTitleTerritory } from '../ui/title';
 import { RtsGame } from '../game/rts/rtsGame';
+import { RtsBuildLayer, type BuildSite } from './rtsBuild';
+import { RtsCommandBar } from '../ui/rtsCommand';
+import { STRUCTURES, BUILD_RULES, metresBetween, type StructureType } from '../game/rts/structures';
 import { showLoading, setStage, hideLoading } from '../ui/loading';
 import { setActiveSlot, migrateLegacySave } from '../game/saves';
 import { LaserBeams } from './lasers';
@@ -2041,7 +2044,7 @@ async function startRtsMatch(): Promise<void> {
     return;
   }
   const nexusIndex = wa.downtown;
-  rtsGame = new RtsGame(nexusIndex);
+  rtsGame = new RtsGame(nexusIndex, obelisks.lon[nexusIndex], obelisks.lat[nexusIndex]);
 
   // The match opens with the Nexus alone live; every other obelisk site in the theater is a build
   // slot the player fills later. Setting the mask directly bypasses the campaign ownership model
@@ -2064,7 +2067,9 @@ async function startRtsMatch(): Promise<void> {
 /** End the current RTS match and return to the title screen. */
 function endRtsMatch(): void {
   if (!rtsGame) return;
-  // Tear the theater down the normal way, then clear RTS state and re-show the menu.
+  // Tear the build layer down first (it owns primitives exitTheater doesn't know about), then the
+  // theater the normal way, then clear RTS state and re-show the menu.
+  teardownRtsBuild();
   if (mode === 'theater') exitTheater();
   rtsGame = null;
   obeliskMask = undefined;
@@ -2090,6 +2095,250 @@ function countLiveObelisks(): number {
   let n = 0;
   for (let i = 0; i < mask.length; i++) n += mask[i];
   return n;
+}
+
+// ---- RTS build system --------------------------------------------------------------------------
+//
+// The base-building loop. Obelisks ride the existing obelisk/sensor rebuild (a built one is a real
+// network site with coverage); facilities are a separate marker layer with their own placement
+// rules — near a road, within reach of the Nexus or another facility. Everything routes through the
+// rtsGame money and the rtsBuild render layer.
+
+const FACILITY_TYPES: StructureType[] = ['robotics', 'aviation', 'tech'];
+const isFacility = (t: StructureType): boolean => FACILITY_TYPES.includes(t);
+
+/** Stand up the build layer + command bar for a fresh match. Called once, from buildTheater. */
+function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
+  if (!rtsGame || !obelisks || !theaterCenter) return;
+  rtsSites = computeRtsSites();
+  rtsBuiltSites.clear();
+  rtsBuiltSites.add(rtsGame.nexusIndex);
+
+  rtsBuild = new RtsBuildLayer(net, theaterCenter, map.heightAt);
+  scene.primitives.add(rtsBuild.siteDots);
+  scene.primitives.add(rtsBuild.rings);
+  scene.primitives.add(rtsBuild.icons);
+  scene.primitives.add(rtsBuild.ghost);
+  rtsBuild.setSites(rtsSites, rtsBuiltSites);
+
+  rtsCmd = new RtsCommandBar({
+    money: () => rtsGame?.money ?? 0,
+    onBuild: (type) => beginPlacement(type),
+    placing: () => rtsPlacing,
+  });
+  rtsCmd.show();
+  // The command bar greys chips by affordability, so it repaints on every economy change.
+  rtsGame.onChange(() => rtsCmd?.render());
+}
+
+/** Tear the build layer + command bar down at the end of a match. */
+function teardownRtsBuild(): void {
+  rtsPlacing = null;
+  if (rtsBuild) {
+    scene.primitives.remove(rtsBuild.siteDots);
+    scene.primitives.remove(rtsBuild.rings);
+    scene.primitives.remove(rtsBuild.icons);
+    scene.primitives.remove(rtsBuild.ghost);
+    rtsBuild = null;
+  }
+  rtsCmd?.hide();
+  rtsCmd = null;
+  rtsSites = [];
+  rtsBuiltSites.clear();
+}
+
+/**
+ * The theater's obelisk sites, curated down to a sparse set of expansion nodes.
+ *
+ * The raw obelisk field is one site per city block — thousands, far too many to read as "where can I
+ * expand". Clustering it into ~40 well-separated nodes and snapping each back to a real obelisk index
+ * gives a handful of meaningful expansion sites that still render + gain coverage when built on.
+ */
+function computeRtsSites(): BuildSite[] {
+  if (!obelisks || !theaterCenter || !rtsGame) return [];
+  const rLat = (THEATER_RADIUS_M * RIM_FADE_START) / 111_320;
+  const rLon = rLat / Math.max(0.15, Math.cos((theaterCenter.lat * Math.PI) / 180));
+  const inTheater: BuildSite[] = [];
+  const coords: number[] = [];
+  for (let i = 0; i < obelisks.count; i++) {
+    const dLon = obelisks.lon[i] - theaterCenter.lon;
+    if (dLon < -rLon || dLon > rLon) continue;
+    const dLat = obelisks.lat[i] - theaterCenter.lat;
+    if (dLat < -rLat || dLat > rLat) continue;
+    if ((dLon / rLon) ** 2 + (dLat / rLat) ** 2 > 1) continue;
+    inTheater.push({ index: i, lon: obelisks.lon[i], lat: obelisks.lat[i] });
+    coords.push(obelisks.lon[i], obelisks.lat[i]);
+  }
+  if (!inTheater.length) return [];
+
+  const centres = clusterCentres(new Float64Array(coords), { separationM: 6500, max: 40, minCount: 1 });
+  const sites: BuildSite[] = [];
+  const used = new Set<number>();
+  for (const c of centres) {
+    let best = -1;
+    let bestD = Infinity;
+    for (let k = 0; k < inTheater.length; k++) {
+      const d = metresBetween(c.lon, c.lat, inTheater[k].lon, inTheater[k].lat);
+      if (d < bestD) {
+        bestD = d;
+        best = k;
+      }
+    }
+    if (best >= 0 && !used.has(inTheater[best].index)) {
+      used.add(inTheater[best].index);
+      sites.push(inTheater[best]);
+    }
+  }
+  // The Nexus site must be in the list even if clustering placed a node elsewhere in its block.
+  if (!used.has(rtsGame.nexusIndex)) {
+    const n = inTheater.find((s) => s.index === rtsGame!.nexusIndex);
+    if (n) sites.push(n);
+  }
+  return sites;
+}
+
+/** Arm placement for a structure type, if it can be afforded. */
+function beginPlacement(type: StructureType): void {
+  if (!rtsGame || !rtsBuild) return;
+  const def = STRUCTURES[type];
+  if (rtsGame.money < def.cost) {
+    sound.play('denied');
+    toast(`◈ NEED ${def.cost} · HAVE ${rtsGame.money}`);
+    return;
+  }
+  rtsPlacing = type;
+  sound.play('click');
+  rtsCmd?.render();
+}
+
+/** Cancel placement and clear the ghost. */
+function cancelPlacement(): void {
+  if (!rtsPlacing) return;
+  rtsPlacing = null;
+  rtsBuild?.hideGhost();
+  rtsCmd?.render();
+}
+
+interface PlacementResolve {
+  lon: number;
+  lat: number;
+  radiusM: number;
+  valid: boolean;
+  reason: string | null;
+  siteIndex?: number;
+}
+
+/** Resolve where the current placement would land under the cursor, and whether it's legal. */
+function resolvePlacement(screen: Cesium.Cartesian2): PlacementResolve | null {
+  if (!rtsPlacing || !rtsGame || !rtsBuild) return null;
+  const def = STRUCTURES[rtsPlacing];
+  const g = groundAt(screen);
+  if (!g) return null;
+
+  if (def.placement === 'site') {
+    // Snap to the nearest UNBUILT surveyed site near the cursor.
+    let best: BuildSite | null = null;
+    let bestD = Infinity;
+    for (const s of rtsSites) {
+      if (rtsBuiltSites.has(s.index)) continue;
+      const d = metresBetween(g.lon, g.lat, s.lon, s.lat);
+      if (d < bestD) {
+        bestD = d;
+        best = s;
+      }
+    }
+    if (!best) return { lon: g.lon, lat: g.lat, radiusM: def.footprintM, valid: false, reason: 'NO OPEN SITE' };
+    if (bestD > BUILD_RULES.OBELISK_SNAP_M) {
+      return { lon: best.lon, lat: best.lat, radiusM: def.footprintM, valid: false, reason: 'MOVE ONTO A SITE', siteIndex: best.index };
+    }
+    const reason = validateObelisk(best);
+    return { lon: best.lon, lat: best.lat, radiusM: def.footprintM, valid: reason === null, reason, siteIndex: best.index };
+  }
+
+  const reason = validateFacility(g.lon, g.lat);
+  return { lon: g.lon, lat: g.lat, radiusM: def.footprintM, valid: reason === null, reason };
+}
+
+/** Why an obelisk can't stand on this site, or null. */
+function validateObelisk(site: BuildSite): string | null {
+  if (!rtsGame) return 'NO MATCH';
+  if (rtsBuiltSites.has(site.index)) return 'ALREADY BUILT';
+  if (theaterMap && theaterMap.heightAt(site.lon, site.lat) < 1) return 'AT SEA';
+  // Must be within reach of an existing obelisk (the Nexus counts), so expansion runs in a chain.
+  const near = rtsGame.structures.some(
+    (s) => (s.type === 'obelisk' || s.type === 'nexus') && metresBetween(site.lon, site.lat, s.lon, s.lat) <= BUILD_RULES.OBELISK_REACH_M,
+  );
+  return near ? null : 'OUT OF REACH OF YOUR NETWORK';
+}
+
+/** Why a facility can't stand here, or null. */
+function validateFacility(lon: number, lat: number): string | null {
+  if (!rtsGame || !rtsBuild) return 'NO MATCH';
+  if (theaterMap && theaterMap.heightAt(lon, lat) < 1) return 'AT SEA';
+  // Anchored to the base first — it's the primary RTS placement concept, so a far click should read
+  // "get closer to your base" rather than incidentally "not near a road".
+  const anchored = rtsGame.structures.some(
+    (s) => (s.type === 'nexus' || isFacility(s.type)) && metresBetween(lon, lat, s.lon, s.lat) <= BUILD_RULES.FACILITY_REACH_M,
+  );
+  if (!anchored) return 'OUT OF BASE RANGE';
+  if (!rtsBuild.nearRoad(lon, lat)) return 'NOT NEAR A ROAD';
+  const tooClose = rtsGame.structures.some((s) => metresBetween(lon, lat, s.lon, s.lat) < BUILD_RULES.MIN_SPACING_M);
+  if (tooClose) return 'TOO CLOSE TO A STRUCTURE';
+  return null;
+}
+
+/** Update the placement ghost to the cursor. Called from the mouse-move handler while placing. */
+function updatePlacementGhost(screen: Cesium.Cartesian2): void {
+  const r = resolvePlacement(screen);
+  if (!r || !rtsBuild) {
+    rtsBuild?.hideGhost();
+    return;
+  }
+  rtsBuild.showGhost(r.lon, r.lat, r.radiusM, r.valid);
+}
+
+/** Commit a placement at a click, if it's legal and affordable. */
+function tryPlaceAt(screen: Cesium.Cartesian2): void {
+  if (!rtsPlacing || !rtsGame) return;
+  const type = rtsPlacing;
+  const def = STRUCTURES[type];
+  const r = resolvePlacement(screen);
+  if (!r || !r.valid) {
+    sound.play('denied');
+    toast(`◈ CANNOT BUILD · ${r?.reason ?? 'INVALID SPOT'}`);
+    return;
+  }
+  if (!rtsGame.spend(def.cost)) {
+    sound.play('denied');
+    toast('◈ INSUFFICIENT FUNDS');
+    return;
+  }
+  if (def.placement === 'site' && r.siteIndex !== undefined) {
+    buildObeliskAt(r.siteIndex, r.lon, r.lat);
+  } else {
+    const s = rtsGame.addStructure(type, r.lon, r.lat);
+    rtsBuild?.addFacility(s);
+  }
+  sound.play('purchase');
+  toast(`◈ ${def.name} BUILT · −${def.cost}`);
+  // One build per arm — cancel so the next click selects again, the way an RTS drops out of build
+  // mode after placing (shift-to-keep-placing can come later).
+  cancelPlacement();
+  updateRtsHud();
+}
+
+/**
+ * Build an obelisk on a surveyed site: flip the mask bit and rebuild the obelisk geometry + sensor
+ * field from it. The new site is a real network node from that instant — coverage, servicing and the
+ * income it raises all fall out of the mask, exactly as the airdrop did in the campaign.
+ */
+function buildObeliskAt(siteIndex: number, lon: number, lat: number): void {
+  if (!rtsGame || !obeliskMask || !theaterCenter || !theaterMap) return;
+  obeliskMask[siteIndex] = 1;
+  rtsBuiltSites.add(siteIndex);
+  rtsGame.addStructure('obelisk', lon, lat, siteIndex);
+  addObeliskPyramids(theaterCenter.lon, theaterCenter.lat, theaterMap);
+  rtsBuild?.setSites(rtsSites, rtsBuiltSites);
 }
 
 /**
@@ -3333,6 +3582,16 @@ let mode: Mode = 'globe';
  * director, an RTS money HUD instead of the mission chrome). See src/game/rts/rtsGame.ts.
  */
 let rtsGame: RtsGame | null = null;
+/** The RTS build layer (facility markers, site dots, placement ghost), or null outside a match. */
+let rtsBuild: RtsBuildLayer | null = null;
+/** The RTS build command bar, or null outside a match. */
+let rtsCmd: RtsCommandBar | null = null;
+/** The theater's surveyed obelisk sites — where obelisks may be built. */
+let rtsSites: BuildSite[] = [];
+/** Global obelisk indices already carrying an obelisk (the Nexus, then anything built). */
+const rtsBuiltSites = new Set<number>();
+/** The structure currently being placed, or null. When set, clicks place instead of selecting. */
+let rtsPlacing: StructureType | null = null;
 let theaterCenter: { lon: number; lat: number } | null = null;
 
 // Function declarations (not const arrows): these are called during module evaluation by the
@@ -3765,6 +4024,9 @@ async function buildTheater(lon: number, lat: number, tok: number) {
     // Spawn them before the building extrude so they're live immediately; buildings fill in after.
     setStage('POPULATING THEATER');
     addUnits({ lon, lat }, map, net);
+    // An RTS match stands its build layer up here — it needs the road net (placement rules) and the
+    // baked mesh (grounding), both ready now.
+    if (rtsGame) setupRtsBuild(map, net);
 
     setText(
       'g-terrain',
@@ -3848,6 +4110,11 @@ const fmt = (rad: number, pos: string, neg: string) => {
 };
 
 handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.MotionEvent) => {
+  // RTS placement: the ghost tracks the cursor and recolours on legality. Owns the pointer entirely.
+  if (rtsPlacing) {
+    updatePlacementGhost(m.endPosition);
+    return;
+  }
   // theater: draw the marquee box while dragging
   if (marqueeStart) {
     if (Cesium.Cartesian2.distance(marqueeStart, m.endPosition) > MARQUEE_MIN) marqueeActive = true;
@@ -3870,6 +4137,7 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.MotionEvent) => {
 
 // LMB down: begin a possible marquee (theater, desktop — mobile LMB pans the map).
 handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
+  if (rtsPlacing) return; // in placement mode LMB places, not marquees
   if (mode !== 'theater' || IS_MOBILE) return;
   marqueeStart = Cesium.Cartesian2.clone(m.position);
   marqueeActive = false;
@@ -3888,8 +4156,12 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
   endMarquee();
 }, Cesium.ScreenSpaceEventType.LEFT_UP);
 
-// LMB click (no drag): pick a theater in orbit, a single unit in a theater.
+// LMB click (no drag): pick a theater in orbit, a single unit in a theater, or place a structure.
 handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
+  if (rtsPlacing) {
+    tryPlaceAt(m.position);
+    return;
+  }
   if (mode === 'globe') {
     const carto = pickLonLat(m.position);
     if (carto) tryEnterTheater(carto);
@@ -3921,6 +4193,12 @@ function groundAt(p: Cesium.Cartesian2): { lon: number; lat: number } | undefine
 }
 
 handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
+  // Right-click cancels a placement in progress, the way an RTS drops the build cursor.
+  if (rtsPlacing) {
+    cancelPlacement();
+    rightDownAt = null;
+    return;
+  }
   rightDownAt = mode === 'theater' ? Cesium.Cartesian2.clone(m.position) : null;
 }, Cesium.ScreenSpaceEventType.RIGHT_DOWN);
 
@@ -4608,7 +4886,21 @@ el('up-mark')?.addEventListener('click', () => {
 });
 
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') rtsGame ? endRtsMatch() : exitTheater();
+  // RTS build hotkeys + placement cancel take the key before anything else in a match.
+  if (rtsGame) {
+    if (e.key === 'Escape') {
+      if (rtsPlacing) cancelPlacement();
+      else endRtsMatch();
+      return;
+    }
+    const k = e.key.toUpperCase();
+    const hit = (['obelisk', 'robotics', 'aviation', 'tech'] as StructureType[]).find((t) => STRUCTURES[t].hotkey === k);
+    if (hit && !e.repeat) {
+      beginPlacement(hit);
+      return;
+    }
+  }
+  if (e.key === 'Escape') exitTheater();
   // I cycles the infection: spread it to more units so the red state is easy to watch, then reset.
   if ((e.key === 'i' || e.key === 'I') && mode === 'theater' && unitField) {
     unitField.cycleInfection();
@@ -4640,6 +4932,20 @@ if (import.meta.env.DEV) {
     enterTheater,
     tryEnterTheater,
     exitTheater,
+    startRtsMatch,
+    endRtsMatch,
+    get rtsGame() {
+      return rtsGame;
+    },
+    get rtsSites() {
+      return rtsSites;
+    },
+    get rtsBuild() {
+      return rtsBuild;
+    },
+    buildObeliskAt,
+    beginPlacement,
+    validateFacility,
     spawnUnits,
     clearUnits,
     devSettings,

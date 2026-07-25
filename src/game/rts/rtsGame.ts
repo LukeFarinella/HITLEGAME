@@ -13,6 +13,8 @@
  * expansion the player builds at a predetermined site and rebuilds if it falls.
  */
 
+import { STRUCTURES, type Structure, type StructureType } from './structures';
+
 /** Economy tuning. One place, so the whole balance of the opening is a handful of readable numbers. */
 export const RTS_ECON = {
   /** What a fresh match opens with — enough to think about a first building, not to skip the opening. */
@@ -42,8 +44,42 @@ export class RtsGame {
   readonly nexusIndex: number;
   private listeners = new Set<RtsListener>();
 
-  constructor(nexusIndex: number) {
+  /** Everything the player has built, the Nexus first. Position/type/health live here; the scene renders it. */
+  readonly structures: Structure[] = [];
+  private nextStructureId = 1;
+
+  constructor(nexusIndex: number, nexusLon: number, nexusLat: number) {
     this.nexusIndex = nexusIndex;
+    // The Nexus is a structure like any other — it just happens to be the one you start with and the
+    // one whose loss ends the game.
+    this.structures.push({
+      id: this.nextStructureId++,
+      type: 'nexus',
+      lon: nexusLon,
+      lat: nexusLat,
+      hp: STRUCTURES.nexus.maxHp,
+      maxHp: STRUCTURES.nexus.maxHp,
+      siteIndex: nexusIndex,
+    });
+  }
+
+  /** Register a newly-built structure. The scene has already validated the spot and charged for it. */
+  addStructure(type: StructureType, lon: number, lat: number, siteIndex?: number): Structure {
+    const def = STRUCTURES[type];
+    const s: Structure = { id: this.nextStructureId++, type, lon, lat, hp: def.maxHp, maxHp: def.maxHp, siteIndex };
+    this.structures.push(s);
+    this.changed();
+    return s;
+  }
+
+  /** Structures of a given type — the command bar reads this to know what you can already produce from. */
+  structuresOfType(type: StructureType): Structure[] {
+    return this.structures.filter((s) => s.type === type);
+  }
+
+  /** The Nexus structure, or undefined if it has fallen (defeat). */
+  get nexus(): Structure | undefined {
+    return this.structures.find((s) => s.type === 'nexus');
   }
 
   /** Banked money, floored — fractional accrual is real but never shown as a fraction. */

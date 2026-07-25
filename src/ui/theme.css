@@ -1587,6 +1587,33 @@ body.dev-open #c2-tasking { display: none; }
 .grts-cap { font: 500 12px/1 var(--mono); color: var(--ash); }
 .grts-sub { margin-top: 3px; font: 600 8.5px/1 var(--mono); letter-spacing: .16em; color: var(--steel); }
 
+/* ---- build command bar ---- */
+#g-rts-cmd {
+  position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%);
+  display: flex; gap: 8px; z-index: 22; pointer-events: auto;
+}
+.grc-chip {
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  min-width: 74px; padding: 8px 10px 7px;
+  background: rgba(11, 12, 14, .92); border: 1px solid var(--gunmetal);
+  border-bottom: 2px solid var(--gunmetal);
+  cursor: pointer; font-family: var(--mono);
+  transition: border-color .12s, background .12s, transform .08s;
+}
+.grc-chip:hover { border-color: var(--steel); background: var(--graphite); }
+.grc-chip.active { border-color: var(--ok); border-bottom-color: var(--ok); box-shadow: 0 0 16px rgba(63, 191, 111, .3); }
+.grc-chip.broke { opacity: .5; }
+.grc-chip.broke .grc-cost { color: var(--red); }
+.grc-key {
+  font: 700 9px/1 var(--mono); letter-spacing: .08em; color: var(--void);
+  background: var(--steel); border-radius: 2px; padding: 2px 5px; min-width: 12px; text-align: center;
+}
+.grc-chip.type-robotics .grc-key { background: var(--warn); }
+.grc-chip.type-aviation .grc-key { background: #3fa0e0; }
+.grc-chip.type-tech .grc-key { background: #8b6fe0; }
+.grc-name { font: 700 9px/1 var(--mono); letter-spacing: .1em; color: var(--bone); }
+.grc-cost { font: 600 9px/1 var(--mono); letter-spacing: .06em; color: var(--warn); }
+
 /* Below this the two rails plus the map no longer coexist: the store takes the screen and the
    tasking rail moves under it rather than over the top of it. */
 @media (max-width: 860px) {
