@@ -46,7 +46,7 @@ import { Store } from '../ui/store';
 import { icon } from '../ui/icons';
 import { sound, bindInterfaceSounds } from '../ui/sound';
 import { music } from '../ui/music';
-import { MissionPanel, showMissionComplete } from '../ui/missions';
+import { MissionPanel, showMissionComplete, presentPendingForks } from '../ui/missions';
 import { ProcessPanel } from '../ui/process';
 import { showStartWindow } from '../ui/start';
 import { showTitle, setTitleTerritory } from '../ui/title';
@@ -1348,7 +1348,7 @@ function openGroundMenu(screenX: number, screenY: number, lon: number, lat: numb
     move.addEventListener('click', () => {
       closeGroundMenu();
       if (unitField?.orderSelection(lon, lat, append)) {
-        sound.play('click');
+        sound.play('move');
         updateUnitPanel();
       }
     });
@@ -1705,12 +1705,33 @@ function applyProcessAction(index: number, action: SanctionId) {
     }
     return;
   }
-  // detain / prison / execute — needs a platform in range to carry it out.
+  // Execution is serviced by the armed obelisk net or a laser platform that covers the contact — so
+  // a standing kill rule MARKS the contact and the execution pass fires the beam, exactly like
+  // AUTOMATED SANCTION does. The old path dispatched one laser PLATFORM per tick, so a rule set to
+  // EXECUTE did nothing at all unless a laser drone happened to be fielded — the obelisk directed-
+  // energy net, which is the whole reason a kill-on-sight rule is interesting, never got a look in.
+  if (action === 'execute') {
+    if (!hasExecuteEmitter()) return; // nothing can carry it out — don't leave a stale crosshair up
+    if (unitField.markContact(index, 'execute')) sound.play('orderLethal');
+    return;
+  }
+  // detain / prison still send a platform — somebody has to physically carry the contact off.
   const s = SANCTION_BY_ID.get(action);
   if (!s) return;
-  if (unitField.dispatch(index, action, carriersFor(s, index))) {
-    sound.play(action === 'execute' ? 'orderLethal' : 'order');
-  }
+  if (unitField.dispatch(index, action, carriersFor(s, index))) sound.play('order');
+}
+
+/**
+ * Whether anything can currently service an execution: the armed obelisk net (OBELISK DIRECTED
+ * ENERGY over held ground), or a platform with a laser fitted. This is the same test the execution
+ * pass makes before it fires a single beam, hoisted so a standing rule doesn't mark a contact it can
+ * never carry out — and so the Process editor can warn when a lethal rule has no weapon behind it.
+ */
+function hasExecuteEmitter(): boolean {
+  return (
+    (progression.has('obelisk-laser') && !!sensorField) ||
+    progression.ownedPlatforms().some((id) => progression.platformHas(id, 'laser'))
+  );
 }
 
 /**
@@ -1950,6 +1971,10 @@ async function openCampaign(slot: number): Promise<void> {
   setStage('READY');
   hideLoading();
   maybeOfferStart();
+  // A campaign reopened mid-fork (quit before choosing) still owes that decision — surface it. The
+  // founding window and a pending fork never coincide: a fork needs a cleared mission, which needs a
+  // home, so this only fires once maybeOfferStart has nothing to show.
+  presentPendingForks();
 }
 
 /**
@@ -3847,13 +3872,8 @@ function openContactMenu(
   kind: PlatformId | null,
   contact: { index: number; lon: number; lat: number; id: string },
   append: boolean,
-) {
+): boolean {
   closeContactMenu();
-  const box = document.createElement('div');
-  box.id = 'g-context';
-  box.style.left = `${screenX}px`;
-  box.style.top = `${screenY}px`;
-  box.innerHTML = `<div class="gc-head">${contact.id}</div>`;
 
   // Anything actively causing trouble — an obelisk attacker, a rioter, a brawler, an assassin.
   const threat = unitField?.isThreatActor(contact.index) ?? false;
@@ -3865,7 +3885,21 @@ function openContactMenu(
       (contact.lat - theaterHome.lat) * 111_320,
     ) <= GARRISON_DETAIN_M;
 
-  for (const opt of contactOptions(kind, { threat, garrisonInRange })) {
+  // The decisive fix for "right-click does nothing": a city is wall-to-wall ambient contacts, so a
+  // 26 px pick almost always lands ON someone. If that someone offers no action — an ordinary
+  // civilian, which is nearly all of them — we must NOT eat the click with an empty menu. Return
+  // false and let the caller treat it as a ground order (move, or the airdrop menu). Sanctions live
+  // on the card now; the only things that reach this menu are the home garrison and the area strike.
+  const options = contactOptions(kind, { threat, garrisonInRange });
+  if (!options.length) return false;
+
+  const box = document.createElement('div');
+  box.id = 'g-context';
+  box.style.left = `${screenX}px`;
+  box.style.top = `${screenY}px`;
+  box.innerHTML = `<div class="gc-head">${contact.id}</div>`;
+
+  for (const opt of options) {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = `gc-item${opt.action === 'strike' ? ' lethal' : ''}`;
@@ -3913,6 +3947,7 @@ function openContactMenu(
     window.removeEventListener('pointerdown', dismiss, true);
   };
   window.setTimeout(() => window.addEventListener('pointerdown', dismiss, true), 0);
+  return true;
 }
 
 handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
@@ -3925,29 +3960,39 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
   // Shift queues the leg behind whatever is already commanded instead of replacing it.
   const append = shiftHeld;
 
-  // Right-clicking a CONTACT is "go and deal with that one" — the platform routes to it carrying
-  // whatever its hardpoints can actually do. Right-clicking open ground is a plain move.
+  // Right-clicking a CONTACT that offers a real action — an attacker the garrison can take, or an
+  // area strike — opens its menu. But a pick in a crowded city lands on an ordinary civilian far
+  // more often than not, and those offer nothing: openContactMenu returns false for them and we fall
+  // straight through to the ground order, so a right-click reads as "move here" the way an RTS does
+  // rather than snagging on whoever happened to be standing under the cursor.
   const contact = unitField.contactAt(scene, m.position.x, m.position.y, SELECT_PX);
-  if (contact) {
-    // With nothing selected the menu is still worth opening IF the home garrison could reach this
-    // contact — that path involves no platform at all.
-    openContactMenu(m.position.x, m.position.y, sel?.kind ?? null, contact, append);
-    return;
-  }
+  if (contact && openContactMenu(m.position.x, m.position.y, sel?.kind ?? null, contact, append)) return;
 
   closeContactMenu();
   closeGroundMenu();
   const g = groundAt(m.position);
   if (!g) return;
-  // Once airdrop is commissioned, a click on empty ground is ambiguous and has to ask.
-  if (progression.has('airdrop')) {
-    openGroundMenu(m.position.x, m.position.y, g.lon, g.lat, append);
+
+  // A selected platform makes a ground right-click unambiguous: move there, now, with no menu in the
+  // way — the way an RTS does it. The airdrop question moves OFF the right-click while a unit is held
+  // (it used to pop a MOVE/AIRDROP chooser on every single click, which is the friction that made
+  // repositioning feel broken); it's still one right-click away with nothing selected, below.
+  if (sel) {
+    if (unitField.orderSelection(g.lon, g.lat, append)) {
+      sound.play('move');
+      updateUnitPanel();
+    } else {
+      // Selected but couldn't take the point — a road-bound quadruped with no street to it, a
+      // littoral hull sent inland. Say so rather than dying silently, which reads as a dead click.
+      sound.play('denied');
+      toast('◈ NO ROUTE TO THAT GROUND');
+    }
     return;
   }
-  if (unitField.orderSelection(g.lon, g.lat, append)) {
-    sound.play('click');
-    updateUnitPanel();
-  }
+
+  // Nothing selected: the only thing a ground right-click can mean is dropping a site, once that's
+  // been commissioned. Deselect (left-click empty ground) and right-click to place one.
+  if (progression.has('airdrop')) openGroundMenu(m.position.x, m.position.y, g.lon, g.lat, append);
 }, Cesium.ScreenSpaceEventType.RIGHT_UP);
 
 /**
@@ -4007,9 +4052,12 @@ new MissionPanel({
     resistance.relieve();
     reactCompany();
     showMissionComplete(mission, {
-      onContinue: () => {},
+      // Whichever way the operator leaves the completion window, any decision that clearance opened
+      // is put to them as a halting modal before they can carry on — the choice can't scroll past.
+      onContinue: () => presentPendingForks(),
       onReturn: () => {
         if (mode === 'theater') exitTheater();
+        presentPendingForks();
       },
     });
   },
@@ -4222,6 +4270,9 @@ bindInterfaceSounds();
       b.addEventListener('click', () => {
         missions.devCompleteThrough(id);
         paintAll();
+        // A jump can leave several forks owed at once; work through them as blocking modals so a
+        // skipped-to campaign is in the same decided state a played one would be.
+        presentPendingForks();
       });
       chain.append(b);
     };

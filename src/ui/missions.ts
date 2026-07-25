@@ -1,4 +1,4 @@
-import { MISSIONS, missions, type MissionDef } from '../game/missions';
+import { MISSIONS, missions, type Fork, type MissionDef } from '../game/missions';
 import { unlockName } from '../game/catalog';
 import { icon } from './icons';
 import { tolerance, toleranceLabel } from '../game/tolerance';
@@ -492,4 +492,96 @@ export function showMissionComplete(
   box.append(actions);
   back.append(box);
   document.body.append(back);
+}
+
+/**
+ * The decision window: a permanent, exclusive fork put to the operator as a centered, halting modal.
+ *
+ * This is the same shape as the founding window on purpose — a fork is a choice the campaign cannot
+ * proceed past without an answer, so it stops the screen rather than sitting in the rail waiting to
+ * be noticed. There is no cancel and no click-outside: the only way out is to take a branch, because
+ * the branch not taken is closed for good and there is no neutral third option.
+ *
+ * Returns nothing; the caller chains to the next pending fork through {@link ForkHooks.onChosen}, so
+ * a campaign that owes several decisions at once (a dev jump, a save reopened mid-fork) works through
+ * them one blocking modal at a time.
+ */
+export interface ForkHooks {
+  /** A branch was taken — the caller re-reads state and presents the next pending fork, if any. */
+  onChosen(choiceLabel: string): void;
+}
+
+export function showForkDecision(mission: MissionDef, fork: Fork, hooks: ForkHooks): void {
+  // One decision modal at a time — if one is already up, the chain will re-drive when it closes.
+  if (document.getElementById('c2-decision')) return;
+
+  const back = document.createElement('div');
+  back.className = 'c2-modal-back';
+  back.id = 'c2-decision';
+
+  const box = document.createElement('div');
+  box.className = `c2-modal c2-decision kind-${fork.kind}`;
+
+  box.innerHTML =
+    `<div class="c2-modal-head">` +
+    `<span class="c2-name">${icon('surveil')}DECISION REQUIRED</span>` +
+    `<span class="c2-order order-investigate">${mission.name}</span>` +
+    `</div>` +
+    `<p class="c2-modal-p">${fork.prompt}</p>` +
+    `<p class="c2-modal-p c2-decision-note">This choice is permanent. The branch you pass over is ` +
+    `closed for the rest of the campaign.</p>`;
+
+  const choices = document.createElement('div');
+  choices.className = `c2-fork kind-${fork.kind} c2-decision-choices`;
+  for (const c of fork.choices) {
+    // The consequences, spelled out — what it pays, what it releases, and (for a partner) that it
+    // makes a permanent enemy. A choice this final should never be made blind.
+    const bits: string[] = [];
+    if (c.funding) bits.push(`+${fmt.format(c.funding)} TOKENS`);
+    if (c.unlocks?.length) bits.push(`RELEASES ${c.unlocks.map(unlockName).join(' · ')}`);
+    if (c.grantsFaction) bits.push('PROTECTS A FACTION');
+    if (c.angersFactions?.length) bits.push('MAKES AN ENEMY');
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'c2-fork-choice';
+    btn.innerHTML =
+      `<span class="c2-fork-label">${c.label}</span>` +
+      `<span class="c2-fork-blurb">${c.blurb}</span>` +
+      (bits.length ? `<span class="c2-fork-bits">${bits.join(' · ')}</span>` : '');
+    btn.addEventListener('click', () => {
+      if (!missions.chooseFork(mission.id, c.id)) return;
+      back.remove();
+      hooks.onChosen(c.label);
+    });
+    choices.append(btn);
+  }
+  box.append(choices);
+
+  back.append(box);
+  // Deliberately no click-outside-to-close and no cancel: progress halts here until a branch is taken.
+  document.body.append(back);
+}
+
+/**
+ * Put the oldest owed decision on screen, and chain to the next once it's answered.
+ *
+ * The single entry point the scene calls at every moment a fork might have come due — a clearance, a
+ * dev jump, a campaign reopened. It is idempotent and self-terminating: no pending fork, or a modal
+ * already up, and it does nothing; otherwise it shows one and re-drives itself on choice until the
+ * campaign owes none. Kept here rather than in the scene so the halting behaviour travels with the
+ * modal it belongs to.
+ */
+export function presentPendingForks(onDone?: () => void): void {
+  const pending = missions.pendingFork();
+  if (!pending) {
+    onDone?.();
+    return;
+  }
+  // Don't stack over the mission-complete window — it drives this itself when it closes.
+  if (document.getElementById('c2-complete')) return;
+  if (document.getElementById('c2-decision')) return;
+  showForkDecision(pending.mission, pending.fork, {
+    onChosen: () => presentPendingForks(onDone),
+  });
 }

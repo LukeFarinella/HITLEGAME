@@ -1,8 +1,27 @@
 import { processActions, PROCESS_SLOTS, type TriggerKind } from '../game/processActions';
 import { missions } from '../game/missions';
+import { progression } from '../game/progression';
 import type { SanctionId } from '../game/sanctions';
 import type { Severity } from '../game/intel';
 import type { ViolationClass } from '../game/violations';
+
+/**
+ * Whether the campaign owns hardware that can carry a lethal rule out: the obelisk directed-energy
+ * net, or any platform with a laser fitted. Mirrors the scene's own emitter test — a rule set to
+ * EXECUTE with neither is armed but inert, and the operator should be told that here rather than
+ * discovering it as silence in the theater.
+ */
+function hasExecuteEmitter(): boolean {
+  return (
+    progression.has('obelisk-laser') ||
+    progression.ownedPlatforms().some((id) => progression.platformHas(id, 'laser'))
+  );
+}
+
+/** Whether any owned platform carries a detainment rig — what a DETAIN/PRISON rule needs to fire. */
+function hasDetainRig(): boolean {
+  return progression.ownedPlatforms().some((id) => progression.platformHas(id, 'detain'));
+}
 
 /**
  * The Process Actions editor — the panel where the operator authors the rules the console then runs
@@ -67,6 +86,9 @@ export class ProcessPanel {
     processActions.onChange(() => this.render());
     // A completion may release a new slot, so the panel has to redraw when the chain moves too.
     missions.onChange(() => this.render());
+    // Buying an emitter or fitting a laser is what clears a "NO EMITTER" warning, so ownership
+    // changes have to redraw the panel as well.
+    progression.onChange(() => this.render());
     this.render();
   }
 
@@ -137,14 +159,24 @@ export class ProcessPanel {
 
     row.append(en, name, when, trig, param, arrow, act);
 
-    // A note when an armed rule can't actually fire yet — it needs an authority the chain hasn't
-    // granted. The rule is still editable; it just waits, the way a locked ladder rung does.
+    // A note when an armed rule can't actually fire — it's waiting on either an AUTHORITY the chain
+    // hasn't granted, or the HARDWARE that carries the action out. The authority gap is checked first
+    // ("you don't have this power" outranks "you have it but nothing can do it"), then the weapon:
+    // a lethal rule with lethal authority still fires nothing without an emitter, and that silence is
+    // exactly what reads as "process actions don't work". The rule stays editable; it just waits.
     const needsDetain = rule.action === 'detain' || rule.action === 'prison';
     const needsExec = rule.action === 'execute';
-    if (rule.enabled && ((needsDetain && !missions.hasAuth('detain')) || (needsExec && !missions.hasAuth('execute')))) {
+    let warnText: string | null = null;
+    if (rule.enabled) {
+      if (needsExec && !missions.hasAuth('execute')) warnText = 'NO LETHAL AUTHORITY';
+      else if (needsDetain && !missions.hasAuth('detain')) warnText = 'NO CUSTODY AUTHORITY';
+      else if (needsExec && !hasExecuteEmitter()) warnText = 'NO EMITTER · ARM OBELISKS OR FIT A LASER';
+      else if (needsDetain && !hasDetainRig()) warnText = 'NO DETAINMENT RIG FITTED';
+    }
+    if (warnText) {
       const warn = document.createElement('span');
       warn.className = 'gp-warn';
-      warn.textContent = needsExec ? 'NO LETHAL AUTHORITY' : 'NO CUSTODY AUTHORITY';
+      warn.textContent = warnText;
       row.append(warn);
     }
 

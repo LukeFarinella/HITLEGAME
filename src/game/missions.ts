@@ -228,8 +228,8 @@ export const MISSIONS: MissionDef[] = [
       'being watched — a crowd that knows it is being read behaves differently to one that does not.',
     mark: 'fine',
     toleranceGain: 0.06,
-    target: 60,
-    maxInvalid: 18,
+    target: 6,
+    maxInvalid: 2,
     maxObelisksLost: 4,
     reward: 9000,
     penalty: 2500,
@@ -269,8 +269,8 @@ export const MISSIONS: MissionDef[] = [
       'economies come up for purchase. Take the ground where the population actually is.',
     mark: 'fine',
     toleranceGain: 0.06,
-    target: 140,
-    maxInvalid: 34,
+    target: 7,
+    maxInvalid: 2,
     maxObelisksLost: 4,
     reward: 14_000,
     penalty: 4500,
@@ -315,8 +315,8 @@ export const MISSIONS: MissionDef[] = [
       'hold of somebody without the authority to, usable only against a site actively under attack.',
     mark: 'fine',
     toleranceGain: 0.06,
-    target: 180,
-    maxInvalid: 42,
+    target: 8,
+    maxInvalid: 3,
     maxObelisksLost: 4,
     reward: 18_000,
     penalty: 6000,
@@ -357,8 +357,8 @@ export const MISSIONS: MissionDef[] = [
       'ARACHNID pursuit walker and the detainment rig are released to carry it.',
     mark: 'investigate',
     toleranceGain: 0.07,
-    target: 30,
-    maxInvalid: 10,
+    target: 8,
+    maxInvalid: 3,
     maxObelisksLost: 3,
     reward: 20_000,
     penalty: 6500,
@@ -395,8 +395,8 @@ export const MISSIONS: MissionDef[] = [
       'quota has.',
     mark: 'investigate',
     toleranceGain: 0.06,
-    target: 55,
-    maxInvalid: 16,
+    target: 9,
+    maxInvalid: 3,
     maxObelisksLost: 3,
     reward: 28_000,
     penalty: 9000,
@@ -435,8 +435,8 @@ export const MISSIONS: MissionDef[] = [
       'the walkers cannot follow.',
     mark: 'investigate',
     toleranceGain: 0.06,
-    target: 65,
-    maxInvalid: 18,
+    target: 9,
+    maxInvalid: 3,
     maxObelisksLost: 3,
     reward: 33_000,
     penalty: 10_500,
@@ -472,8 +472,8 @@ export const MISSIONS: MissionDef[] = [
       'evidence lies. A LESS-LETHAL suite is released to answer a siege without ending it.',
     mark: 'investigate',
     toleranceGain: 0.06,
-    target: 55,
-    maxInvalid: 14,
+    target: 10,
+    maxInvalid: 3,
     maxObelisksLost: 2,
     reward: 38_000,
     penalty: 12_000,
@@ -515,8 +515,8 @@ export const MISSIONS: MissionDef[] = [
       'released with it.',
     mark: 'investigate',
     toleranceGain: 0.07,
-    target: 80,
-    maxInvalid: 20,
+    target: 10,
+    maxInvalid: 3,
     maxObelisksLost: 3,
     reward: 44_000,
     penalty: 14_000,
@@ -553,8 +553,8 @@ export const MISSIONS: MissionDef[] = [
       'set to service a matching contact on its own — PROCESS ACTION I.',
     mark: 'execute',
     toleranceGain: 0.06,
-    target: 30,
-    maxInvalid: 5,
+    target: 10,
+    maxInvalid: 2,
     maxObelisksLost: 3,
     reward: 46_000,
     penalty: 15_000,
@@ -1243,6 +1243,11 @@ export class Missions {
         if (m.id === id) break;
       }
     }
+    // A jumped-to campaign must land the same invariant a played one holds: there is ALWAYS a
+    // tasking on the books unless the whole chain is cleared. Without this the skip leaves the chain
+    // with everything up to `id` complete and nothing active — the next link reads as UPCOMING with
+    // no way to start it.
+    this.ensureActive();
     this.emit({ type: 'progress' });
   }
 
@@ -1254,6 +1259,9 @@ export class Missions {
     this.choices.clear();
     this.active = null;
     this._ledger = { fines: 0, investigations: 0, executions: 0, valid: 0, invalid: 0 };
+    // Back to the opening position still means a tasking is on the books: the very first link has no
+    // prerequisite, so it re-arms immediately rather than leaving the chain idle after a reset.
+    this.ensureActive();
     this.emit({ type: 'progress' });
   }
 }

@@ -129,6 +129,14 @@ const CUES: Record<string, Cue> = {
     k.noise({ at: 0.02, dur: 0.09, gain: 0.02, filter: 'bandpass', freq: 1400, to: 3200, q: 6 });
   },
 
+  // Move acknowledged: a unit answering an RMB waypoint. Two quick bright FM chirps climbing a
+  // fourth — short, affirmative, unmistakably "moving", and distinct from the questioning INVESTIGATE
+  // rise so a reposition never reads as an order against a contact.
+  move: (k) => {
+    k.tone({ freq: 660, dur: 0.06, gain: 0.06, type: 'sine', fm: { ratio: 2, index: 180 } });
+    k.tone({ freq: 880, at: 0.05, dur: 0.09, gain: 0.05, type: 'sine', fm: { ratio: 2, index: 220 }, space: 0.2 });
+  },
+
   // Execution order: same shape a register lower and far darker — a sub, a detuned FM growl, and a
   // reversed-feeling noise swell into the hit. Deliberately not a "nicer" sound.
   orderLethal: (k) => {

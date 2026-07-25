@@ -1557,7 +1557,9 @@ body.dev-open #c2-tasking { display: none; }
   color: var(--bone); background: var(--graphite-2); border: 1px solid var(--gunmetal);
   padding: 2px 4px; cursor: pointer; pointer-events: auto;
 }
-.gp-warn { font: 600 7.5px/1 var(--mono); letter-spacing: .1em; color: var(--red); }
+/* The warning drops onto its own line under the rule (the row wraps) so a longer "no weapon" note
+   reads as a full sentence rather than being crushed against the action select. */
+.gp-warn { flex-basis: 100%; font: 600 7.5px/1.3 var(--mono); letter-spacing: .1em; color: var(--red); }
 
 /* Below this the two rails plus the map no longer coexist: the store takes the screen and the
    tasking rail moves under it rather than over the top of it. */
@@ -1722,6 +1724,27 @@ body.dev-open #c2-tasking { display: none; }
 .c2-fork-label { font: 700 10px/1 var(--mono); letter-spacing: .12em; color: var(--steel); }
 .c2-fork-blurb { font: 400 10px/1.35 var(--mono); color: var(--ash); }
 .c2-fork-bits { font: 600 8px/1.3 var(--mono); letter-spacing: .1em; color: var(--warn); margin-top: 2px; }
+
+/* ===== DECISION MODAL ===========================================================================
+   The same fork, escalated to a centered, halting window. It reuses the fork-choice markup but
+   drops the inset box chrome — inside the modal the choices ARE the body, not a panel within it —
+   and grows the type so a permanent choice reads at modal scale rather than rail scale. */
+.c2-modal.c2-decision { border-left-color: var(--warn); }
+.c2-modal.c2-decision.kind-partner { border-left-color: var(--red); }
+.c2-modal.c2-decision .c2-modal-head .c2-glyph { color: var(--warn); }
+.c2-modal.c2-decision.kind-partner .c2-modal-head .c2-glyph { color: var(--red); }
+.c2-decision-note { color: var(--warn); font-size: 10.5px; letter-spacing: .04em; }
+.c2-modal.c2-decision.kind-partner .c2-decision-note { color: var(--red); }
+/* The choice container carries `.c2-fork` for the kind-scoped hover colours, but as a modal body it
+   wants none of the panel's border, fill, padding or margin. */
+.c2-decision-choices {
+  display: flex; flex-direction: column; gap: 8px;
+  border: none; background: none; padding: 0; margin: 0;
+}
+.c2-decision-choices .c2-fork-choice { padding: 11px 12px; gap: 4px; }
+.c2-decision-choices .c2-fork-label { font-size: 11.5px; }
+.c2-decision-choices .c2-fork-blurb { font-size: 11px; }
+.c2-decision-choices .c2-fork-bits { font-size: 9px; margin-top: 3px; }
 
 /* ===== LIVE VIOLATION BLOCK =====================================================================
    The main thing an operator acts on, so it sits above the charge sheet and looks like an alert

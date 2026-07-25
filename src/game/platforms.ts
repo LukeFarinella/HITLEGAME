@@ -105,9 +105,10 @@ export const PLATFORMS: PlatformDef[] = [
     },
     hardpoints: 1,
     sensorM: BASE_SENSOR_M,
-    // Well clear of a foot contact (12 m/s) but still short of traffic (80). It cannot chase
-    // anything down; it can only be somewhere. That is the entire platform.
-    speed: 44,
+    // Responsiveness pass: every platform runs at 3× its old spec so orders read as immediate rather
+    // than as a slow drift across the theater. The dog is still the slowest thing you can field and
+    // still road-bound — its limit is the street grid, not the speedometer.
+    speed: 132,
     altM: 0,
     roadBound: true,
     // The quadruped can take an attacker off a site bare-handed. It is the campaign's opening
@@ -132,7 +133,7 @@ export const PLATFORMS: PlatformDef[] = [
     hardpoints: 1,
     sensorM: BASE_SENSOR_M,
     // Marginally quicker than the dog. What it is buying is not speed, it is the straight line.
-    speed: 60,
+    speed: 180,
     altM: 400,
   },
   {
@@ -154,7 +155,7 @@ export const PLATFORMS: PlatformDef[] = [
     sensorM: BASE_SENSOR_M,
     // Comfortably faster than the traffic it moves through (ground vehicles run 80 m/s), and off
     // the graph entirely — this is the platform you buy when the dog could not get there in time.
-    speed: 260,
+    speed: 780,
     altM: 0,
   },
   {
@@ -173,7 +174,7 @@ export const PLATFORMS: PlatformDef[] = [
     },
     hardpoints: 2,
     sensorM: BASE_SENSOR_M,
-    speed: 140,
+    speed: 420,
     altM: 0,
   },
   {
@@ -192,7 +193,7 @@ export const PLATFORMS: PlatformDef[] = [
     },
     hardpoints: 2,
     sensorM: BASE_SENSOR_M,
-    speed: 180,
+    speed: 540,
     altM: 0,
   },
   {
@@ -211,7 +212,7 @@ export const PLATFORMS: PlatformDef[] = [
     },
     hardpoints: 1,
     sensorM: BASE_SENSOR_M,
-    speed: 1240,
+    speed: 3720,
     altM: 2400,
   },
   {
@@ -224,7 +225,7 @@ export const PLATFORMS: PlatformDef[] = [
     maxCount: 1,
     hardpoints: 4,
     sensorM: BASE_SENSOR_M,
-    speed: 28,
+    speed: 84,
     altM: 0,
   },
   {
@@ -238,7 +239,7 @@ export const PLATFORMS: PlatformDef[] = [
     requires: 'walker',
     hardpoints: 2,
     sensorM: BASE_SENSOR_M,
-    speed: 2000,
+    speed: 6000,
     altM: 1800,
   },
 ];
