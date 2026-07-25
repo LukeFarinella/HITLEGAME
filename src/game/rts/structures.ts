@@ -13,10 +13,10 @@
  *               a factory into the wilderness.
  */
 
-export type StructureType = 'nexus' | 'obelisk' | 'robotics' | 'aviation' | 'tech';
+export type StructureType = 'nexus' | 'obelisk' | 'robotics' | 'aviation' | 'tech' | 'supply';
 
 /** Placeable structure types, in command-bar order. The Nexus is never built — you start with it. */
-export const BUILDABLE: StructureType[] = ['obelisk', 'robotics', 'aviation', 'tech'];
+export const BUILDABLE: StructureType[] = ['obelisk', 'supply', 'robotics', 'aviation', 'tech'];
 
 export interface StructureDef {
   type: StructureType;
@@ -31,6 +31,8 @@ export interface StructureDef {
   hotkey: string;
   /** Ground-footprint radius in metres — its ring, and the spacing other structures keep from it. */
   footprintM: number;
+  /** Supply this structure adds to the cap. The Nexus opens some; the supply building is the rest. */
+  supplyProvided?: number;
 }
 
 export const STRUCTURES: Record<StructureType, StructureDef> = {
@@ -43,6 +45,7 @@ export const STRUCTURES: Record<StructureType, StructureDef> = {
     placement: 'site',
     hotkey: '',
     footprintM: 260,
+    supplyProvided: 10,
   },
   obelisk: {
     type: 'obelisk',
@@ -83,6 +86,17 @@ export const STRUCTURES: Record<StructureType, StructureDef> = {
     placement: 'free',
     hotkey: 'T',
     footprintM: 280,
+  },
+  supply: {
+    type: 'supply',
+    name: 'DATA CENTER',
+    blurb: 'Raises your supply cap so you can field a larger force.',
+    cost: 150,
+    maxHp: 750,
+    placement: 'free',
+    hotkey: 'D',
+    footprintM: 260,
+    supplyProvided: 10,
   },
 };
 

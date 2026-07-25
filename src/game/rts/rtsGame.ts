@@ -14,6 +14,7 @@
  */
 
 import { STRUCTURES, type Structure, type StructureType } from './structures';
+import { RTS_UNITS, type RtsUnitId } from './units';
 
 /** Economy tuning. One place, so the whole balance of the opening is a handful of readable numbers. */
 export const RTS_ECON = {
@@ -35,6 +36,15 @@ export const RTS_ECON = {
 
 export type RtsListener = () => void;
 
+/** One unit waiting in a building's production queue. */
+export interface QueueItem {
+  unit: RtsUnitId;
+  /** Seconds left to build. */
+  remainingS: number;
+  /** The full build time, so the UI can draw a progress bar. */
+  totalS: number;
+}
+
 export class RtsGame {
   private _money = RTS_ECON.START_MONEY;
   /**
@@ -47,6 +57,13 @@ export class RtsGame {
   /** Everything the player has built, the Nexus first. Position/type/health live here; the scene renders it. */
   readonly structures: Structure[] = [];
   private nextStructureId = 1;
+
+  /** Production queues, keyed by the producing structure's id. */
+  readonly production = new Map<number, QueueItem[]>();
+  /** Rally points, keyed by structure id — where a produced unit heads on rollout. */
+  readonly rally = new Map<number, { lon: number; lat: number }>();
+  /** Supply consumed by living + queued units. Cap comes from the structures (see supplyCap). */
+  private _supplyUsed = 0;
 
   constructor(nexusIndex: number, nexusLon: number, nexusLat: number) {
     this.nexusIndex = nexusIndex;
@@ -80,6 +97,86 @@ export class RtsGame {
   /** The Nexus structure, or undefined if it has fallen (defeat). */
   get nexus(): Structure | undefined {
     return this.structures.find((s) => s.type === 'nexus');
+  }
+
+  // ---- supply --------------------------------------------------------------------------------
+
+  /** Total supply the standing structures provide — the ceiling on your army. */
+  supplyCap(): number {
+    let c = 0;
+    for (const s of this.structures) c += STRUCTURES[s.type].supplyProvided ?? 0;
+    return c;
+  }
+
+  get supplyUsed(): number {
+    return this._supplyUsed;
+  }
+
+  /** Charge supply for a unit that's being fielded outside the queue (the opening worker). */
+  reserveSupply(n: number): void {
+    this._supplyUsed += n;
+    this.changed();
+  }
+
+  /** Release supply when a unit dies (Phase 4). */
+  releaseSupply(n: number): void {
+    this._supplyUsed = Math.max(0, this._supplyUsed - n);
+    this.changed();
+  }
+
+  // ---- production ----------------------------------------------------------------------------
+
+  /** Why a unit can't be queued right now, or null if it can. */
+  enqueueBlocker(unit: RtsUnitId): string | null {
+    const def = RTS_UNITS[unit];
+    if (this._money < def.cost) return 'INSUFFICIENT FUNDS';
+    if (this._supplyUsed + def.supply > this.supplyCap()) return 'BUILD A DATA CENTER';
+    return null;
+  }
+
+  /**
+   * Queue a unit at a producing structure. Charges the money and reserves the supply UP FRONT — the
+   * unit is paid for the moment it's ordered, the way an RTS commits resources on queue, so you can't
+   * queue an army you can't pay for and have it all roll out free.
+   */
+  enqueue(structureId: number, unit: RtsUnitId): boolean {
+    if (this.enqueueBlocker(unit)) return false;
+    const def = RTS_UNITS[unit];
+    this._money -= def.cost;
+    this._supplyUsed += def.supply;
+    const q = this.production.get(structureId) ?? [];
+    q.push({ unit, remainingS: def.buildTimeS, totalS: def.buildTimeS });
+    this.production.set(structureId, q);
+    this.changed();
+    return true;
+  }
+
+  /** The queue at a structure, for the command card. */
+  queueAt(structureId: number): QueueItem[] {
+    return this.production.get(structureId) ?? [];
+  }
+
+  /**
+   * Advance every production queue and return the units that finished this tick. Only the FRONT of
+   * each queue builds — the classic one-at-a-time facility — so a queued army rolls out in order.
+   * The scene spawns each completion and sends it to the rally point.
+   */
+  tickProduction(dt: number): { structureId: number; unit: RtsUnitId }[] {
+    const done: { structureId: number; unit: RtsUnitId }[] = [];
+    for (const [sid, q] of this.production) {
+      if (!q.length) continue;
+      q[0].remainingS -= dt;
+      if (q[0].remainingS <= 0) {
+        done.push({ structureId: sid, unit: q.shift()!.unit });
+      }
+    }
+    if (done.length) this.changed();
+    return done;
+  }
+
+  setRally(structureId: number, lon: number, lat: number): void {
+    this.rally.set(structureId, { lon, lat });
+    this.changed();
   }
 
   /** Banked money, floored — fractional accrual is real but never shown as a fraction. */

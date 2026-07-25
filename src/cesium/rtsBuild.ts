@@ -40,6 +40,7 @@ const FACILITY_COLOR: Record<StructureType, string> = {
   robotics: '#E7A13B',
   aviation: '#3FA0E0',
   tech: '#8B6FE0',
+  supply: '#3FBF6F',
 };
 
 /** A short glyph per facility, drawn into the billboard so a base reads at a glance. */
@@ -49,6 +50,7 @@ const FACILITY_GLYPH: Record<StructureType, string> = {
   robotics: 'R',
   aviation: 'V',
   tech: 'T',
+  supply: 'D',
 };
 
 /**
@@ -155,6 +157,8 @@ export class RtsBuildLayer {
   readonly icons = new Cesium.BillboardCollection();
   /** The live placement preview ring. */
   readonly ghost = new Cesium.PolylineCollection();
+  /** The selected producing structure's rally point, if it has one. */
+  readonly rallyDots = new Cesium.PointPrimitiveCollection();
 
   private roadGrid: RoadGrid;
   private ghostLine: Cesium.Polyline | undefined;
@@ -224,6 +228,23 @@ export class RtsBuildLayer {
       this.ghost.remove(this.ghostLine);
       this.ghostLine = undefined;
     }
+  }
+
+  /** Show the rally point for the selected producing structure — a single green node. */
+  setRally(lon: number, lat: number): void {
+    this.rallyDots.removeAll();
+    this.rallyDots.add({
+      position: Cesium.Cartesian3.fromDegrees(lon, lat, this.heightAt(lon, lat) + 40),
+      color: Cesium.Color.fromCssColorString('#3FBF6F').withAlpha(0.95),
+      pixelSize: 11,
+      outlineColor: Cesium.Color.fromCssColorString('#0a0c10').withAlpha(0.9),
+      outlineWidth: 2,
+      disableDepthTestDistance: 1e12,
+    });
+  }
+
+  clearRally(): void {
+    this.rallyDots.removeAll();
   }
 
   /** Whether a point is close enough to a road for a facility. */

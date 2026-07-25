@@ -780,6 +780,12 @@ export interface UnitFieldOptions {
    * theater centre where they can't be told apart or clicked individually.
    */
   platforms: { id: PlatformId; lon: number; lat: number }[];
+  /**
+   * Per-platform-type batch capacity. The campaign fields one to four of each hero platform, so the
+   * batches are sized to their catalog maxCount; an RTS match builds many more, so it passes a larger
+   * cap and the instanced batches are sized for a real army. Undefined keeps the campaign sizing.
+   */
+  platformCap?: number;
 }
 
 export class UnitField {
@@ -859,24 +865,22 @@ export class UnitField {
     // blend on: out-of-range units draw at 30% opacity.
     // Platform batches are sized 1 whether or not the platform is fielded — an unfielded batch
     // simply never gets an instance written, and costs nothing at draw time.
+    // Platform batch capacity: the RTS override sizes every hero-platform batch for an army; the
+    // campaign leaves it undefined and each batch is sized to that platform's catalog maxCount.
+    const pcap = (id: PlatformId) => counts.platformCap ?? PLATFORM_BY_ID.get(id)!.maxCount;
     this.batches = {
       land: new InstancedModelBatch(UNIT_MESHES.land, counts.land, bounds, true),
       sea: new InstancedModelBatch(UNIT_MESHES.sea, counts.sea, bounds, true),
       air: new InstancedModelBatch(UNIT_MESHES.air, counts.air, bounds, true),
       foot: new InstancedModelBatch(UNIT_MESHES.foot, counts.foot + FOOT_SPAWN_HEADROOM, bounds, true),
-      drone: new InstancedModelBatch(UNIT_MESHES.drone, PLATFORM_BY_ID.get('drone')!.maxCount, bounds, true),
-      dog: new InstancedModelBatch(UNIT_MESHES.dog, PLATFORM_BY_ID.get('dog')!.maxCount, bounds, true),
-      quad: new InstancedModelBatch(UNIT_MESHES.quad, PLATFORM_BY_ID.get('quad')!.maxCount, bounds, true),
-      spider: new InstancedModelBatch(UNIT_MESHES.spider, PLATFORM_BY_ID.get('spider')!.maxCount, bounds, true),
-      biped: new InstancedModelBatch(UNIT_MESHES.biped, PLATFORM_BY_ID.get('biped')!.maxCount, bounds, true),
-      walker: new InstancedModelBatch(UNIT_MESHES.walker, PLATFORM_BY_ID.get('walker')!.maxCount, bounds, true),
-      naval: new InstancedModelBatch(UNIT_MESHES.naval, PLATFORM_BY_ID.get('naval')!.maxCount, bounds, true),
-      interceptor: new InstancedModelBatch(
-        UNIT_MESHES.interceptor,
-        PLATFORM_BY_ID.get('interceptor')!.maxCount,
-        bounds,
-        true,
-      ),
+      drone: new InstancedModelBatch(UNIT_MESHES.drone, pcap('drone'), bounds, true),
+      dog: new InstancedModelBatch(UNIT_MESHES.dog, pcap('dog'), bounds, true),
+      quad: new InstancedModelBatch(UNIT_MESHES.quad, pcap('quad'), bounds, true),
+      spider: new InstancedModelBatch(UNIT_MESHES.spider, pcap('spider'), bounds, true),
+      biped: new InstancedModelBatch(UNIT_MESHES.biped, pcap('biped'), bounds, true),
+      walker: new InstancedModelBatch(UNIT_MESHES.walker, pcap('walker'), bounds, true),
+      naval: new InstancedModelBatch(UNIT_MESHES.naval, pcap('naval'), bounds, true),
+      interceptor: new InstancedModelBatch(UNIT_MESHES.interceptor, pcap('interceptor'), bounds, true),
     };
 
     // Vehicles favour freeways heavily (constant motorway flow); pedestrians stay on surface streets.
@@ -1157,6 +1161,35 @@ export class UnitField {
       heading: 0,
       mark: null,
     });
+  }
+
+  /**
+   * Spawn a player platform unit mid-match at a point — RTS production rolling a unit out of a
+   * facility. Unlike {@link spawnPlatform} (constructor-only) this GROWS the position cache, since
+   * the field is already live, and returns the new unit's index so the scene can track its RTS role,
+   * select it, and give it a first move order toward the rally point.
+   */
+  spawnRtsUnit(kind: PlatformId, lon: number, lat: number): number {
+    const i = this.units.length;
+    const list = this.platformIdx.get(kind);
+    if (list) list.push(i);
+    else this.platformIdx.set(kind, [i]);
+    this.units.push({
+      id: this.mkId(kind),
+      kind,
+      state: 'protected',
+      assess: 0,
+      record: [],
+      lon,
+      lat,
+      heading: 0,
+      mark: null,
+    });
+    // The unit array grew past what ecef was sized for — grow it, like spawnAttacker does.
+    const grown = new Float64Array(this.units.length * 3);
+    grown.set(this.ecef);
+    this.ecef = grown;
+    return i;
   }
 
   /** Platform TYPES currently fielded, in catalog order. */
@@ -2021,6 +2054,14 @@ export class UnitField {
       if (this.orderPlatformAt(idx, lon + off.dx / mLon, lat + off.dy / mPerLat, append, action, target)) moved++;
     });
     return moved;
+  }
+
+  /**
+   * Move ONE unit (by index) to a point, without touching the selection — used to send a freshly
+   * produced unit to its facility's rally point while the player's selection stays where it is.
+   */
+  moveUnitTo(index: number, lon: number, lat: number): boolean {
+    return this.orderPlatformAt(index, lon, lat, false, null);
   }
 
   /** Route one platform by index — the shared body of {@link orderSelected} and {@link orderSelection}. */

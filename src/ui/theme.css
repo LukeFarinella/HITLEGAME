@@ -1613,6 +1613,23 @@ body.dev-open #c2-tasking { display: none; }
 .grc-chip.type-tech .grc-key { background: #8b6fe0; }
 .grc-name { font: 700 9px/1 var(--mono); letter-spacing: .1em; color: var(--bone); }
 .grc-cost { font: 600 9px/1 var(--mono); letter-spacing: .06em; color: var(--warn); }
+/* unit-category key colours, echoing the build-type colours */
+.grc-chip.cat-worker .grc-key { background: var(--steel); }
+.grc-chip.cat-infantry .grc-key { background: var(--warn); }
+.grc-chip.cat-aerial .grc-key { background: #3fa0e0; }
+.grc-chip.cat-special .grc-key { background: #8b6fe0; }
+.grc-chip.type-supply .grc-key { background: var(--ok); }
+/* the context label at the left of the bar ("BUILD", "ROBOTICS", …) */
+.grc-label {
+  align-self: center; font: 700 8px/1.2 var(--mono); letter-spacing: .16em;
+  color: var(--ash); writing-mode: vertical-rl; transform: rotate(180deg); padding: 0 2px;
+}
+/* live production queue strip */
+.grc-queue { display: flex; align-items: center; gap: 4px; padding-left: 6px; border-left: 1px solid var(--gunmetal); }
+.grc-qitem { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.grc-qname { font: 700 10px/1 var(--mono); color: var(--bone); }
+.grc-qbar { display: block; width: 26px; height: 4px; background: var(--graphite-2); border: 1px solid var(--gunmetal); }
+.grc-qbar > i { display: block; height: 100%; background: var(--ok); }
 
 /* Below this the two rails plus the map no longer coexist: the store takes the screen and the
    tasking rail moves under it rather than over the top of it. */

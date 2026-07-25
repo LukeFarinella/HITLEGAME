@@ -53,7 +53,8 @@ import { showTitle, setTitleTerritory } from '../ui/title';
 import { RtsGame } from '../game/rts/rtsGame';
 import { RtsBuildLayer, type BuildSite } from './rtsBuild';
 import { RtsCommandBar } from '../ui/rtsCommand';
-import { STRUCTURES, BUILD_RULES, metresBetween, type StructureType } from '../game/rts/structures';
+import { STRUCTURES, BUILDABLE, BUILD_RULES, metresBetween, type StructureType, type Structure } from '../game/rts/structures';
+import { RTS_UNITS, unitsFrom, producesUnits, type RtsUnitId } from '../game/rts/units';
 import { showLoading, setStage, hideLoading } from '../ui/loading';
 import { setActiveSlot, migrateLegacySave } from '../game/saves';
 import { LaserBeams } from './lasers';
@@ -704,7 +705,12 @@ function platformStations(center: { lon: number; lat: number }, map: TheaterMap)
   // facility — this only seeds the opening.)
   if (rtsGame && obelisks) {
     const i = rtsGame.nexusIndex;
-    return [{ id: 'dog' as PlatformId, lon: obelisks.lon[i], lat: obelisks.lat[i] }];
+    const mLon = 111_320 * Math.cos((obelisks.lat[i] * Math.PI) / 180);
+    // Two worker drones flanking the Nexus — enough to build with and still keep one on economy.
+    return [
+      { id: 'quad' as PlatformId, lon: obelisks.lon[i] + 220 / mLon, lat: obelisks.lat[i] },
+      { id: 'quad' as PlatformId, lon: obelisks.lon[i] - 220 / mLon, lat: obelisks.lat[i] },
+    ];
   }
   // One entry per fielded UNIT, so four arachnids get four different cities rather than one.
   const units = progression.fieldedUnits();
@@ -764,7 +770,13 @@ function addUnits(center: { lon: number; lat: number }, map: TheaterMap, net: Ro
   // and a closure that dereferenced it unconditionally threw on every frame from that point on.
   // No net means no coverage, which is also the honest answer.
   const covered = (lon: number, lat: number) => sensorField?.isCovered(lon, lat) ?? false;
-  const counts = { ...UNIT_COUNTS, ports: findPorts(map), platforms: platformStations(center, map) };
+  const counts = {
+    ...UNIT_COUNTS,
+    ports: findPorts(map),
+    platforms: platformStations(center, map),
+    // An RTS match builds a real army, so size the hero-platform batches for one.
+    platformCap: rtsGame ? 48 : undefined,
+  };
   const field = new UnitField(center, THEATER_RADIUS_M, map.heightAt, net, counts, covered, map.shoreDistance);
   for (const k of UNIT_KINDS) scene.primitives.add(field.batches[k]);
   scene.primitives.add(field.marksLayer); // investigate + execution markers
@@ -1257,7 +1269,12 @@ scene.preUpdate.addEventListener(() => {
       // surveillance subsystems (violations, marking, process actions, siege, incidents) run — an
       // RTS match is a different game that only borrows the scene.
       rtsGame.tick(dt, countLiveObelisks());
+      // Advance production and roll finished units out to their rally points.
+      const produced = rtsGame.tickProduction(dt);
+      for (const c of produced) spawnProducedUnit(c.structureId, c.unit);
       updateRtsHud();
+      // The queue progress bar animates, so repaint the card while the selected building is building.
+      if (rtsSelectedStructure && rtsGame.queueAt(rtsSelectedStructure.id).length) rtsCmd?.render();
       rebuildRoster();
       refreshRoster();
       updateRouteLayer();
@@ -2086,6 +2103,7 @@ function updateRtsHud(): void {
   setText('grts-money', rtsGame.money.toLocaleString('en-US'));
   setText('grts-cap', `/ ${rtsGame.cap(obeliskCount).toLocaleString('en-US')}`);
   setText('grts-obelisks', String(obeliskCount));
+  setText('grts-supply', `${rtsGame.supplyUsed} / ${rtsGame.supplyCap()}`);
 }
 
 /** How many obelisks the match currently fields — the mask minus anything fallen. */
@@ -2119,32 +2137,137 @@ function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
   scene.primitives.add(rtsBuild.rings);
   scene.primitives.add(rtsBuild.icons);
   scene.primitives.add(rtsBuild.ghost);
+  scene.primitives.add(rtsBuild.rallyDots);
   rtsBuild.setSites(rtsSites, rtsBuiltSites);
+
+  // The opening worker drones were spawned by the UnitField constructor (as 'quad' platforms) — tag
+  // them as workers and charge their supply, so the command card treats them as builders and the
+  // supply line opens honest.
+  rtsUnitRole.clear();
+  if (unitField) {
+    for (const u of unitField.platformUnits()) {
+      if (u.kind === 'quad') {
+        rtsUnitRole.set(u.index, 'worker');
+        rtsGame.reserveSupply(RTS_UNITS.worker.supply);
+      }
+    }
+  }
 
   rtsCmd = new RtsCommandBar({
     money: () => rtsGame?.money ?? 0,
-    onBuild: (type) => beginPlacement(type),
+    context: rtsCommandContext,
     placing: () => rtsPlacing,
+    onBuild: (type) => beginPlacement(type),
+    onProduce: (unit) => enqueueUnit(unit),
+    queueOf: (sid) => rtsGame?.queueAt(sid) ?? [],
   });
   rtsCmd.show();
-  // The command bar greys chips by affordability, so it repaints on every economy change.
+  // The command card greys chips by affordability and shows queue progress, so it repaints on every
+  // economy/production change (and per-frame while a queue runs — see the RTS update branch).
   rtsGame.onChange(() => rtsCmd?.render());
 }
 
 /** Tear the build layer + command bar down at the end of a match. */
 function teardownRtsBuild(): void {
   rtsPlacing = null;
+  rtsSelectedStructure = null;
+  rtsUnitRole.clear();
   if (rtsBuild) {
     scene.primitives.remove(rtsBuild.siteDots);
     scene.primitives.remove(rtsBuild.rings);
     scene.primitives.remove(rtsBuild.icons);
     scene.primitives.remove(rtsBuild.ghost);
+    scene.primitives.remove(rtsBuild.rallyDots);
     rtsBuild = null;
   }
   rtsCmd?.hide();
   rtsCmd = null;
   rtsSites = [];
   rtsBuiltSites.clear();
+}
+
+// ---- RTS selection + production ----------------------------------------------------------------
+
+/** The command card's context, from the current selection: a producing building, a worker, or nothing. */
+function rtsCommandContext(): { kind: 'none' } | { kind: 'build' } | { kind: 'produce'; structureId: number; structureType: StructureType } {
+  if (rtsSelectedStructure && producesUnits(rtsSelectedStructure.type)) {
+    return { kind: 'produce', structureId: rtsSelectedStructure.id, structureType: rtsSelectedStructure.type };
+  }
+  if (selectedIsWorker()) return { kind: 'build' };
+  return { kind: 'none' };
+}
+
+/** Whether the currently selected unit is a worker drone — the only unit that opens the build menu. */
+function selectedIsWorker(): boolean {
+  const sel = unitField?.selectedPlatform();
+  return !!sel && rtsUnitRole.get(sel.index) === 'worker';
+}
+
+/** Pick the structure nearest a screen point, or null. Structures aren't units, so this projects each. */
+function pickStructure(x: number, y: number): Structure | null {
+  if (!rtsGame || !theaterMap) return null;
+  let best: Structure | null = null;
+  let bestD = STRUCTURE_PICK_PX;
+  for (const s of rtsGame.structures) {
+    const world = Cesium.Cartesian3.fromDegrees(s.lon, s.lat, theaterMap.heightAt(s.lon, s.lat) + 80);
+    const win = Cesium.SceneTransforms.worldToWindowCoordinates(scene, world);
+    if (!win) continue;
+    const d = Math.hypot(win.x - x, win.y - y);
+    if (d < bestD) {
+      bestD = d;
+      best = s;
+    }
+  }
+  return best;
+}
+
+/** Select a structure: clear any unit selection, show its command card + rally. */
+function selectStructure(s: Structure): void {
+  rtsSelectedStructure = s;
+  unitField?.deselect();
+  hideUnitPanel();
+  const rally = rtsGame?.rally.get(s.id);
+  if (rally && producesUnits(s.type)) rtsBuild?.setRally(rally.lon, rally.lat);
+  else rtsBuild?.clearRally();
+  rtsCmd?.render();
+  sound.play('click');
+}
+
+/** Drop structure selection (a unit was picked, or empty ground clicked). */
+function clearStructureSelection(): void {
+  if (!rtsSelectedStructure) return;
+  rtsSelectedStructure = null;
+  rtsBuild?.clearRally();
+  rtsCmd?.render();
+}
+
+/** Queue a unit at the selected building. */
+function enqueueUnit(unit: RtsUnitId): void {
+  if (!rtsGame || !rtsSelectedStructure) return;
+  const blocker = rtsGame.enqueueBlocker(unit);
+  if (blocker) {
+    sound.play('denied');
+    toast(`◈ ${blocker}`);
+    return;
+  }
+  rtsGame.enqueue(rtsSelectedStructure.id, unit);
+  sound.play('purchase');
+  rtsCmd?.render();
+}
+
+/** Roll a finished unit out of its building and send it to the rally point (or just clear of the building). */
+function spawnProducedUnit(structureId: number, unit: RtsUnitId): void {
+  if (!rtsGame || !unitField) return;
+  const s = rtsGame.structures.find((x) => x.id === structureId);
+  if (!s) return;
+  const def = RTS_UNITS[unit];
+  const mLon = 111_320 * Math.cos((s.lat * Math.PI) / 180);
+  const spawnLon = s.lon + (STRUCTURES[s.type].footprintM + 60) / mLon;
+  const idx = unitField.spawnRtsUnit(def.meshKind, spawnLon, s.lat);
+  rtsUnitRole.set(idx, unit);
+  const rally = rtsGame.rally.get(structureId);
+  if (rally) unitField.moveUnitTo(idx, rally.lon, rally.lat);
+  updateUnitHud();
 }
 
 /**
@@ -3592,6 +3715,12 @@ let rtsSites: BuildSite[] = [];
 const rtsBuiltSites = new Set<number>();
 /** The structure currently being placed, or null. When set, clicks place instead of selecting. */
 let rtsPlacing: StructureType | null = null;
+/** The selected structure (its command card is shown), or null. */
+let rtsSelectedStructure: Structure | null = null;
+/** What RTS role each produced unit fills, by unit index — so the command card knows a worker. */
+const rtsUnitRole = new Map<number, RtsUnitId>();
+/** Screen-space radius for clicking a structure. */
+const STRUCTURE_PICK_PX = 30;
 let theaterCenter: { lon: number; lat: number } | null = null;
 
 // Function declarations (not const arrows): these are called during module evaluation by the
@@ -4167,11 +4296,22 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
     if (carto) tryEnterTheater(carto);
     return;
   }
+  // RTS: a structure is pickable too, and takes priority — clicking one shows its command card.
+  if (rtsGame) {
+    const st = pickStructure(m.position.x, m.position.y);
+    if (st) {
+      selectStructure(st);
+      return;
+    }
+    clearStructureSelection();
+  }
   if (unitField && unitField.pick(scene, m.position.x, m.position.y, SELECT_PX)) {
     updateUnitPanel();
+    rtsCmd?.render(); // a worker selection opens the BUILD card
   } else {
     unitField?.deselect();
     hideUnitPanel();
+    rtsCmd?.render();
   }
 }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
@@ -4359,6 +4499,19 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
   rightDownAt = null;
   if (!down || mode !== 'theater' || !unitField) return;
   if (Cesium.Cartesian2.distance(down, m.position) > ORDER_SLOP_PX) return; // that was a tilt drag
+
+  // RTS: with a producing building selected, a right-click on the ground sets its RALLY POINT — where
+  // its units head as they roll out — rather than moving anything.
+  if (rtsGame && rtsSelectedStructure && producesUnits(rtsSelectedStructure.type)) {
+    const g = groundAt(m.position);
+    if (g) {
+      rtsGame.setRally(rtsSelectedStructure.id, g.lon, g.lat);
+      rtsBuild?.setRally(g.lon, g.lat);
+      sound.play('move');
+    }
+    return;
+  }
+
   const sel = unitField.selectedPlatform();
 
   // Shift queues the leg behind whatever is already commanded instead of replacing it.
@@ -4893,11 +5046,22 @@ window.addEventListener('keydown', (e) => {
       else endRtsMatch();
       return;
     }
-    const k = e.key.toUpperCase();
-    const hit = (['obelisk', 'robotics', 'aviation', 'tech'] as StructureType[]).find((t) => STRUCTURES[t].hotkey === k);
-    if (hit && !e.repeat) {
-      beginPlacement(hit);
-      return;
+    if (!e.repeat) {
+      const k = e.key.toUpperCase();
+      const ctx = rtsCommandContext();
+      if (ctx.kind === 'produce') {
+        const u = unitsFrom(ctx.structureType).find((x) => x.hotkey === k);
+        if (u) {
+          enqueueUnit(u.id);
+          return;
+        }
+      } else if (ctx.kind === 'build') {
+        const hit = BUILDABLE.find((t) => STRUCTURES[t].hotkey === k);
+        if (hit) {
+          beginPlacement(hit);
+          return;
+        }
+      }
     }
   }
   if (e.key === 'Escape') exitTheater();
@@ -4946,6 +5110,16 @@ if (import.meta.env.DEV) {
     buildObeliskAt,
     beginPlacement,
     validateFacility,
+    enqueueUnit,
+    spawnProducedUnit,
+    selectStructure,
+    rtsCommandContext,
+    get rtsSelectedStructure() {
+      return rtsSelectedStructure;
+    },
+    get rtsUnitRole() {
+      return rtsUnitRole;
+    },
     spawnUnits,
     clearUnits,
     devSettings,
