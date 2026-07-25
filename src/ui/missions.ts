@@ -16,6 +16,28 @@ import { resistance, resistanceLabel } from '../game/resistance';
 
 const fmt = new Intl.NumberFormat('en-US');
 
+/** What a tasking's quota is counted in — the mark it's scored on, pluralised for the objective line. */
+const QUOTA_VERB: Record<string, string> = {
+  fine: 'FINES',
+  investigate: 'INVESTIGATIONS',
+  execute: 'EXECUTIONS',
+};
+/** The order-mode badge for a tasking, by the mark it runs on. */
+const MODE_LABEL: Record<string, string> = {
+  fine: 'ENFORCE',
+  investigate: 'SURVEIL',
+  execute: 'LETHAL',
+};
+
+/** The arc, named per act — the theme evolving from citations to occupation. */
+const ACT_TITLE: Record<string, string> = {
+  I: 'TRAFFIC ENFORCEMENT',
+  II: 'CUSTODY',
+  III: 'LETHAL FORCE',
+  IV: 'COUNTER-INSURGENCY',
+  V: 'GLOBAL DOMINATION',
+};
+
 /**
  * The public-tolerance readout: a thin bar sharing the valid/invalid stack, because it belongs to
  * the same question — not "how am I doing" but "what am I allowed to do".
@@ -58,8 +80,10 @@ function resistanceBar(): string {
 export interface MissionHooks {
   /** A mission started, finished or failed — the scene re-reads authorizations and re-renders. */
   onChange(): void;
-  /** Surface a one-line notice on the globe (completion, failure). */
+  /** Surface a one-line notice on the globe (a failure). */
   notify(msg: string): void;
+  /** A tasking was CLEARED — the scene raises the completion window and plays the reward. */
+  onComplete(mission: MissionDef): void;
 }
 
 export class MissionPanel {
@@ -85,10 +109,7 @@ export class MissionPanel {
 
     missions.onChange((e) => {
       if (e.type === 'complete') {
-        this.hooks.notify(
-          `MISSION COMPLETE · ${e.mission.name} · +${fmt.format(e.mission.reward)} FUNDING TOKENS` +
-            (e.mission.grants === 'execute' ? ' · EXECUTION AUTHORIZED' : ''),
-        );
+        this.hooks.onComplete(e.mission);
       } else if (e.type === 'failed') {
         this.hooks.notify(
           `MISSION FAILED · ${e.mission.name} · CAMPAIGN ROLLED BACK · −${fmt.format(e.mission.penalty)} FUNDING TOKENS`,
@@ -115,28 +136,80 @@ export class MissionPanel {
    * content — an operator mid-theater needs "8 of 20, two errors left" at a glance, not prose — so
    * the prose folds away and stays folded until it's asked for.
    */
+  /**
+   * The pending fork, if one is owed.
+   *
+   * A fork is a permanent, exclusive choice: a backer to partner with, or a capability that closes
+   * the other off. It surfaces the moment the mission it hangs off is cleared and stays until the
+   * operator commits, so it reads as a decision rather than a reward that scrolled past.
+   */
+  private renderFork(): HTMLElement | null {
+    const pending = missions.pendingFork();
+    if (!pending) return null;
+    const { mission, fork } = pending;
+
+    const box = document.createElement('div');
+    box.className = `c2-fork kind-${fork.kind}`;
+    box.innerHTML =
+      `<div class="c2-fork-head">${icon('surveil')}DECISION · ${mission.name}</div>` +
+      `<p class="c2-fork-prompt">${fork.prompt}</p>`;
+
+    const choices = document.createElement('div');
+    choices.className = 'c2-fork-choices';
+    for (const c of fork.choices) {
+      // The consequences, spelled out — what it pays, what it releases, and (for a partner) that it
+      // makes a permanent enemy. A choice this final should never be made blind.
+      const bits: string[] = [];
+      if (c.funding) bits.push(`+${fmt.format(c.funding)} TOKENS`);
+      if (c.unlocks?.length) bits.push(`RELEASES ${c.unlocks.map(unlockName).join(' · ')}`);
+      if (c.grantsFaction) bits.push('PROTECTS A FACTION');
+      if (c.angersFactions?.length) bits.push('MAKES AN ENEMY');
+
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'c2-fork-choice';
+      btn.innerHTML =
+        `<span class="c2-fork-label">${c.label}</span>` +
+        `<span class="c2-fork-blurb">${c.blurb}</span>` +
+        (bits.length ? `<span class="c2-fork-bits">${bits.join(' · ')}</span>` : '');
+      btn.addEventListener('click', () => {
+        if (missions.chooseFork(mission.id, c.id)) this.hooks.notify(`DECISION TAKEN · ${c.label}`);
+      });
+      choices.append(btn);
+    }
+    box.append(choices);
+    return box;
+  }
+
   private renderActive(): void {
     const def = missions.activeDef();
     const run = missions.activeRun();
     this.activeEl.replaceChildren();
 
+    // A cleared tasking's fork sits ABOVE whatever is now running — it's a decision owed on the last
+    // job, and it should be the first thing the operator sees until it's made.
+    const fork = this.renderFork();
+    if (fork) this.activeEl.append(fork);
+
     if (!def || !run) {
       // The whole chain is cleared. Tolerance and resistance are campaign state, not tasking
       // state, so they stay up with nothing running.
-      this.activeEl.innerHTML =
+      const idle = document.createElement('div');
+      idle.innerHTML =
         `<p class="c2-note">CHAIN CLEARED · NO FURTHER TASKING</p>` +
         `<div class="c2-active c2-idle">${toleranceBar()}</div>`;
+      this.activeEl.append(idle);
       return;
     }
 
     const wrap = document.createElement('div');
     wrap.className = 'c2-active';
 
-    const verb = def.mark === 'execute' ? 'EXECUTIONS' : 'INVESTIGATIONS';
+    const verb = QUOTA_VERB[def.mark] ?? 'ORDERS';
     wrap.innerHTML =
       `<div class="c2-active-head">` +
       `<span class="c2-name">${icon(def.mark === 'execute' ? 'lethal' : 'surveil')}${def.name}</span>` +
-      `<span class="c2-order order-${def.mark}">${def.mark === 'execute' ? 'LETHAL' : 'SURVEIL'}</span>` +
+      `<span class="c2-order order-${def.mark}">${MODE_LABEL[def.mark] ?? ''}</span>` +
       `</div>` +
       `<div class="c2-obj-label">OBJECTIVES</div>` +
       this.step(
@@ -233,7 +306,17 @@ export class MissionPanel {
 
   private renderList(): void {
     this.listEl.replaceChildren();
-    for (const m of MISSIONS) this.listEl.append(this.row(m));
+    let act = '';
+    for (const m of MISSIONS) {
+      if (m.act !== act) {
+        act = m.act;
+        const h = document.createElement('div');
+        h.className = 'c2-act-head';
+        h.innerHTML = `<span class="c2-act-num">ACT ${act}</span><span class="c2-act-title">${ACT_TITLE[act] ?? ''}</span>`;
+        this.listEl.append(h);
+      }
+      this.listEl.append(this.row(m));
+    }
   }
 
   /**
@@ -266,7 +349,7 @@ export class MissionPanel {
 
     const meta = document.createElement('div');
     meta.className = 'c2-meta';
-    const verb = m.mark === 'execute' ? 'EXECUTIONS' : 'INVESTIGATIONS';
+    const verb = QUOTA_VERB[m.mark] ?? 'ORDERS';
     meta.innerHTML = `<span>${m.target} VALID ${verb}</span><span>MAX ${m.maxInvalid} INVALID</span>`;
     row.append(meta);
 
@@ -279,6 +362,25 @@ export class MissionPanel {
 
     // What clearing it actually opens up. Money is the least interesting half of a reward, and a
     // locked catalog entry is far more legible when the thing that unlocks it says so first.
+    // The design sheet's four columns, each surfaced as its own tag row so the operator can read at a
+    // glance what a tasking opens: the authority (an action or a dossier field), any new ground, the
+    // hardware released, and the permanent choice it ends on.
+    if (m.authority) {
+      const a = document.createElement('div');
+      a.className = 'c2-unlocks authority';
+      a.innerHTML =
+        `<span class="c2-unlocks-k">${m.authority.kind === 'action' ? 'ACTION' : 'INTEL'}</span>` +
+        `<span class="c2-unlock">${m.authority.label}</span>`;
+      row.append(a);
+    }
+
+    if (m.territory) {
+      const t = document.createElement('div');
+      t.className = 'c2-unlocks territory';
+      t.innerHTML = `<span class="c2-unlocks-k">TERRITORY</span><span class="c2-unlock">${m.territory}</span>`;
+      row.append(t);
+    }
+
     if (m.unlocks?.length) {
       const rel = document.createElement('div');
       rel.className = 'c2-unlocks';
@@ -286,6 +388,18 @@ export class MissionPanel {
         `<span class="c2-unlocks-k">RELEASES</span>` +
         m.unlocks.map((id) => `<span class="c2-unlock">${unlockName(id)}</span>`).join('');
       row.append(rel);
+    }
+
+    if (m.fork) {
+      const f = document.createElement('div');
+      f.className = 'c2-unlocks fork';
+      const taken = missions.choiceOf(m.id);
+      f.innerHTML =
+        `<span class="c2-unlocks-k">CHOICE</span>` +
+        m.fork.choices
+          .map((c) => `<span class="c2-unlock${taken === c.id ? ' taken' : taken ? ' foreclosed' : ''}">${c.label}</span>`)
+          .join('');
+      row.append(f);
     }
 
     if (m.grants) {
@@ -298,4 +412,84 @@ export class MissionPanel {
 
     return row;
   }
+}
+
+/**
+ * The mission-complete window.
+ *
+ * Raised the moment a tasking clears, in the theater, over the running scene. It reports what the
+ * clearance paid — reward, authority, ground, hardware — and then offers the one decision that
+ * actually matters here: keep working this theater, or go back to the world map, where the store,
+ * the next tasking, and any fork this clearance opened are waiting.
+ *
+ * Deliberately NOT auto-dismissed and NOT a toast: clearing a mission is the campaign's punctuation,
+ * and it should stop the operator for a beat rather than scroll past.
+ */
+export function showMissionComplete(
+  m: MissionDef,
+  hooks: { onContinue(): void; onReturn(): void },
+): void {
+  if (document.getElementById('c2-complete')) return;
+
+  const back = document.createElement('div');
+  back.className = 'c2-modal-back';
+  back.id = 'c2-complete';
+
+  const box = document.createElement('div');
+  box.className = 'c2-modal c2-complete';
+
+  const rows: string[] = [
+    `<div><span>REWARD</span><b>+${fmt.format(m.reward)} tokens · +${Math.round(m.toleranceGain * 100)}% tolerance</b></div>`,
+  ];
+  if (m.grants) {
+    rows.push(
+      `<div><span>GRANTS</span><b>${m.grants === 'execute' ? 'lethal authority' : 'custody authority'}</b></div>`,
+    );
+  }
+  if (m.authority) {
+    rows.push(`<div><span>${m.authority.kind === 'action' ? 'ACTION' : 'INTEL'}</span><b>${m.authority.label}</b></div>`);
+  }
+  if (m.territory) rows.push(`<div><span>TERRITORY</span><b>${m.territory}</b></div>`);
+
+  box.innerHTML =
+    `<div class="c2-modal-head">` +
+    `<span class="c2-name">${icon('surveil')}MISSION COMPLETE</span>` +
+    `<span class="c2-order order-investigate">${m.name}</span>` +
+    `</div>` +
+    `<p class="c2-modal-p">${m.brief}</p>` +
+    `<div class="c2-modal-objectives">${rows.join('')}</div>` +
+    (m.unlocks?.length
+      ? `<div class="c2-unlocks"><span class="c2-unlocks-k">RELEASES</span>` +
+        m.unlocks.map((id) => `<span class="c2-unlock">${unlockName(id)}</span>`).join('') +
+        `</div>`
+      : '') +
+    (m.fork
+      ? `<p class="c2-modal-p c2-complete-fork">◈ A DECISION IS WAITING ON THE WORLD MAP · ${m.fork.prompt}</p>`
+      : '');
+
+  const actions = document.createElement('div');
+  actions.className = 'c2-modal-actions c2-complete-actions';
+
+  const cont = document.createElement('button');
+  cont.type = 'button';
+  cont.className = 'c2-buy ghost';
+  cont.textContent = 'CONTINUE OPERATION';
+  cont.addEventListener('click', () => {
+    back.remove();
+    hooks.onContinue();
+  });
+
+  const ret = document.createElement('button');
+  ret.type = 'button';
+  ret.className = 'c2-buy';
+  ret.textContent = 'RETURN TO WORLD MAP';
+  ret.addEventListener('click', () => {
+    back.remove();
+    hooks.onReturn();
+  });
+
+  actions.append(cont, ret);
+  box.append(actions);
+  back.append(box);
+  document.body.append(back);
 }

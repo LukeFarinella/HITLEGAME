@@ -13,9 +13,12 @@ import type { RoadNet, RoadClass } from './roads';
 import { makeViolation, VIOLATION_TTL_S, type LiveViolation } from '../game/violations';
 import { RouteGraph } from './routeGraph';
 import type { SensorField } from './sensors';
-import { assessBand, rollAssessment, rollRecord, type Record_ } from '../game/intel';
+import { assessBand, rollAssessment, rollRecord, worstSeverity, type Record_ } from '../game/intel';
+import type { ProcessRule } from '../game/processActions';
 import type { MarkKind } from '../game/missions';
 import { caseStrength, tolerance } from '../game/tolerance';
+import { partneredFactions, hostileFactions, type FactionId } from '../game/factions';
+import { progression } from '../game/progression';
 
 /**
  * The live unit layer for a theater: land vehicles routed on the real road graph, ships drifting on
@@ -31,7 +34,7 @@ import { caseStrength, tolerance } from '../game/tolerance';
 export type UnitState = 'normal' | 'protected' | 'infected';
 
 /** What a unit is doing inside an incident. */
-export type IncidentRole = 'rioter' | 'runner' | 'brawler' | 'assassin';
+export type IncidentRole = 'rioter' | 'runner' | 'brawler' | 'assassin' | 'insurgent';
 
 /** What a platform is being sent to DO when it gets there. */
 export type RouteAction = 'investigate' | 'detain' | 'prison' | 'execute' | 'strike' | null;
@@ -64,6 +67,18 @@ const EVENT_COLOR = Cesium.Color.fromCssColorString('#3F8FE0');
 /** Out-of-sensor-range units render faint (a stand-in for fog of war). */
 const UNSEEN_ALPHA = 0.3;
 
+/**
+ * How long a contact stays actionable after it leaves sensor coverage.
+ *
+ * At low levels the network is sparse and the platforms are fast, so a contact crosses a disc and is
+ * gone before the operator can select it. Once seen, a contact is HELD for this long: still tracked,
+ * still orderable, and drawn near full opacity, fading toward the out-of-range level as the window
+ * closes. It is the net's short-term memory, not live contact — which is why the card counts it down.
+ */
+const SENSOR_GRACE_S = 60;
+/** Opacity a contact fades to by the end of its grace window, just before it drops to UNSEEN_ALPHA. */
+const GRACE_ALPHA_END = 0.6;
+
 /** Company hardware, and the company's protected people, in the company's colour. */
 const DRONE_COLOR = Cesium.Color.fromCssColorString('#E23A2E');
 
@@ -91,6 +106,9 @@ export const INFECTED_FLEE = { covered: 0.3, open: 2.6 };
  * missions raise `infected` to escalate; everything downstream — spawn rolls and the contagion
  * equilibrium alike — is derived from it, so raising this one number is the whole change.
  */
+/** Ceiling on how many contacts one area-weapon blast can catch, so a MOAB can't stall a frame. */
+const AREA_MAX_VICTIMS = 40;
+
 export const MIX = {
   /** Share of the field that is infected. */
   infected: 0.05,
@@ -311,6 +329,17 @@ const bearing = (lon1: number, lat1: number, lon2: number, lat2: number) => {
   return Math.atan2((lon2 - lon1) * mLon, (lat2 - lat1) * mPerLat); // radians CW from north
 };
 
+/** A metre offset for the k-th of n units, laid out on a centred grid so a group move fans out. */
+function formationOffset(k: number, n: number): { dx: number; dy: number } {
+  if (n <= 1) return { dx: 0, dy: 0 };
+  const SPACING = 55; // metres between neighbours — a couple of vehicle lengths
+  const cols = Math.ceil(Math.sqrt(n));
+  const rows = Math.ceil(n / cols);
+  const c = k % cols;
+  const r = Math.floor(k / cols);
+  return { dx: (c - (cols - 1) / 2) * SPACING, dy: (r - (rows - 1) / 2) * SPACING };
+}
+
 // --- road graph --------------------------------------------------------------------------------
 
 interface Edge {
@@ -452,6 +481,14 @@ interface Unit {
   assess: number;
   /** Infraction indices over the intel catalog, worst first. Rolled at spawn, never revised. */
   record: Record_;
+  /**
+   * Faction affiliation, if any. A PROTECTED contact belongs to a faction you've PARTNERED with —
+   * that partnership is what makes it protected. A HOSTILE-flagged contact belongs to a faction you
+   * passed over, and is a candidate for the insurgency. Rolled at spawn against the current standing.
+   */
+  faction?: FactionId;
+  /** Belongs to a hostile (passed-over) faction — insurgent-eligible. Its state is rolled normally. */
+  hostile?: boolean;
   lon: number;
   lat: number;
   heading: number;
@@ -465,6 +502,11 @@ interface Unit {
   markTimer?: number;
   /** Serviced by a directed-energy platform. Dead units stop being drawn, ticked or picked. */
   dead?: boolean;
+  /**
+   * Field time ({@link UnitField.nowS}) when this contact was last inside sensor coverage. Undefined
+   * until first seen. Drives the post-coverage grace window — see {@link SENSOR_GRACE_S}.
+   */
+  lastSeenS?: number;
   /**
    * Siege state. Set only on an obelisk attacker: where it's walking, which site it's walking at,
    * and how long it's been in contact once it arrives.
@@ -623,6 +665,10 @@ export interface SelectionInfo {
      * stays hidden, because that is the thing they are being asked to guess at.
      */
     protectedAsset: boolean;
+    /** The partnered backer that protects this contact, or the rival it belongs to (with `hostile`). */
+    faction?: FactionId;
+    /** Belongs to a passed-over faction — an insurgent candidate. */
+    hostile?: boolean;
     /** What this contact is doing inside a live incident, for the header tag. */
     role?: IncidentRole | 'attacker';
     /** The colour this contact renders in the field, so the card's dot can agree with the map. */
@@ -642,6 +688,15 @@ export interface Execution {
   from: Cesium.Cartesian3;
   to: Cesium.Cartesian3;
   valid: boolean;
+  /**
+   * Caught in an AREA weapon's blast rather than the contact the order named.
+   *
+   * An area weapon (napalm, the orbital lance, the MOAB) doesn't discriminate — everyone in the ring
+   * dies with the target. Collateral is NOT a scored order (the operator gave one order, not twenty),
+   * but it hardens the ground, and a clean bystander hardens it hardest. That asymmetry is the whole
+   * argument for aiming an area weapon at ground that is already lost rather than at a city.
+   */
+  collateral?: boolean;
 }
 
 /**
@@ -850,16 +905,49 @@ export class UnitField {
     // Same field-wide mix either way, bent by coverage: watched ground is cleaner and better
     // inoculated, the dark carries the balance.
     const infected = MIX.infected * (seen ? COVER_SUPPRESS : DARK_AMPLIFY);
-    const prot = MIX.protected * (seen ? 2.4 : 0.85);
+    const prot = this.protectedShare() * (seen ? 2.4 : 0.85);
     const r = Math.random();
     if (r < infected) return 'infected';
     return r < infected + prot ? 'protected' : 'normal';
   }
 
+  /**
+   * Field-wide protected share — the hybrid dial the design sheet asks for. A small floor of company
+   * assets, then a bump for every faction the campaign has partnered with, since protection is now
+   * something partnerships CONFER: the more backers you take, the more of the ground is off limits.
+   * Bounded, so even a fully-allied late game doesn't drown a city in untouchables.
+   */
+  private protectedShare(): number {
+    const partners = partneredFactions().length;
+    if (partners === 0) return 0.03; // the opening theater still plants a company asset or two
+    return Math.min(0.09, 0.05 + (partners - 1) * 0.012);
+  }
+
   /** Everything a spawning unit needs: its true state, plus the two things C2 gets to see. */
-  private rollIntel(lon: number, lat: number): { state: UnitState; assess: number; record: Record_ } {
+  private rollIntel(
+    lon: number,
+    lat: number,
+  ): { state: UnitState; assess: number; record: Record_; faction?: FactionId; hostile?: boolean } {
     const state = this.rollState(lon, lat);
-    return { state, assess: rollAssessment(state), record: rollRecord(state) };
+    const intel = { state, assess: rollAssessment(state), record: rollRecord(state) };
+    // A protected contact belongs to one of the backers you've taken — that's what protects it. With
+    // no partner yet (the opening window before the first fork is chosen) it's an unaffiliated
+    // company asset, faction left blank.
+    if (state === 'protected') {
+      const mine = partneredFactions();
+      if (mine.length) return { ...intel, faction: mine[Math.floor(Math.random() * mine.length)].id };
+      return intel;
+    }
+    // Otherwise a slice of the ordinary population belongs to a faction you passed over, and is a
+    // candidate for the insurgency. Scales with how many rivals you've made; zero until you make one.
+    const enemies = hostileFactions();
+    if (enemies.length) {
+      const hostileShare = Math.min(0.06, enemies.length * 0.025);
+      if (Math.random() < hostileShare) {
+        return { ...intel, faction: enemies[Math.floor(Math.random() * enemies.length)].id, hostile: true };
+      }
+    }
+    return intel;
   }
 
   /**
@@ -1098,8 +1186,13 @@ export class UnitField {
   }
 
   /** Advance the sim by `dt` seconds. */
+  /** Active-play seconds since this theater's field was built. Advances only while ticking (a
+   * backgrounded tab freezes it), so the sensor grace window is measured in real play time. */
+  private nowS = 0;
+
   tick(dt: number): void {
     const d = Math.min(dt, 0.1); // clamp so a stalled tab doesn't teleport everything
+    this.nowS += d;
     for (const u of this.units) {
       if (u.dead) continue;
       // An attacker walks a straight line at its target, off the road graph — it isn't traffic.
@@ -1172,8 +1265,19 @@ export class UnitField {
    * creeping forever.
    */
   private stepPlatform(u: Unit, dt: number): void {
-    if (u.tlon === undefined || u.tlat === undefined) return; // holding station
-    let budget = SPEED[u.kind] * dt;
+    if (u.tlon === undefined || u.tlat === undefined) {
+      // Idle. If auto-patrol is armed for this platform's domain (the DRAGNET tech fork), send it
+      // somewhere new — a platform is always a sensor, so a patrol is roving coverage, an obelisk
+      // that walks. Only when idle, so a manual order always wins; an unreachable pick just retries.
+      const flies = (PLATFORM_BY_ID.get(u.kind as PlatformId)?.altM ?? 0) > 0;
+      if (flies ? this.autoPatrol.air : this.autoPatrol.ground) {
+        const p = this.randomInDisc();
+        this.patrolTo(u, p.lon, p.lat);
+      }
+      return; // holding station (or a fresh patrol leg just set below will move next tick)
+    }
+    // The fleet range/speed upgrade lifts movement as well as sensor reach — one dial, both effects.
+    let budget = SPEED[u.kind] * progression.classMult(u.kind as PlatformId) * dt;
     // Bounded so one long frame can't walk a platform through the whole route in a single step.
     for (let hops = 0; hops < 64 && budget > 0; hops++) {
       if (u.tlon === undefined || u.tlat === undefined) return;
@@ -1231,12 +1335,18 @@ export class UnitField {
   spawnAttacker(lon: number, lat: number, target: { local: number; lon: number; lat: number }): number {
     this.clearAttacker();
     const i = this.units.length;
+    // Once you've made rivals, the people pulling the net down are THEIRS — the insurgency is the
+    // faction you passed over. Before that, an attacker is just an unaffiliated infected contact.
+    const enemies = hostileFactions();
+    const enemy = enemies.length ? enemies[Math.floor(Math.random() * enemies.length)].id : undefined;
     this.units.push({
       id: this.mkId('foot'),
       kind: 'foot',
       state: 'infected', // an attacker is, definitionally, hostile — so lasering one is always valid
       assess: rollAssessment('infected'),
       record: rollRecord('infected'),
+      faction: enemy,
+      hostile: !!enemy,
       lon,
       lat,
       heading: bearing(lon, lat, target.lon, target.lat),
@@ -1531,6 +1641,16 @@ export class UnitField {
       incident: { role, tlon: target.lon, tlat: target.lat, contactS: 0, aliveS: 0 },
     });
     if (partner !== undefined) this.units[i].incident!.partner = partner;
+    // An insurgent belongs to a faction you passed over — the rival made real, come to take a
+    // partner's asset. Tagged so the card names who's behind it; if you made no rivals, it's just
+    // an unaffiliated attacker.
+    if (role === 'insurgent') {
+      const enemies = hostileFactions();
+      if (enemies.length) {
+        this.units[i].faction = enemies[Math.floor(Math.random() * enemies.length)].id;
+        this.units[i].hostile = true;
+      }
+    }
     // The unit array grew, so the position cache has to grow with it.
     const grown = new Float64Array(this.units.length * 3);
     grown.set(this.ecef);
@@ -1872,14 +1992,54 @@ export class UnitField {
     target?: number,
   ): boolean {
     const sel = this.selectedPlatform();
-    if (!sel) return false;
-    if (sel.kind === 'naval' && this.shoreAt(lon, lat) > -60) return false;
-    const u = this.units[sel.index];
+    return sel ? this.orderPlatformAt(sel.index, lon, lat, append, action, target) : false;
+  }
+
+  /**
+   * Order EVERY selected platform to a point — the RTS move a marquee is FOR.
+   *
+   * More than one selected unit is spread into a loose formation around the destination so they
+   * don't pile onto a single pixel and shoulder each other. A contact-targeted order (detain, strike)
+   * keeps to the single selected unit — a group doesn't all pile onto one person — so those still go
+   * through {@link orderSelected}. Returns how many actually took the order.
+   */
+  orderSelection(
+    lon: number,
+    lat: number,
+    append = false,
+    action: RouteAction = null,
+    target?: number,
+  ): number {
+    const platforms = [...this.selection].filter((i) => PLATFORM_KINDS.includes(this.units[i].kind));
+    if (platforms.length <= 1) {
+      return platforms.length && this.orderPlatformAt(platforms[0], lon, lat, append, action, target) ? 1 : 0;
+    }
+    const mLon = mPerLat * Math.cos(lat * DEG);
+    let moved = 0;
+    platforms.forEach((idx, k) => {
+      const off = formationOffset(k, platforms.length);
+      if (this.orderPlatformAt(idx, lon + off.dx / mLon, lat + off.dy / mPerLat, append, action, target)) moved++;
+    });
+    return moved;
+  }
+
+  /** Route one platform by index — the shared body of {@link orderSelected} and {@link orderSelection}. */
+  private orderPlatformAt(
+    index: number,
+    lon: number,
+    lat: number,
+    append: boolean,
+    action: RouteAction,
+    target?: number,
+  ): boolean {
+    const kind = this.units[index].kind as PlatformId;
+    if (kind === 'naval' && this.shoreAt(lon, lat) > -60) return false;
+    const u = this.units[index];
 
     // A road-bound platform doesn't get a straight line to anywhere. Its order is expanded into an
     // actual drive along the street grid, and an unreachable destination is REFUSED rather than
     // silently walked through the intervening blocks — which is the constraint being real.
-    const drive = this.roadRouteFor(sel.kind, u, lon, lat);
+    const drive = this.roadRouteFor(kind, u, lon, lat);
     if (drive === null) return false;
 
     if (!append || u.tlon === undefined) {
@@ -1895,7 +2055,7 @@ export class UnitField {
 
     // Appending onto an existing route. Clicking near a leg that's already on it closes the loop
     // rather than adding a near-duplicate — which is how a patrol is drawn rather than declared.
-    const legs = this.routeOf(sel.index);
+    const legs = this.routeOf(index);
     const near = legs.findIndex((w) => this.metresBetween(w.lon, w.lat, lon, lat) < LOOP_SNAP_M);
     if (near >= 0) {
       u.loop = true;
@@ -1907,6 +2067,64 @@ export class UnitField {
       u.routeTarget = target;
     }
     return true;
+  }
+
+  /** Whether a specific unit index is in the current selection — the roster reads this to light chips. */
+  isSelected(index: number): boolean {
+    return this.selection.has(index);
+  }
+
+  /**
+   * Live-violation summary for the alerting tech (the STOP AND SEARCH fork): how many events are up
+   * right now, and where the freshest one is, so the HUD can snap the camera to it. `suspiciousOnly`
+   * narrows it to the class an investigation is actually for.
+   */
+  liveAlerts(suspiciousOnly: boolean): { count: number; lon?: number; lat?: number } {
+    let count = 0;
+    let lon: number | undefined;
+    let lat: number | undefined;
+    let freshest = Infinity;
+    for (const u of this.units) {
+      if (u.dead || !u.live) continue;
+      if (suspiciousOnly && u.live.def.cls !== 'suspicious') continue;
+      count++;
+      // Snap to the freshest event — the one with the most time left to answer.
+      if (u.live.ageS < freshest) {
+        freshest = u.live.ageS;
+        lon = u.lon;
+        lat = u.lat;
+      }
+    }
+    return { count, lon, lat };
+  }
+
+  /**
+   * Auto-patrol standing, set by the scene from the DRAGNET tech fork. When a domain is armed, idle
+   * platforms of that domain wander the theater on their own — coverage that walks rather than sits.
+   */
+  autoPatrol = { ground: false, air: false };
+
+  /**
+   * HVT designation, set by the scene from the HOLD THE NET fork. When on, an incident's ringleader
+   * (any incident participant or siege attacker) stays ACTIONABLE even out of sensor coverage — a
+   * designated target can't duck into the dark to escape a strike. The other half of that fork,
+   * PREDICTIVE EVENTS, is read straight off the incident director instead.
+   */
+  hvtDesignate = false;
+
+  /** Send an idle platform to a patrol point — a route with no order attached. Unreachable = no-op. */
+  private patrolTo(u: Unit, lon: number, lat: number): void {
+    const kind = u.kind as PlatformId;
+    if (kind === 'naval' && this.shoreAt(lon, lat) > -60) return;
+    const drive = this.roadRouteFor(kind, u, lon, lat);
+    if (drive === null) return; // unreachable this pick — it'll try another next tick
+    const [first, ...rest] = drive ?? [{ lon, lat }];
+    u.tlon = first.lon;
+    u.tlat = first.lat;
+    u.route = rest;
+    u.loop = false;
+    u.routeAction = null;
+    u.routeTarget = undefined;
   }
 
   /**
@@ -2128,14 +2346,30 @@ export class UnitField {
   }
 
   /**
-   * Whether a unit is currently inside sensor coverage — the obelisk net or the drone's own disc.
-   *
-   * This is the same test `render()` uses to draw out-of-range units faint, so "looks dark" and
-   * "can't be ordered" are guaranteed to agree. A platform is its own sensor and always tracked.
+   * Whether a unit is inside sensor coverage RIGHT NOW — the obelisk net or a drone's own disc. A
+   * platform is its own sensor and always covered.
+   */
+  private coveredNow(u: Unit): boolean {
+    if (PLATFORM_KINDS.includes(u.kind)) return true;
+    // The ORBITAL PLATFORM is persistent overhead presence over the whole theater — with it, there is
+    // no unwatched ground and every contact reads back, which is the capstone it's sold as.
+    if (progression.has('orbital-platform')) return true;
+    return !this.isCovered || this.isCovered(u.lon, u.lat) || this.platformCovers(u.lon, u.lat);
+  }
+
+  /** Within the post-coverage grace window since this contact was last seen — see SENSOR_GRACE_S. */
+  private inGrace(u: Unit): boolean {
+    return u.lastSeenS !== undefined && this.nowS - u.lastSeenS <= SENSOR_GRACE_S;
+  }
+
+  /**
+   * Whether a unit can be tracked and ordered: covered now, OR still inside its grace window after
+   * passing through coverage. The grace is the net's short-term memory — a contact that crossed a
+   * disc stays actionable for SENSOR_GRACE_S so a fast mover can't slip away before the operator
+   * reacts. render() fades it out over the same window, so "looks dark" and "can't be ordered" agree.
    */
   private isTracked(u: Unit): boolean {
-    if (PLATFORM_KINDS.includes(u.kind)) return true;
-    return !this.isCovered || this.isCovered(u.lon, u.lat) || this.platformCovers(u.lon, u.lat);
+    return this.coveredNow(u) || this.inGrace(u);
   }
 
   /**
@@ -2150,6 +2384,8 @@ export class UnitField {
    * pockets. "You may not" became "you may, and here is the bill".
    */
   private isOrderable(u: Unit): boolean {
+    // A designated HVT — an incident ringleader or siege attacker — is actionable wherever it is.
+    if (this.hvtDesignate && (u.incident || u.siege)) return true;
     return this.isTracked(u);
   }
 
@@ -2176,7 +2412,7 @@ export class UnitField {
     if (PLATFORM_KINDS.includes(u.kind)) return DRONE_COLOR;
     // Doing something, right now. A siege attacker and an assassin are the same category to an
     // operator — somebody is being harmed unless this is answered — so they share a colour.
-    if (u.siege || u.incident?.role === 'assassin') return HOSTILE_COLOR;
+    if (u.siege || u.incident?.role === 'assassin' || u.incident?.role === 'insurgent') return HOSTILE_COLOR;
     if (u.incident) return EVENT_COLOR;
     if (u.state === 'protected') return DRONE_COLOR;
     // The assessment, continuously. Squared so the ramp holds white through the low end and only
@@ -2193,7 +2429,7 @@ export class UnitField {
     const u = this.units[index];
     if (!u) return TINT_HEX.clear;
     if (PLATFORM_KINDS.includes(u.kind)) return TINT_HEX.company;
-    if (u.siege || u.incident?.role === 'assassin') return TINT_HEX.hostile;
+    if (u.siege || u.incident?.role === 'assassin' || u.incident?.role === 'insurgent') return TINT_HEX.hostile;
     if (u.incident) return TINT_HEX.event;
     if (u.state === 'protected') return TINT_HEX.company;
     const t = Math.min(1, Math.max(0, u.assess));
@@ -2205,6 +2441,17 @@ export class UnitField {
   isTrackedPublic(index: number): boolean {
     const u = this.units[index];
     return !!u && !u.dead && this.isTracked(u);
+  }
+
+  /**
+   * Seconds left in a contact's post-coverage grace window — 0 if it is covered right now, was never
+   * seen, or the window has already closed. The card counts this down in the Sensor row.
+   */
+  graceRemaining(index: number): number {
+    const u = this.units[index];
+    if (!u || u.dead || PLATFORM_KINDS.includes(u.kind)) return 0;
+    if (this.coveredNow(u) || u.lastSeenS === undefined) return 0;
+    return Math.max(0, SENSOR_GRACE_S - (this.nowS - u.lastSeenS));
   }
 
   /** Everything a sanction is judged on, for one contact. Null when it isn't a live contact. */
@@ -2487,22 +2734,33 @@ export class UnitField {
       const base = this.tintOf(u);
       // The drone is its own sensor: anything under its disc is seen even with no obelisk nearby.
       // That's the point of flying it into the dark between cities.
-      const seen =
+      const coveredNow =
         PLATFORM_KINDS.includes(u.kind) ||
         (!sensor || sensor.isCovered(u.lon, u.lat)) ||
         this.platformCovers(u.lon, u.lat);
-      // Harvest the covered set while we are already asking the question.
+      // Stamp the moment a contact is seen — this is what the grace window counts from.
+      if (coveredNow) u.lastSeenS = this.nowS;
+      // Harvest the covered set while we are already asking the question. INSIDE coverage ONLY — the
+      // violation director needs a live contact, not one coasting on grace.
       //
-      // The violation director needs a contact INSIDE coverage, and sampling the whole field at
-      // random cannot find one when coverage is sparse: at the campaign's opening a single obelisk
-      // watches maybe three contacts out of 24,000, so sixty random darts hit one about three
-      // quarters of one percent of the time and the feature simply never fired. Reusing this test —
-      // which runs anyway, for every unit, to decide whether to draw it faint — makes the lookup
-      // exact and free.
-      if (seen && !PLATFORM_KINDS.includes(u.kind) && u.kind !== 'sea' && u.kind !== 'air') {
+      // Sampling the whole field at random cannot find one when coverage is sparse: at the campaign's
+      // opening a single obelisk watches maybe three contacts out of 24,000, so sixty random darts
+      // hit one about three quarters of one percent of the time and the feature simply never fired.
+      // Reusing this test — which runs anyway, for every unit — makes the lookup exact and free.
+      if (coveredNow && !PLATFORM_KINDS.includes(u.kind) && u.kind !== 'sea' && u.kind !== 'air') {
         this.coveredScratch.push(i);
       }
-      const color = seen || selected ? base : Cesium.Color.fromAlpha(base, UNSEEN_ALPHA, this.scratchColor);
+      // Opacity: full while covered, fading over the grace window once it leaves, faint once the
+      // window has closed. A contact in grace is still fully actionable — see isTracked/graceRemaining.
+      let color: Cesium.Color;
+      if (coveredNow || selected) {
+        color = base;
+      } else if (u.lastSeenS !== undefined && this.nowS - u.lastSeenS <= SENSOR_GRACE_S) {
+        const t = (this.nowS - u.lastSeenS) / SENSOR_GRACE_S; // 0 at exit -> 1 at window's end
+        color = Cesium.Color.fromAlpha(base, 1 - (1 - GRACE_ALPHA_END) * t, this.scratchColor);
+      } else {
+        color = Cesium.Color.fromAlpha(base, UNSEEN_ALPHA, this.scratchColor);
+      }
       const scale = UNIT_SCALE[u.kind] * (selected ? 1.7 : 1);
       this.batches[u.kind].setInstance(this.scratch, u.heading, scale, color);
     }
@@ -2727,6 +2985,9 @@ export class UnitField {
         // implementation detail, not a policy, and tagging the operator's own drone as a protected
         // asset would be nonsense — so the flag is contacts-only.
         protectedAsset: !PLATFORM_KINDS.includes(one.kind) && one.state === 'protected',
+        // Which backer protects it (a partnered faction) or which rival it belongs to (hostile).
+        faction: PLATFORM_KINDS.includes(one.kind) ? undefined : one.faction,
+        hostile: !PLATFORM_KINDS.includes(one.kind) && !!one.hostile,
         role: one.siege ? 'attacker' : one.incident?.role,
         tint: this.tintHexOf(oneIdx),
         order: PLATFORM_KINDS.includes(one.kind)
@@ -2835,6 +3096,32 @@ export class UnitField {
    * field in a frame would put hundreds of entries on the ledger before the operator could
    * react, which is a very different thing from an assist.
    */
+  /**
+   * The first contact a Process Action rule should fire on, or -1.
+   *
+   * Same guards as {@link autoMark}: in coverage, not already under an order, and ABOVE the public
+   * bar — an unattended machine never hardens the theater on its own. Beyond that it matches the
+   * rule's trigger: a past record at or over a severity, or a live event of a class. A `fine` rule
+   * additionally needs a live event to cite, since a fine answers the event, not the person.
+   */
+  matchForRule(rule: ProcessRule): number {
+    const needsLive = rule.action === 'fine' || rule.trigger === 'violation';
+    for (let i = 0; i < this.units.length; i++) {
+      const u = this.units[i];
+      if (u.dead || u.mark || PLATFORM_KINDS.includes(u.kind)) continue;
+      if (!this.isOrderable(u)) continue;
+      if (this.shortfall(u) > 0) continue;
+      if (needsLive && !u.live) continue;
+      if (rule.trigger === 'record') {
+        if (worstSeverity(u.record) < rule.minSeverity) continue;
+      } else {
+        if (u.live!.def.cls !== rule.violationClass) continue;
+      }
+      return i;
+    }
+    return -1;
+  }
+
   autoMark(kind: MarkKind, minCase: number): boolean {
     let best = -1;
     let bestCase = minCase;
@@ -2937,6 +3224,7 @@ export class UnitField {
   resolveExecutions(
     obeliskReach: ((lon: number, lat: number) => Cesium.Cartesian3 | undefined) | undefined,
     armedPlatforms: PlatformId[],
+    platformAreaOf?: (id: PlatformId) => number,
   ): Execution[] {
     if (!obeliskReach && !armedPlatforms.length) return [];
     const out: Execution[] = [];
@@ -2946,6 +3234,9 @@ export class UnitField {
       if (u.markTimer !== undefined) continue; // still inside its rescind window — hold fire
 
       let from: Cesium.Cartesian3 | undefined;
+      // If the servicing platform carries an area weapon, this is its blast radius — obelisk service
+      // never has one, so it stays 0 when the beam falls from the net.
+      let area = 0;
       // A PLATFORM in range shoots before the obelisk net does.
       //
       // The other order was the obvious one and it was wrong. Obelisk coverage blankets a developed
@@ -2962,6 +3253,7 @@ export class UnitField {
           this.ecef[idx * 3 + 1],
           this.ecef[idx * 3 + 2],
         );
+        area = platformAreaOf ? platformAreaOf(id) : 0;
         break;
       }
       // Clone: the sensor field hands back a shared scratch, and several shots can land in one
@@ -2977,6 +3269,28 @@ export class UnitField {
       u.dead = true;
       u.mark = null;
       this.selection.delete(i);
+
+      // Area weapon: everyone else standing in the ring dies with the target. Capped so a MOAB in a
+      // dense block is a massacre, not a frame-long O(n) sweep of the whole field.
+      if (area > 0) {
+        const mLon = mPerLat * Math.cos(u.lat * DEG);
+        const r2 = area * area;
+        let hit = 0;
+        for (let j = 0; j < this.units.length && hit < AREA_MAX_VICTIMS; j++) {
+          if (j === i) continue;
+          const v = this.units[j];
+          if (v.dead || PLATFORM_KINDS.includes(v.kind)) continue;
+          const dx = (v.lon - u.lon) * mLon;
+          const dy = (v.lat - u.lat) * mPerLat;
+          if (dx * dx + dy * dy > r2) continue;
+          const vto = new Cesium.Cartesian3(this.ecef[j * 3], this.ecef[j * 3 + 1], this.ecef[j * 3 + 2]);
+          out.push({ index: j, id: v.id, lon: v.lon, lat: v.lat, from, to: vto, valid: v.state === 'infected', collateral: true });
+          v.dead = true;
+          v.mark = null;
+          this.selection.delete(j);
+          hit++;
+        }
+      }
     }
     if (out.length) this.rebuildMarks();
     return out;
@@ -3027,8 +3341,8 @@ export class UnitField {
     detainedIncidents: number;
     /** Contacts carried off under a sentence rather than into custody, this frame. */
     imprisoned: number;
-    /** Detainments resolved this frame: who threw, and at what. */
-    detainments: { from: Cesium.Cartesian3; to: Cesium.Cartesian3 }[];
+    /** Detainments resolved this frame: who threw, at what, and whether it was a sentencing. */
+    detainments: { from: Cesium.Cartesian3; to: Cesium.Cartesian3; prison: boolean }[];
   } {
     const out: {
       lon: number;
@@ -3040,7 +3354,7 @@ export class UnitField {
     let detainedAttacker = false;
     let detainedIncidents = 0;
     let imprisoned = 0;
-    const detainments: { from: Cesium.Cartesian3; to: Cesium.Cartesian3 }[] = [];
+    const detainments: { from: Cesium.Cartesian3; to: Cesium.Cartesian3; prison: boolean }[] = [];
 
     for (const { kind, index } of this.platformUnits()) {
       const u = this.units[index];
@@ -3090,6 +3404,7 @@ export class UnitField {
               this.ecef[targetIdx * 3 + 1],
               this.ecef[targetIdx * 3 + 2],
             ),
+            prison: action === 'prison',
           });
           t.dead = true;
           t.mark = null;

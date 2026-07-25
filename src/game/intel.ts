@@ -110,12 +110,15 @@ for (let i = 0; i < INFRACTIONS.length; i++) BY_SEVERITY[INFRACTIONS[i].severity
  */
 const RECORD_PROFILE: globalThis.Record<
   UnitState,
-  { extra: number; weights: [number, number, number, number] }
+  { min: number; extra: number; weights: [number, number, number, number] }
 > = {
-  //                                        sev1  sev2  sev3  sev4
-  normal: { extra: 2, weights: [0.7, 0.22, 0.07, 0.01] },
-  protected: { extra: 4, weights: [0.05, 0.15, 0.38, 0.42] },
-  infected: { extra: 4, weights: [0.22, 0.26, 0.28, 0.24] },
+  //                                     min          sev1  sev2  sev3  sev4
+  normal: { min: 0, extra: 2, weights: [0.7, 0.22, 0.07, 0.01] },
+  // A protected asset carries the heaviest sheet on the board, and reliably so: a floor of extra
+  // charges (never just the guaranteed petty one) heavily skewed to the severe tiers, plus a
+  // guaranteed critical charge in rollRecord. Maximally guilty-looking is the whole trap.
+  protected: { min: 3, extra: 6, weights: [0.02, 0.1, 0.4, 0.48] },
+  infected: { min: 1, extra: 4, weights: [0.22, 0.26, 0.28, 0.24] },
 };
 
 function pickSeverity(weights: [number, number, number, number]): Severity {
@@ -144,11 +147,13 @@ function pickFrom(tier: number[]): number {
 export function rollRecord(state: UnitState, floor?: 'critical'): Record_ {
   const profile = RECORD_PROFILE[state];
   const out = new Set<number>([pickFrom(BY_SEVERITY[1])]);
-  const n = Math.floor(Math.random() * (profile.extra + 1));
+  // At least `min` extra charges, up to `extra` — a protected asset never rolls down to just its
+  // petty guaranteed one, so its sheet always reads long as well as severe.
+  const n = profile.min + Math.floor(Math.random() * (profile.extra - profile.min + 1));
   for (let k = 0; k < n; k++) out.add(pickFrom(BY_SEVERITY[pickSeverity(profile.weights)]));
-  // A guaranteed top-severity charge, for the one contact the opening theater places deliberately.
-  // Everything else about that unit is rolled the same way as anybody else's.
-  if (floor === 'critical') out.add(pickFrom(BY_SEVERITY[4]));
+  // A guaranteed top-severity charge — for the one contact the opening theater places deliberately,
+  // and for every protected asset, so a company asset always carries a critical-tier infraction.
+  if (floor === 'critical' || state === 'protected') out.add(pickFrom(BY_SEVERITY[4]));
   return [...out].sort((a, b) => INFRACTIONS[b].severity - INFRACTIONS[a].severity);
 }
 

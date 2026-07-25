@@ -12,11 +12,35 @@ import { ASSETS } from './progression';
  * assets are defined in two files that don't import each other, and putting the resolver in either
  * of them would mean one catalog importing the other purely to render a label.
  */
+/**
+ * Names for things the chain already RELEASES but nothing has BUILT yet.
+ *
+ * The mission chain is the design sheet made real, and it advertises the whole arc — gear, drones
+ * and capabilities that arrive in later threads. Rather than let the panel print a raw slug for a
+ * not-yet-built id (`MACHINE-GUN`), each one gets its real display name here. When the item lands in
+ * its own catalog, the lookup below finds it first and this entry becomes dead — safe to delete then.
+ */
+const PENDING_LABELS: Record<string, string> = {
+  // boon placeholder
+  'free-fitting': 'COMPLIMENTARY FITTING',
+  // capabilities / automation
+  'process-1': 'PROCESS ACTION I',
+  'process-2': 'PROCESS ACTION II',
+  'process-3': 'PROCESS ACTION III',
+  'alert-suspicious': 'SUSPICIOUS-ACTIVITY ALERTS',
+  'alert-infraction': 'LIVE INFRACTION ALERTS',
+  'patrol-ground': 'AUTO-PATROL GROUND DRONES',
+  'patrol-air': 'AUTO-PATROL AIR DRONES',
+  'predictive-events': 'PREDICTIVE EVENT ALGORITHM',
+  hvt: 'HIGH-VALUE TARGET DESIGNATION',
+};
+
 export function unlockName(id: string): string {
   return (
     PLATFORM_BY_ID.get(id as never)?.name ??
     GEAR_BY_ID.get(id)?.name ??
     ASSETS.find((a) => a.id === id)?.name ??
+    PENDING_LABELS[id] ??
     id.toUpperCase()
   );
 }

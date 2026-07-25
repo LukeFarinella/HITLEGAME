@@ -25,6 +25,7 @@ import { progression, ASSETS, AIRDROP_COST } from '../game/progression';
 import { PLATFORMS, GEAR, PLATFORM_BY_ID, BASE_SENSOR_M, type PlatformId } from '../game/platforms';
 import { surveyTerritory, clusterCentres, type Territory } from '../game/territory';
 import { missions, MISSIONS } from '../game/missions';
+import { processActions } from '../game/processActions';
 import { tolerance, caseStrength, toleranceLabel } from '../game/tolerance';
 import { policy, policyLabel } from '../game/policy';
 import {
@@ -38,11 +39,15 @@ import {
 import { resistance } from '../game/resistance';
 import { assessBand, BAND_LABEL, readRecord, type Record_ } from '../game/intel';
 import { portraitFor } from '../game/portraits';
+import { extraFields, infoUnlocked, searchAvailable } from '../game/dossier';
+import { FACTION_BY_ID, type FactionId } from '../game/factions';
 import { VIOLATION_TTL_S, VIOLATIONS } from '../game/violations';
 import { Store } from '../ui/store';
 import { icon } from '../ui/icons';
 import { sound, bindInterfaceSounds } from '../ui/sound';
-import { MissionPanel } from '../ui/missions';
+import { music } from '../ui/music';
+import { MissionPanel, showMissionComplete } from '../ui/missions';
+import { ProcessPanel } from '../ui/process';
 import { showStartWindow } from '../ui/start';
 import { showTitle, setTitleTerritory } from '../ui/title';
 import { showLoading, setStage, hideLoading } from '../ui/loading';
@@ -50,6 +55,7 @@ import { setActiveSlot, migrateLegacySave } from '../game/saves';
 import { LaserBeams } from './lasers';
 import { ScanBeams, Blasts, Sparks, Impacts, Cuffs, ViolationPings } from './effects';
 import { Reactions } from './reactions';
+import { ActionMarks, type ActionKind } from './actionMarks';
 import { RouteLayer } from './routes';
 import { AttackPulse } from './pulse';
 import { SiegeDirector, type SiegeEvent } from './siege';
@@ -520,6 +526,8 @@ let siege: SiegeDirector | undefined;
 let incidents: IncidentDirector | undefined;
 /** The crowd reacting to what the operator does. Lives and dies with the theater. */
 let reactions: Reactions | undefined;
+/** Action glyphs that pop where each order lands — a fine, an investigation, a kill. */
+let actionMarks: ActionMarks | undefined;
 /** The selected platform's commanded route, drawn on the ground. */
 let routes: RouteLayer | undefined;
 /** The distress ring over a site under attack. Screen-space, so it reads at any zoom. */
@@ -591,6 +599,19 @@ const REACTION_RADIUS_M = 2600;
 function reactAt(lon: number, lat: number, kind: 'approve' | 'dismay') {
   if (!reactions || !unitField) return;
   for (const p of unitField.bystandersNear(lon, lat, REACTION_RADIUS_M)) reactions.pop(p, kind);
+}
+
+/**
+ * Pop an action glyph on the map where an order lands. Two ways in: a lon/lat (looked up against the
+ * theater mesh for a ground height) or a world position already in hand, e.g. a beam's endpoint.
+ */
+function markAction(lon: number, lat: number, kind: ActionKind) {
+  if (!actionMarks) return;
+  const h = theaterMap ? theaterMap.heightAt(lon, lat) : 0;
+  actionMarks.pop(Cesium.Cartesian3.fromDegrees(lon, lat, h + 6), kind);
+}
+function markAt(pos: Cesium.Cartesian3, kind: ActionKind) {
+  actionMarks?.pop(pos, kind);
 }
 
 /** A win for GORGON: the company mark over its own assets and its own sites. */
@@ -739,6 +760,11 @@ function addUnits(center: { lon: number; lat: number }, map: TheaterMap, net: Ro
   scene.primitives.add(field.droneRing); // platform sensor footprints
   scene.primitives.add(field.platformIcons); // 24 px markers, shown when zoomed out
   field.toleranceOverride = progression.has('emergency-powers');
+  field.autoPatrol = {
+    ground: missions.hasChosen('dragnet', 'patrol-ground'),
+    air: missions.hasChosen('dragnet', 'patrol-air'),
+  };
+  field.hvtDesignate = missions.hasChosen('defend', 'hvt');
   seedHiddenPockets(field);
   seedStarterTarget(field);
   deliveryTimer = DELIVERY_INTERVAL_S;
@@ -747,6 +773,8 @@ function addUnits(center: { lon: number; lat: number }, map: TheaterMap, net: Ro
   scene.primitives.add(lasers.collection);
   reactions = new Reactions();
   scene.primitives.add(reactions.collection);
+  actionMarks = new ActionMarks();
+  scene.primitives.add(actionMarks.collection);
   routes = new RouteLayer();
   scene.primitives.add(routes.lines);
   scene.primitives.add(routes.markers);
@@ -931,6 +959,7 @@ function issueFine(index: number): boolean {
 
   unitField.clearLive(index);
   const pos = unitField.positionOf(index);
+  if (pos) markAction(pos.lon, pos.lat, 'fine');
   if (live.truth) {
     progression.award(live.def.fine);
     missions.report('fine', true);
@@ -963,6 +992,7 @@ function investigateLive(index: number): boolean {
   const infected = unitField.isInfected(index);
   unitField.clearLive(index);
   const pos = unitField.positionOf(index);
+  if (pos) markAction(pos.lon, pos.lat, 'investigate');
 
   missions.report('investigate', infected);
   if (infected) {
@@ -1125,6 +1155,10 @@ function removeUnits() {
     scene.primitives.remove(reactions.collection);
     reactions = undefined;
   }
+  if (actionMarks) {
+    scene.primitives.remove(actionMarks.collection);
+    actionMarks = undefined;
+  }
   if (routes) {
     scene.primitives.remove(routes.lines);
     scene.primitives.remove(routes.markers);
@@ -1197,6 +1231,7 @@ scene.preUpdate.addEventListener(() => {
     if (committed.length) sound.play('commit');
     for (const c of committed) {
       missions.report('investigate', c.valid);
+      markAction(c.lon, c.lat, 'investigate');
       reactAt(c.lon, c.lat, c.valid ? 'approve' : 'dismay');
     }
     resolveExecutions();
@@ -1206,12 +1241,14 @@ scene.preUpdate.addEventListener(() => {
     runLiveViolations(dt);
     updatePings(dt);
     runAutoMarking(dt);
+    runProcessActions(dt);
     runDelivery(dt);
     runAssetGoodwill(dt);
     siege?.update(dt);
     incidents?.update(dt);
     updateSiegeHud();
     updateIncidentHud();
+    updateAlertHud();
     rebuildRoster();
     refreshRoster();
     updateRouteLayer();
@@ -1219,6 +1256,7 @@ scene.preUpdate.addEventListener(() => {
   }
   lasers?.update(dt);
   reactions?.update(dt);
+  actionMarks?.update(dt);
   updateAttackPulse();
   pulse?.update(dt);
   blasts?.update(dt);
@@ -1309,7 +1347,7 @@ function openGroundMenu(screenX: number, screenY: number, lon: number, lat: numb
     move.innerHTML = `<span class="gc-label">${append ? 'QUEUE WAYPOINT' : 'MOVE HERE'}</span>`;
     move.addEventListener('click', () => {
       closeGroundMenu();
-      if (unitField?.orderSelected(lon, lat, append)) {
+      if (unitField?.orderSelection(lon, lat, append)) {
         sound.play('click');
         updateUnitPanel();
       }
@@ -1541,7 +1579,10 @@ function resolveArrivals(dt: number) {
     updateUnitHud();
   }
   // Every detainment throws, whether or not it was the siege attacker.
-  for (const d of detainments) cuffs?.fire(d.from, d.to);
+  for (const d of detainments) {
+    cuffs?.fire(d.from, d.to);
+    markAt(d.to, d.prison ? 'prison' : 'detain');
+  }
   if (detainedAttacker) {
     // The director keeps the siege clock, so it has to be told this ended in custody.
     siege?.noteAttackerStruck();
@@ -1571,6 +1612,7 @@ function resolveArrivals(dt: number) {
       // Debris off the seat of the blast, thrown much harder than a cutting torch throws sparks.
       sparks?.emit(Cesium.Cartesian3.fromDegrees(strike.lon, strike.lat, h + 6), 18);
     }
+    markAction(strike.lon, strike.lat, 'execute');
     sound.play('laser');
     // Only a strike that actually caught the attacker ends the siege. This used to fire on every
     // strike, so blowing up an unrelated contact on the far side of the theater silently reset the
@@ -1623,6 +1665,55 @@ function runAutoMarking(dt: number) {
 }
 
 /**
+ * Process Actions — the operator's own standing rules (game/processActions.ts).
+ *
+ * Rate-limited like the flagging automation, and for the same reason: a rule that emptied the field
+ * into the ledger in one frame would be a different, worse feature. One match per armed rule per
+ * tick, carried out through the same fine / mark / dispatch paths a hand order uses — so a
+ * rule-driven execution is scored, reacts and hardens exactly as if the operator had made the call.
+ */
+const PROCESS_INTERVAL_S = 2.0;
+let processTimer = 0;
+function runProcessActions(dt: number) {
+  if (!unitField) return;
+  const active = processActions.activeRules();
+  if (!active.length) return;
+  processTimer -= dt;
+  if (processTimer > 0) return;
+  processTimer = PROCESS_INTERVAL_S;
+  for (const { rule } of active) {
+    // Detain and execute rules only fire once the chain has granted the standing authority for them.
+    if (rule.action === 'execute' && !missions.hasAuth('execute')) continue;
+    if ((rule.action === 'detain' || rule.action === 'prison') && !missions.hasAuth('detain')) continue;
+    const idx = unitField.matchForRule(rule);
+    if (idx >= 0) applyProcessAction(idx, rule.action);
+  }
+}
+
+/** Carry a Process Action out on one contact, reusing the same paths a hand order takes. */
+function applyProcessAction(index: number, action: SanctionId) {
+  if (!unitField) return;
+  if (action === 'fine') {
+    issueFine(index);
+    return;
+  }
+  if (action === 'investigate') {
+    if (unitField.liveOf(index)) investigateLive(index);
+    else {
+      unitField.markContact(index, 'investigate');
+      sound.play('order');
+    }
+    return;
+  }
+  // detain / prison / execute — needs a platform in range to carry it out.
+  const s = SANCTION_BY_ID.get(action);
+  if (!s) return;
+  if (unitField.dispatch(index, action, carriersFor(s, index))) {
+    sound.play(action === 'execute' ? 'orderLethal' : 'order');
+  }
+}
+
+/**
  * Service any execution-marked contact an armed platform can currently see.
  *
  * Runs AFTER render() because the beam endpoints come from the world positions render() just
@@ -1639,10 +1730,22 @@ function resolveExecutions() {
   const shots = unitField.resolveExecutions(
     obeliskArmed ? (lon, lat) => sensorField?.servicingApex(lon, lat) : undefined,
     armed,
+    (id) => progression.platformAreaM(id),
   );
   if (shots.length) sound.play('laser');
   for (const s of shots) {
     lasers.fire(s.from, s.to);
+    // A crosshair lands wherever a beam does, target or bystander — the operator sees every kill.
+    markAt(s.to, 'execute');
+    if (s.collateral) {
+      // Not an ordered mark, so it isn't scored — but an area weapon that kills a clean bystander
+      // hardens the ground, and that is the price of using one where it shouldn't be used.
+      if (!s.valid) {
+        resistance.aggravate(AREA_COLLATERAL_RESISTANCE);
+        reactAt(s.lon, s.lat, 'dismay');
+      }
+      continue;
+    }
     // The beam is a half-second flash along a line; from theater altitude that line can be a few
     // pixels of a very big picture. The mark is what says WHERE it landed.
     impacts?.at(s.to, 120, 0.7);
@@ -1651,6 +1754,8 @@ function resolveExecutions() {
   }
   if (shots.length) updateUnitHud();
 }
+/** How much a clean bystander caught in an area strike hardens the ground. Valid collateral is free. */
+const AREA_COLLATERAL_RESISTANCE = 0.015;
 
 // ---- obelisks ----
 // One dataset, two renderings: additive orange splats in orbit (they sum into a heatmap where
@@ -1733,7 +1838,14 @@ function applyOwnership(rebuildScene: boolean): void {
   // Each platform's live sensor radius comes from its catalog entry plus whatever is on its
   // hardpoints, so fitting a wide-aperture pod widens the disc the sim actually tests against.
   for (const p of PLATFORMS) PLATFORM_SENSOR[p.id] = progression.sensorRangeOf(p.id);
-  if (unitField) unitField.toleranceOverride = progression.has('emergency-powers');
+  if (unitField) {
+    unitField.toleranceOverride = progression.has('emergency-powers');
+    unitField.autoPatrol = {
+      ground: missions.hasChosen('dragnet', 'patrol-ground'),
+      air: missions.hasChosen('dragnet', 'patrol-air'),
+    };
+    unitField.hvtDesignate = missions.hasChosen('defend', 'hvt');
+  }
 
   if (obelisks && territory) obeliskMask = progression.obeliskMask(territory, obelisks.count);
 
@@ -1877,6 +1989,9 @@ function exitToTitle(): void {
 }
 
 function bootTitle(): void {
+  // The score belongs to the menus and the world map — bring it up as the title goes on. (The first
+  // fadeIn before any click is blocked by autoplay policy; music.ts starts it on the first gesture.)
+  music.fadeIn();
   showTitle({ onPlay: (slot) => void openCampaign(slot) });
 }
 
@@ -2300,8 +2415,12 @@ function renderLive(index: number, s: SanctionDef, subj: Subject) {
   setText('ul-what', live.def.label);
   setText('ul-age', `${Math.max(0, Math.round(VIOLATION_TTL_S - live.ageS))}s`);
   setText('ul-cert-v', `${Math.round(live.certainty * 100)}%`);
-  setText('ul-tol-v', `${Math.round(v.publicBar * 100)}%`);
-  setText('ul-pol-v', `${Math.round(v.policyBar * 100)}%`);
+  // These rows read as TOLERANCE, so they show 1 − bar, not the raw threshold. A high evidence bar
+  // means the audience is barely tolerant (it needs a lot before it accepts), so the tolerance shown
+  // is its inverse. On an ordinary contact the public is the LESS tolerant of the two — the street is
+  // the harder audience — while the chain (policy) is more willing to act; a protected asset flips it.
+  setText('ul-tol-v', `${Math.round((1 - v.publicBar) * 100)}%`);
+  setText('ul-pol-v', `${Math.round((1 - v.policyBar) * 100)}%`);
   paintTrack('ul-track', live.certainty, v.publicBar, v.policyBar, v.clearsPublic && v.clearsPolicy);
 }
 
@@ -2318,6 +2437,15 @@ function renderCharges(record: Record_ | null) {
     return;
   }
   (wrap as HTMLElement).hidden = false;
+  // PAST INFRACTIONS are an unlock in their own right (DRAGNET). Until then the record is sealed —
+  // Act I runs on the live event alone, which is exactly what a citation is judged on anyway.
+  if (!infoUnlocked('past-record')) {
+    const li = document.createElement('li');
+    li.className = 'sealed';
+    li.textContent = '◹ RECORD SEALED · NO AUTHORITY';
+    list.replaceChildren(li);
+    return;
+  }
   const charges = readRecord(record);
   list.replaceChildren(
     ...(charges.length
@@ -2338,6 +2466,79 @@ function renderCharges(record: Record_ | null) {
   );
 }
 
+/** Charged for pulling a dossier field AHEAD of the authority that would release it — overreach. */
+const DOSSIER_PULL_RESISTANCE = 0.02;
+const DOSSIER_PULL_POLICY = 0.012;
+/** Contacts whose sealed fields the operator has pulled this session, keyed `${callsign}:${fieldId}`. */
+const dossierPulled = new Set<string>();
+
+/**
+ * The dossier block: the five fields past face / identity / record.
+ *
+ * Each row is in one of three states. OPEN — the tasking that unlocks it is cleared and it isn't a
+ * behind-a-click field. SEALED but PULLABLE — SEARCH is released, so the operator can pull it: free
+ * for a field already earned, or as OVERREACH for one pulled ahead of its authority, which hardens
+ * the ground. SEALED and locked — SEARCH isn't released yet, so the row just names what it waits on.
+ */
+function renderDossier(callsign: string) {
+  const wrap = el('up-dossier') as HTMLElement | null;
+  if (!wrap) return;
+  wrap.hidden = false;
+  wrap.replaceChildren();
+  const canSearch = searchAvailable();
+
+  for (const f of extraFields(callsign)) {
+    const unlocked = infoUnlocked(f.id);
+    const pulledKey = `${callsign}:${f.id}`;
+    const visible = (unlocked && !f.sealed) || dossierPulled.has(pulledKey);
+
+    const row = document.createElement('div');
+    row.className = 'up-drow';
+    const k = document.createElement('span');
+    k.className = 'k';
+    k.textContent = f.label;
+    row.append(k);
+
+    if (visible) {
+      const v = document.createElement('span');
+      v.className = 'v';
+      v.textContent = f.value;
+      if (f.note) {
+        const note = document.createElement('em');
+        note.className = 'dnote';
+        note.textContent = f.note;
+        v.append(' ', note);
+      }
+      row.append(v);
+    } else if (canSearch) {
+      const overreach = !unlocked;
+      row.classList.add('sealed', 'pullable');
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `up-pull${overreach ? ' overreach' : ''}`;
+      btn.textContent = overreach ? '◹ SEARCH · PULL AHEAD OF AUTHORITY' : '◹ SEARCH · ON FILE';
+      btn.addEventListener('click', () => {
+        dossierPulled.add(pulledKey);
+        if (overreach) {
+          resistance.aggravate(DOSSIER_PULL_RESISTANCE);
+          policy.tighten(DOSSIER_PULL_POLICY);
+          toast('◈ FILE PULLED AHEAD OF AUTHORITY · THE CHAIN WILL NOTE IT');
+        }
+        sound.play('order');
+        renderDossier(callsign);
+      });
+      row.append(btn);
+    } else {
+      row.classList.add('sealed');
+      const v = document.createElement('span');
+      v.className = 'v sealed-v';
+      v.textContent = '◹ SEALED · NO AUTHORITY';
+      row.append(v);
+    }
+    wrap.append(row);
+  }
+}
+
 /**
  * The capture plate at the top of the card.
  *
@@ -2348,11 +2549,21 @@ function renderCharges(record: Record_ | null) {
 let mugShownFor = '';
 function renderMug(id: string, platform: PlatformId | null) {
   const slot = el('up-mug');
-  if (!slot || mugShownFor === id) return;
-  mugShownFor = id;
+  if (!slot) return;
+  // The LIVE CAMERA is itself an unlock (CIVIL MANDATE). Before it, a contact has no capture plate —
+  // the card is working blind, which is the whole early game. Hardware always shows its glyph.
+  const camera = platform !== null || infoUnlocked('live-camera');
+  const key = `${id}|${platform ?? 'c'}|${camera ? 1 : 0}`;
+  if (mugShownFor === key) return;
+  mugShownFor = key;
   slot.classList.toggle('hardware', platform !== null);
+  slot.classList.toggle('nocam', platform === null && !camera);
   if (platform) {
     slot.innerHTML = icon(platform);
+    return;
+  }
+  if (!camera) {
+    slot.innerHTML = '<span class="up-nocam">◹ NO CAMERA<br>UPLINK</span>';
     return;
   }
   slot.replaceChildren(portraitFor(id));
@@ -2369,21 +2580,40 @@ function renderMug(id: string, platform: PlatformId | null) {
 const ROLE_TAG: Record<string, string> = {
   attacker: 'ATTACKING A SITE',
   assassin: 'TARGETED KILLING',
+  insurgent: 'INSURGENT ATTACK',
   rioter: 'CIVIL DISORDER',
   brawler: 'ALTERCATION',
   runner: 'IN PURSUIT',
 };
-function renderTag(one: { protectedAsset: boolean; role?: string; tint: string }) {
+function renderTag(one: {
+  protectedAsset: boolean;
+  role?: string;
+  tint: string;
+  faction?: FactionId;
+  hostile?: boolean;
+}) {
   const tag = el('up-tag') as HTMLElement | null;
   if (!tag) return;
-  // The role outranks protection, matching the field's colour precedence exactly: what somebody is
-  // doing this second is more use than what they are on file as.
-  const label = one.role ? ROLE_TAG[one.role] : one.protectedAsset ? 'PROTECTED ASSET' : null;
+  const fac = one.faction ? FACTION_BY_ID.get(one.faction) : undefined;
+  // Precedence: what somebody is DOING this second (a live incident role) outranks what they ARE on
+  // file (a backer's asset, or a rival's man). Protection names the backer; hostility names the
+  // rival — the fork choice made visible on the one contact it touches.
+  let label: string | null = null;
+  let tint = one.tint;
+  if (one.role) {
+    label = ROLE_TAG[one.role];
+  } else if (one.protectedAsset) {
+    label = fac ? `PROTECTED · ${fac.name}` : 'PROTECTED ASSET';
+    if (fac) tint = fac.tint;
+  } else if (one.hostile && fac) {
+    label = `HOSTILE · ${fac.name}`;
+    tint = fac.tint;
+  }
   tag.hidden = !label;
   if (!label) return;
   tag.textContent = label;
-  tag.style.color = one.tint;
-  tag.style.borderColor = one.tint;
+  tag.style.color = tint;
+  tag.style.borderColor = tint;
 }
 
 // ---- the decision ------------------------------------------------------------------------------
@@ -2552,13 +2782,23 @@ function renderDecision(one: {
     const tracked = unitField?.isTrackedPublic(one.index) ?? false;
     go.disabled = !!blocked || !tracked;
     go.classList.toggle('lethal', s.id === 'execute');
+    // A protected asset is off limits by contract, so touching one is never a reflex: the button
+    // turns into a HOLD, and the order only commits after the bar fills. `data-hold` drives the
+    // pointer handler; the class drives the fill styling. Both are re-set every render, which is
+    // safe — the in-progress `.holding` state and its `--hold` fill live outside this function.
+    const hold = one.protectedAsset && !go.disabled && !lockFor(s, one.index);
+    go.dataset.hold = hold ? '1' : '';
+    go.classList.toggle('hold', hold);
+    if (!hold) go.classList.remove('holding');
     go.textContent = !tracked
       ? 'NO SENSOR CONTACT'
       : lockFor(s, one.index)
         ? 'NOT YET AUTHORIZED'
         : blocked
           ? 'CANNOT BE CARRIED OUT'
-          : `ACTIVATE DECISION · ${s.label}`;
+          : hold
+            ? `HOLD TO OVERRIDE · ${s.label}`
+            : `ACTIVATE DECISION · ${s.label}`;
   }
 }
 
@@ -2705,9 +2945,11 @@ function updateUnitPanel() {
   const dot = el('up-dot');
 
   if (one) {
-    setText('up-id', one.id);
-    setText('up-type', KIND_LABEL[one.kind]);
     const isPlatform = PLATFORM_BY_ID.has(one.kind as PlatformId);
+    // FACIAL RECOGNITION (STOP AND SEARCH) is what resolves a contact to an identity. Before it, the
+    // callsign is withheld and the contact reads as unresolved. Hardware is always named.
+    setText('up-id', isPlatform || infoUnlocked('facial-rec') ? one.id : 'UNRESOLVED CONTACT');
+    setText('up-type', KIND_LABEL[one.kind]);
     renderTag(one);
     const band = assessBand(one.assess);
     const pct = Math.round(one.assess * 100);
@@ -2738,13 +2980,21 @@ function updateUnitPanel() {
     if (track) track.hidden = isPlatform;
     if (!isPlatform) {
       setText('up-conf', `${Math.round(evidence * 100)}%`);
-      setText('up-pub', `${Math.round(v.publicBar * 100)}%`);
-      setText('up-pol', `${Math.round(v.policyBar * 100)}%`);
+      // Shown as tolerance (1 − bar), same as the live rows: a high threshold means low tolerance.
+      setText('up-pub', `${Math.round((1 - v.publicBar) * 100)}%`);
+      setText('up-pol', `${Math.round((1 - v.policyBar) * 100)}%`);
       paintTrack('up-conf-track', evidence, v.publicBar, v.policyBar, v.clearsPublic && v.clearsPolicy);
     }
 
     renderMug(one.id, isPlatform ? (one.kind as PlatformId) : null);
     renderCharges(isPlatform ? null : one.record);
+    // The extended dossier is for contacts; a platform is friendly hardware with no file.
+    if (isPlatform) {
+      const dossierEl = el('up-dossier') as HTMLElement | null;
+      if (dossierEl) dossierEl.hidden = true;
+    } else {
+      renderDossier(one.id);
+    }
     renderLive(isPlatform ? -1 : one.index, s, subj);
     renderOrder(one.mark, one.markTimer);
     // The ladder is for contacts. Selecting your own drone offers no sanctions, because there is
@@ -2773,11 +3023,22 @@ function updateUnitPanel() {
         senEl.textContent = st ? `${km} KM · ${st.seen} SEEN · ${st.infected} INF` : `${km} KM`;
         senEl.className = 'v sensor-tracked';
       } else {
-        const seen =
+        const covered =
           (!sensorField || sensorField.isCovered(one.lon, one.lat)) ||
           unitField.platformCovers(one.lon, one.lat);
-        senEl.textContent = seen ? 'TRACKED' : 'OUT OF RANGE';
-        senEl.className = `v ${seen ? 'sensor-tracked' : 'sensor-dark'}`;
+        // Once a contact leaves coverage it stays actionable for a grace window; show it counting
+        // down so the operator knows how long they have to act before it goes dark.
+        const grace = covered ? 0 : unitField.graceRemaining(one.index);
+        if (covered) {
+          senEl.textContent = 'TRACKED';
+          senEl.className = 'v sensor-tracked';
+        } else if (grace > 0) {
+          senEl.textContent = `LAST SEEN · ${Math.ceil(grace)}s`;
+          senEl.className = 'v sensor-grace';
+        } else {
+          senEl.textContent = 'OUT OF RANGE';
+          senEl.className = 'v sensor-dark';
+        }
       }
     }
     renderLoadout(isPlatform ? (one.kind as PlatformId) : null);
@@ -2984,10 +3245,27 @@ function updateIncidentHud() {
   if (!box) return;
   const a = incidents?.active();
   if (mode !== 'theater' || !a) {
-    (box as HTMLElement).hidden = true;
+    // No live incident — but the PREDICTIVE EVENT ALGORITHM (HOLD THE NET fork) forecasts the next.
+    const f =
+      mode === 'theater' && missions.hasChosen('defend', 'predictive-events') ? incidents?.forecast() : null;
+    if (f) {
+      (box as HTMLElement).hidden = false;
+      box.classList.add('forecast');
+      box.classList.remove('contact');
+      setText('gi-title', `FORECAST · ${f.name}`);
+      setText('gi-brief', 'PREDICTIVE ALGORITHM · INCOMING');
+      setText('gi-count', `~${Math.ceil(f.etaS)}s`);
+      const bar = el('gi-bar');
+      if (bar) (bar as HTMLElement).style.width = '100%';
+      incidentFocus = undefined; // no location to snap to until it lands
+    } else {
+      (box as HTMLElement).hidden = true;
+      box.classList.remove('forecast');
+    }
     return;
   }
   (box as HTMLElement).hidden = false;
+  box.classList.remove('forecast');
   incidentFocus = { lon: a.lon, lat: a.lat };
   setText('gi-title', a.def.name);
   setText('gi-brief', a.def.brief);
@@ -2996,6 +3274,34 @@ function updateIncidentHud() {
   box.classList.toggle('contact', urgent);
   const bar = el('gi-bar');
   if (bar) (bar as HTMLElement).style.width = `${Math.max(0, (a.remaining / a.def.fuseS) * 100)}%`;
+}
+
+/**
+ * The live-violation alert, shown only when the STOP AND SEARCH fork's alerting tech is chosen.
+ *
+ * SUSPICIOUS-ACTIVITY ALERTS narrow to the class an investigation is for and snap to the freshest;
+ * LIVE INFRACTION ALERTS count the whole stream. Either way it's a heads-up and a jump-to — the net
+ * flags what it sees; the operator decides whether to look.
+ */
+let alertFocus: { lon: number; lat: number } | undefined;
+function updateAlertHud() {
+  const box = el('g-alert') as HTMLElement | null;
+  if (!box) return;
+  const suspicious = missions.hasChosen('stopsearch', 'alert-suspicious');
+  const infraction = missions.hasChosen('stopsearch', 'alert-infraction');
+  if (mode !== 'theater' || !unitField || (!suspicious && !infraction)) {
+    box.hidden = true;
+    return;
+  }
+  const a = unitField.liveAlerts(suspicious);
+  if (a.count === 0 || a.lon === undefined || a.lat === undefined) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  alertFocus = { lon: a.lon, lat: a.lat };
+  setText('ga-label', suspicious ? 'SUSPICIOUS' : 'LIVE EVENTS');
+  setText('ga-count', String(a.count));
 }
 
 function updateSiegeHud() {
@@ -3063,44 +3369,43 @@ function rebuildRoster() {
   (box as HTMLElement).hidden = units.length === 0;
 
   box.replaceChildren(
-    ...units.map((u) => {
-      const card = document.createElement('button');
-      card.type = 'button';
-      card.className = 'gr-card';
-      card.dataset.index = String(u.index);
-      card.innerHTML =
+    ...units.map((u, i) => {
+      // A short handle per unit — A, B, C … — so the roster is a row of chips across the top rather
+      // than a column of cards down the side obscuring the data panel. The callsign is on hover.
+      const letter = String.fromCharCode(65 + (i % 26));
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'gr-chip';
+      chip.dataset.index = String(u.index);
+      chip.title = u.id;
+      chip.innerHTML =
         `<span class="gr-icon">${icon(u.kind)}</span>` +
-        `<span class="gr-body"><span class="gr-id">${u.id}</span>` +
-        `<span class="gr-state">—</span></span>`;
-      card.addEventListener('click', () => {
+        `<span class="gr-letter">${letter}</span>` +
+        `<span class="gr-dot"></span>`;
+      chip.addEventListener('click', () => {
         unitField?.selectIndexPublic(u.index);
         updateUnitPanel();
       });
       // Single click selects, double click goes there — the platforms are in different cities, so
       // selecting one is often only half of what you wanted.
-      card.addEventListener('dblclick', () => {
+      chip.addEventListener('dblclick', () => {
         const st = unitField?.platformStatus(u.index);
         if (st) focusOn(st.lon, st.lat);
       });
-      return card;
+      return chip;
     }),
   );
 }
 
-/** Repaint the roster's live bits — selection and whether each unit is under orders. */
+/** Repaint the roster's live bits — selection (any unit in the marquee) and whether each is moving. */
 function refreshRoster() {
   const box = el('g-roster');
   if (!box || (box as HTMLElement).hidden || !unitField) return;
-  const sel = unitField.selectedPlatform();
-  for (const card of box.querySelectorAll<HTMLElement>('.gr-card')) {
-    const idx = Number(card.dataset.index);
-    card.classList.toggle('selected', sel?.index === idx);
+  for (const chip of box.querySelectorAll<HTMLElement>('.gr-chip')) {
+    const idx = Number(chip.dataset.index);
+    chip.classList.toggle('selected', unitField.isSelected(idx));
     const st = unitField.platformStatus(idx);
-    const stateEl = card.querySelector('.gr-state');
-    if (stateEl && st) {
-      stateEl.textContent = st.moving ? 'MOVING' : `${st.seen} SEEN`;
-      stateEl.className = `gr-state ${st.moving ? 'moving' : ''}`;
-    }
+    chip.classList.toggle('moving', !!st?.moving);
   }
 }
 
@@ -3182,6 +3487,9 @@ function enterTheater(carto: Cesium.Cartographic) {
   const lon = Cesium.Math.toDegrees(carto.longitude);
   const lat = Cesium.Math.toDegrees(carto.latitude);
   mode = 'theater';
+  // The score rests inside a theater — the synthesized C2 cues carry the tension there. It fades
+  // back in on exit.
+  music.fadeOut();
   theaterCenter = { lon, lat };
   // The net is rebuilt whenever a theater is chosen, so sites lost to the last siege stand back up.
   fallenObelisks = new Set();
@@ -3338,6 +3646,8 @@ async function buildTheater(lon: number, lat: number, tok: number) {
 function exitTheater() {
   if (mode !== 'theater') return;
   sound.play('exit');
+  // Back to the world map — the score comes back up.
+  music.fadeIn();
   mode = 'globe';
   theaterToken++;
   restoreGlobeControls();
@@ -3634,7 +3944,7 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
     openGroundMenu(m.position.x, m.position.y, g.lon, g.lat, append);
     return;
   }
-  if (unitField.orderSelected(g.lon, g.lat, append)) {
+  if (unitField.orderSelection(g.lon, g.lat, append)) {
     sound.play('click');
     updateUnitPanel();
   }
@@ -3663,6 +3973,9 @@ el('g-exit')?.addEventListener('click', exitTheater);
 el('g-incident')?.addEventListener('click', () => {
   if (incidentFocus) focusOn(incidentFocus.lon, incidentFocus.lat);
 });
+el('g-alert')?.addEventListener('click', () => {
+  if (alertFocus) focusOn(alertFocus.lon, alertFocus.lat);
+});
 el('g-siege')?.addEventListener('click', () => {
   if (siegeFocus) focusOn(siegeFocus.lon, siegeFocus.lat, 6000);
 });
@@ -3688,33 +4001,86 @@ store = new Store({
 // already watches — so this only has to surface the notice.
 new MissionPanel({
   onChange: () => {},
+  // A clearance raises the completion window and pays the reward; good press cools the ground a little.
+  onComplete: (mission) => {
+    sound.play('success');
+    resistance.relieve();
+    reactCompany();
+    showMissionComplete(mission, {
+      onContinue: () => {},
+      onReturn: () => {
+        if (mode === 'theater') exitTheater();
+      },
+    });
+  },
+  // notify now only carries failures — a completion is the window above, not a toast.
   notify: (msg) => {
-    const failed = msg.startsWith('MISSION FAILED');
-    sound.play(failed ? 'failure' : 'success');
-    // Good press cools a hardened theater a little; a failure does nothing for it.
-    if (!failed) {
-      resistance.relieve();
-      reactCompany();
-    }
+    sound.play('failure');
     toast(msg);
   },
 });
 
+// The Process Actions editor — the operator's standing rules. Renders itself when a slot is released.
+new ProcessPanel();
+
 // Hover and click cues for every button in the app, by delegation — see ui/sound.ts.
 bindInterfaceSounds();
+// The ♪ button opens the player-facing AUDIO panel: music volume and the SFX toggle. The button's
+// own glyph reflects whether ANYTHING is audible, so a muted mix reads at a glance from the corner.
 {
   const btn = el('snd-toggle');
-  const paint = () => {
+  const panel = el('audio-panel');
+  const musicSlider = el('aud-music') as HTMLInputElement | null;
+  const musicVal = el('aud-music-val');
+  const sfx = el('aud-sfx') as HTMLInputElement | null;
+
+  const paintBtn = () => {
     if (!btn) return;
-    btn.textContent = sound.enabled ? '♪' : '♪̸';
-    btn.classList.toggle('muted', !sound.enabled);
-    btn.setAttribute('aria-pressed', String(sound.enabled));
+    // Silent when SFX are off AND the music is at zero — otherwise something is playing.
+    const silent = !sound.enabled && music.volume <= 0;
+    btn.textContent = silent ? '♪̸' : '♪';
+    btn.classList.toggle('muted', silent);
   };
-  btn?.addEventListener('click', () => {
-    sound.setEnabled(!sound.enabled);
-    paint();
+
+  const paintMusic = () => {
+    if (musicSlider) musicSlider.value = String(Math.round(music.volume * 100));
+    if (musicVal) musicVal.textContent = `${Math.round(music.volume * 100)}%`;
+  };
+
+  let open = false;
+  const setOpen = (v: boolean) => {
+    open = v;
+    if (panel) panel.hidden = !open;
+    btn?.setAttribute('aria-expanded', String(open));
+    if (open) {
+      paintMusic();
+      if (sfx) sfx.checked = sound.enabled;
+    }
+  };
+
+  btn?.addEventListener('click', () => setOpen(!open));
+  el('audio-close')?.addEventListener('click', () => setOpen(false));
+
+  musicSlider?.addEventListener('input', () => {
+    music.setVolume((musicSlider.valueAsNumber || 0) / 100);
+    paintMusic();
+    paintBtn();
   });
-  paint();
+
+  sfx?.addEventListener('change', () => {
+    sound.setEnabled(!!sfx.checked);
+    paintBtn();
+  });
+
+  // Click-away closes the panel, so it behaves like the lightweight popover it is.
+  document.addEventListener('pointerdown', (e) => {
+    if (!open) return;
+    const t = e.target as Node | null;
+    if (panel?.contains(t) || btn?.contains(t)) return;
+    setOpen(false);
+  });
+
+  paintBtn();
 }
 
 // ---- dev settings panel (⚙) ----
@@ -3969,10 +4335,69 @@ bindInterfaceSounds();
     exitToTitle();
   });
 }
-el('up-activate')?.addEventListener('click', () => {
-  const one = unitField?.selected()?.single;
-  if (one && !PLATFORM_BY_ID.has(one.kind as PlatformId)) activateDecision(one.index);
-});
+/*
+ * ACTIVATE has two modes, set per-render by `data-hold` on the button:
+ *
+ *   normal contact   — a single click commits, same as it always has.
+ *   protected asset   — a HOLD. The operator must press and keep pressing for HOLD_MS while a bar
+ *                       fills; releasing early cancels and commits nothing. Overriding company
+ *                       protection is meant to be a sustained, conscious act, not a twitch.
+ */
+{
+  const btn = el('up-activate') as HTMLButtonElement | null;
+  if (btn) {
+    const HOLD_MS = 1000;
+    let raf = 0;
+    let startedAt = 0;
+
+    const contact = () => {
+      const one = unitField?.selected()?.single;
+      return one && !PLATFORM_BY_ID.has(one.kind as PlatformId) ? one : null;
+    };
+
+    const stopHold = () => {
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+      btn.classList.remove('holding');
+      btn.style.removeProperty('--hold');
+    };
+
+    const commit = () => {
+      const one = contact();
+      stopHold();
+      if (one) activateDecision(one.index);
+    };
+
+    btn.addEventListener('pointerdown', (e) => {
+      // Only protected assets hold; everything else falls through to the click handler below.
+      if (btn.disabled || btn.dataset.hold !== '1' || !contact()) return;
+      e.preventDefault();
+      try { btn.setPointerCapture(e.pointerId); } catch {}
+      sound.play('click');
+      btn.classList.add('holding');
+      startedAt = performance.now();
+      const tick = (now: number) => {
+        const p = Math.min(1, (now - startedAt) / HOLD_MS);
+        btn.style.setProperty('--hold', String(p));
+        if (p >= 1) { raf = 0; commit(); return; }
+        raf = requestAnimationFrame(tick);
+      };
+      raf = requestAnimationFrame(tick);
+    });
+
+    const release = () => { if (raf) stopHold(); };
+    btn.addEventListener('pointerup', release);
+    btn.addEventListener('pointercancel', release);
+    btn.addEventListener('pointerleave', release);
+
+    btn.addEventListener('click', () => {
+      // Protected assets are committed by the hold, never the click that ends it.
+      if (btn.dataset.hold === '1') return;
+      const one = contact();
+      if (one) activateDecision(one.index);
+    });
+  }
+}
 el('up-close')?.addEventListener('click', () => {
   unitField?.deselect();
   hideUnitPanel();
@@ -4061,6 +4486,10 @@ if (import.meta.env.DEV) {
     get reactions() {
       return reactions;
     },
+    get actionMarks() {
+      return actionMarks;
+    },
+    markAction,
     get routes() {
       return routes;
     },

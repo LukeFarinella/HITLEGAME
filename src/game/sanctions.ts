@@ -33,8 +33,13 @@ export interface SanctionDef {
    * The thresholds belong to the CONTACT, not to the sanction — a protected asset is hard to touch
    * because of who they are, and that has to be true before any rung is picked. What a rung does is
    * demand more on top: the same 78% reading that comfortably justifies a citation is nowhere near
-   * enough to justify a killing, so EXECUTE adds forty points of demand to both bars and the ticks
-   * slide right past the fill. That slide is the argument the card is making.
+   * enough to justify a killing, so EXECUTE adds far more demand than a FINE and the ticks slide
+   * right past the fill. That slide is the argument the card is making.
+   *
+   * The public escalates HARDER than the chain here: for the same rung the street asks more than the
+   * contract does. A killing is a bureaucratic authorisation but a public spectacle, so the people
+   * watching demand the strongest case of all — see PUBLIC_STRICTNESS below for the baseline this
+   * sits on top of.
    */
   publicAdd: number;
   policyAdd: number;
@@ -80,8 +85,8 @@ export const SANCTIONS: SanctionDef[] = [
     id: 'fine',
     label: 'FINE',
     blurb: 'A citation against the live event. Revenue by volume, and the contact still has to pay a machine’s guess.',
-    publicAdd: 0.04,
-    policyAdd: 0.05,
+    publicAdd: 0.06,
+    policyAdd: 0.04,
     dispatch: false,
     capability: null,
     weight: 0.08,
@@ -91,8 +96,8 @@ export const SANCTIONS: SanctionDef[] = [
     id: 'detain',
     label: 'DETAIN',
     blurb: 'Field custody. Non-lethal, but it is the first power held over a person rather than a file.',
-    publicAdd: 0.14,
-    policyAdd: 0.18,
+    publicAdd: 0.2,
+    policyAdd: 0.14,
     dispatch: true,
     capability: 'detain',
     weight: 0.16,
@@ -104,28 +109,30 @@ export const SANCTIONS: SanctionDef[] = [
     id: 'prison',
     label: 'PRISON',
     blurb: 'Custody with a sentence attached, decided here and served without a hearing.',
-    publicAdd: 0.22,
-    policyAdd: 0.3,
+    publicAdd: 0.3,
+    policyAdd: 0.22,
     dispatch: true,
     capability: 'detain',
     weight: 0.26,
     terminal: true,
     // No tasking grants "sentencing" in so many words, and that is the point: it arrives inside
-    // DRAGNET, the mass-processing tasking, as an efficiency nobody voted for. Custody plus volume
+    // PROCESSING, the mass-processing tasking, as an efficiency nobody voted for. Custody plus volume
     // becomes custody with a term attached, and nothing in the chain marks the moment it happened.
-    requiresMission: 'dragnet',
+    requiresMission: 'prisoners',
   },
   {
     id: 'execute',
     label: 'EXECUTE',
     blurb: 'Lethal service on a probability score. There is no appeal and no way to learn you were wrong.',
-    publicAdd: 0.31,
-    policyAdd: 0.4,
+    publicAdd: 0.4,
+    policyAdd: 0.31,
     dispatch: true,
     capability: 'laser',
     weight: 0.42,
     terminal: true,
-    requiresMission: 'containment',
+    // Lethal authority is granted on clearing ENFORCE LOCKDOWN; CONTAINMENT is the first tasking
+    // scored on using it.
+    requiresMission: 'lockdown',
   },
 ];
 
@@ -166,9 +173,21 @@ const PROTECTED_PUBLIC_RELIEF = 0.18;
 /** How much of the raw climate figure carries into a contact's own bar. */
 const CLIMATE_WEIGHT = 0.72;
 
+/**
+ * The street is a harder audience than the contract.
+ *
+ * A baseline premium on the PUBLIC bar: for the same reading and the same rung, the public generally
+ * demands more evidence than the chain does. The bureaucracy will sign a thin case; the people
+ * watching it happen will not. This is the general rule, and it is why the public bar reads higher
+ * than the policy bar on an ordinary contact. The PROTECTED case deliberately inverts it — a company
+ * asset is popular to act on (public relief) and forbidden to act on (policy guard) — but that is the
+ * exception the premium exists to be measured against.
+ */
+const PUBLIC_STRICTNESS = 0.12;
+
 /** Evidence the PUBLIC needs to see before this rung passes without comment. */
 export function publicBar(s: SanctionDef, subj: Subject): number {
-  const base = (1 - tolerance.level) * CLIMATE_WEIGHT - (subj.protectedAsset ? PROTECTED_PUBLIC_RELIEF : 0);
+  const base = (1 - tolerance.level) * CLIMATE_WEIGHT + PUBLIC_STRICTNESS - (subj.protectedAsset ? PROTECTED_PUBLIC_RELIEF : 0);
   return clampBar(base + s.publicAdd);
 }
 

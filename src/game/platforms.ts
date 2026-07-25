@@ -50,6 +50,8 @@ export interface PlatformDef {
   requires?: PlatformId;
   /** Tasking that must be cleared before this can be bought at all. */
   requiresMission?: string;
+  /** Fork branch that must have been taken before this is offered — see Asset.requiresChoice. */
+  requiresChoice?: { mission: string; choice: string; label: string };
   /** Gear slots. Bigger platforms carry more. Shared across every unit of the type. */
   hardpoints: number;
   /** Base sensor disc radius, metres, before any gear. */
@@ -92,7 +94,7 @@ export const PLATFORMS: PlatformDef[] = [
     id: 'dog',
     name: 'KENNEL QUADRUPED',
     blurb:
-      'Four-legged walker at animal scale. Confined to the road network and barely quicker than the people it watches — the cheapest way to have eyes somewhere.',
+      'Four-legged walker at animal scale. Confined to the road network and no match for traffic — the cheapest way to have eyes somewhere.',
     cost: 2000,
     maxCount: 4,
     expansion: {
@@ -103,9 +105,9 @@ export const PLATFORMS: PlatformDef[] = [
     },
     hardpoints: 1,
     sensorM: BASE_SENSOR_M,
-    // Just faster than a foot contact (12 m/s) and far slower than traffic (80). It cannot chase
-    // anything; it can only be somewhere. That is the entire platform.
-    speed: 22,
+    // Well clear of a foot contact (12 m/s) but still short of traffic (80). It cannot chase
+    // anything down; it can only be somewhere. That is the entire platform.
+    speed: 44,
     altM: 0,
     roadBound: true,
     // The quadruped can take an attacker off a site bare-handed. It is the campaign's opening
@@ -115,7 +117,7 @@ export const PLATFORMS: PlatformDef[] = [
   },
   {
     id: 'quad',
-    requiresMission: 'trial',
+    requiresMission: 'canvass',
     name: 'KITE QUADCOPTER',
     blurb:
       'The quadruped’s aerial counterpart: the same sensor at the same modest pace, but it crosses rivers, rail and rooftops instead of driving around them.',
@@ -130,12 +132,12 @@ export const PLATFORMS: PlatformDef[] = [
     hardpoints: 1,
     sensorM: BASE_SENSOR_M,
     // Marginally quicker than the dog. What it is buying is not speed, it is the straight line.
-    speed: 30,
+    speed: 60,
     altM: 400,
   },
   {
     id: 'spider',
-    requiresMission: 'canvass',
+    requiresMission: 'custody',
     name: 'ARACHNID PURSUIT',
     blurb:
       'Six-legged walker at vehicle scale. Outruns everything on the road and goes where the road does not — the first platform that can actually chase a contact down.',
@@ -152,12 +154,12 @@ export const PLATFORMS: PlatformDef[] = [
     sensorM: BASE_SENSOR_M,
     // Comfortably faster than the traffic it moves through (ground vehicles run 80 m/s), and off
     // the graph entirely — this is the platform you buy when the dog could not get there in time.
-    speed: 130,
+    speed: 260,
     altM: 0,
   },
   {
     id: 'biped',
-    requiresMission: 'custody',
+    requiresMission: 'lockdown',
     name: 'MARSHAL BIPED',
     blurb:
       'Digitigrade two-legged walker, twice the mass of a ground vehicle. Fast enough to chase and armed enough to matter.',
@@ -171,12 +173,12 @@ export const PLATFORMS: PlatformDef[] = [
     },
     hardpoints: 2,
     sensorM: BASE_SENSOR_M,
-    speed: 70,
+    speed: 140,
     altM: 0,
   },
   {
     id: 'naval',
-    requiresMission: 'dragnet',
+    requiresMission: 'prisoners',
     name: 'LITTORAL DRONE',
     blurb:
       'Trimaran hull that works the coast and the crossings. The only platform that can hold station over water, where the ground platforms cannot follow.',
@@ -190,12 +192,12 @@ export const PLATFORMS: PlatformDef[] = [
     },
     hardpoints: 2,
     sensorM: BASE_SENSOR_M,
-    speed: 90,
+    speed: 180,
     altM: 0,
   },
   {
     id: 'interceptor',
-    requiresMission: 'attrition',
+    requiresMission: 'protect2',
     name: 'RAPTOR INTERCEPTOR',
     blurb:
       'Flying wing that dives on obelisk attackers without being tasked. Its strike is an area effect and it does not distinguish — everyone standing nearby is in it.',
@@ -209,12 +211,12 @@ export const PLATFORMS: PlatformDef[] = [
     },
     hardpoints: 1,
     sensorM: BASE_SENSOR_M,
-    speed: 620,
+    speed: 1240,
     altM: 2400,
   },
   {
     id: 'walker',
-    requiresMission: 'pressure',
+    requiresMission: 'attrition',
     name: 'COLOSSUS SIEGE WALKER',
     blurb:
       'Four-legged siege platform spanning several city blocks. Slow, enormous, and carries four hardpoints.',
@@ -222,12 +224,12 @@ export const PLATFORMS: PlatformDef[] = [
     maxCount: 1,
     hardpoints: 4,
     sensorM: BASE_SENSOR_M,
-    speed: 14,
+    speed: 28,
     altM: 0,
   },
   {
     id: 'drone',
-    requiresMission: 'consolidation',
+    requiresMission: 'quarantine',
     name: 'DISC OBSERVER',
     blurb:
       'High-altitude disc. The only airborne platform and the fastest thing on the board — it crosses a theater while a walker crosses a city.',
@@ -236,7 +238,7 @@ export const PLATFORMS: PlatformDef[] = [
     requires: 'walker',
     hardpoints: 2,
     sensorM: BASE_SENSOR_M,
-    speed: 1000,
+    speed: 2000,
     altM: 1800,
   },
 ];
@@ -258,21 +260,107 @@ export interface GearDef {
   requiresAuth?: 'detain' | 'execute';
   /** Tasking that must be cleared before this can be bought at all. */
   requiresMission?: string;
+  /** Fork branch that must have been taken before this is offered — see Asset.requiresChoice. */
+  requiresChoice?: { mission: string; choice: string; label: string };
+  /**
+   * Blast radius in metres for an AREA weapon (napalm, MOAB, the orbital laser). Metadata only for
+   * now — the lethal-service path still fires one shot at one contact. When area service lands, this
+   * is what it reads to sweep everyone in the ring, so the ladder is a real escalation and not four
+   * reskins of the same beam. The flag also lets the store say "AREA" on the ones that don't
+   * discriminate, which is the whole point of them.
+   */
+  areaM?: number;
 }
 
+/**
+ * The lethal-service capability is tagged `'laser'` for historical reasons — it predates there being
+ * more than one lethal weapon. Every weapon below that can KILL grants it (the machine gun, napalm,
+ * the orbital laser, the MOAB), and the EXECUTE rung asks for it by that name. Read it as "can carry
+ * out a killing", not "is literally a laser".
+ */
 export const GEAR: GearDef[] = [
+  // ---- non-lethal takedown (grant 'detain') ----
+  {
+    id: 'taser',
+    requiresMission: 'stopsearch',
+    name: 'TASER LANCE',
+    blurb:
+      'The lightest way to put a contact on the ground. Non-lethal, cheap, and fits the small platforms the heavier rig will not.',
+    cost: 3500,
+    grants: 'detain',
+    requiresAuth: 'detain',
+    fits: ['dog', 'quad', 'spider', 'biped'],
+  },
+  {
+    id: 'less-lethal',
+    requiresMission: 'defend',
+    name: 'LESS-LETHAL SUITE',
+    blurb:
+      'Gas, foam and stun over an area — clears a crowd off a site without killing it. Custody by volume rather than by contact.',
+    cost: 8000,
+    grants: 'detain',
+    requiresAuth: 'detain',
+    areaM: 60,
+    fits: ['spider', 'biped', 'walker', 'naval'],
+  },
+  // ---- lethal service (grant 'laser') ----
+  {
+    id: 'machine-gun',
+    requiresMission: 'containment',
+    name: 'AUTOCANNON',
+    blurb:
+      'Kinetic lethal service — the first weapon cleared to carry out an execution. Crude, cheap, and it does the job the beam does.',
+    cost: 8000,
+    grants: 'laser',
+    fits: ['dog', 'spider', 'biped', 'walker', 'naval', 'interceptor'],
+  },
   {
     id: 'laser',
-    requiresMission: 'containment',
+    requiresMission: 'sanction',
     name: 'DIRECTED ENERGY EMITTER',
-    blurb: 'Services contacts marked for execution that come inside the platform’s sensor envelope.',
-    cost: 9000,
+    blurb: 'Silent, precise lethal service inside the platform’s envelope. Cleaner than the autocannon, and it fits anything.',
+    cost: 12_000,
     grants: 'laser',
     fits: 'all',
   },
   {
+    id: 'napalm',
+    requiresMission: 'supply',
+    name: 'INCENDIARY POD',
+    blurb:
+      'Denies ground rather than reads it. Lethal over an area and does not distinguish — everyone in the ring is in it.',
+    cost: 16_000,
+    grants: 'laser',
+    areaM: 120,
+    fits: ['interceptor', 'walker', 'drone'],
+  },
+  {
+    id: 'orbital-laser',
+    requiresMission: 'terrorstrike',
+    name: 'ORBITAL LANCE',
+    blurb:
+      'Lethal service from above the atmosphere, on coordinates you confirm. Long reach, wide footprint, no platform in the theater required underneath it.',
+    cost: 24_000,
+    grants: 'laser',
+    areaM: 90,
+    fits: ['drone', 'interceptor'],
+  },
+  {
+    id: 'moab',
+    requiresMission: 'consolidation',
+    name: 'MASS ORDNANCE',
+    blurb: 'The largest thing the console can drop. Lethal across several blocks — a front, not a contact.',
+    cost: 40_000,
+    grants: 'laser',
+    areaM: 300,
+    fits: ['interceptor', 'walker', 'drone'],
+  },
+  // ---- sensor / support ----
+  {
     id: 'sensor-pod',
-    requiresMission: 'mandate',
+    // Rides the ADVANCED SENSOR RANGE branch of the mandate fork — taking TEMPORARY OBELISKS instead
+    // closes this off for the campaign.
+    requiresChoice: { mission: 'mandate', choice: 'sensor-range', label: 'ADVANCED SENSOR RANGE' },
     name: 'WIDE-APERTURE SENSOR POD',
     blurb: 'Widens the platform’s sensor envelope by 65%.',
     cost: 5500,

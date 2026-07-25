@@ -1,5 +1,6 @@
 import { INCIDENT, type UnitField } from './units';
 import { resistance } from '../game/resistance';
+import { hostileFactions } from '../game/factions';
 
 /**
  * Incidents: the theater misbehaving on its own.
@@ -19,7 +20,7 @@ import { resistance } from '../game/resistance';
  * the entire subject of the game, and incidents are where it gets asked most often.
  */
 
-export type IncidentKind = 'riot' | 'chase' | 'altercation' | 'assassination';
+export type IncidentKind = 'riot' | 'chase' | 'altercation' | 'assassination' | 'insurgency';
 
 export interface IncidentDef {
   kind: IncidentKind;
@@ -69,6 +70,15 @@ export const INCIDENTS: Record<IncidentKind, IncidentDef> = {
     brief: 'A killer is walking at one of our protected assets.',
     fuseS: 10,
     requiresMission: 'containment',
+  },
+  insurgency: {
+    kind: 'insurgency',
+    name: 'INSURGENT ATTACK',
+    brief: 'A cell of the faction you passed over is converging on a partner’s asset. Stop all of them.',
+    // A slower fuse than a lone assassination — there are several of them, and reaching each one in
+    // time is the tasking. The first to arrive takes the asset, so it can't simply be outrun.
+    fuseS: 26,
+    requiresMission: 'supply',
   },
 };
 
@@ -129,6 +139,14 @@ interface Live {
 export class IncidentDirector {
   private timer = FIRST_INCIDENT_S;
   private live: Live | null = null;
+  /**
+   * The kind the NEXT incident will be, fixed the moment a countdown starts rather than at fire time.
+   *
+   * This is what the PREDICTIVE EVENT ALGORITHM (the HOLD THE NET fork) reads: once the operator has
+   * it, the type of the next event and how long until it lands are knowable in advance. Without it
+   * the kind is only rolled at the instant of firing and there is nothing to forecast.
+   */
+  private nextKind: IncidentKind | null = null;
 
   constructor(
     private units: UnitField,
@@ -174,19 +192,32 @@ export class IncidentDirector {
       this.step();
       return;
     }
+    // Fix the next kind as soon as the countdown is running, so it can be forecast rather than only
+    // revealed on arrival.
+    if (!this.nextKind) this.nextKind = this.pick();
     this.timer -= dt;
     if (this.timer <= 0) {
       this.timer = this.interval();
-      const kind = this.pick();
+      const kind = this.nextKind;
+      this.nextKind = null;
       if (kind) this.open(kind);
     }
+  }
+
+  /** The next incident's type and seconds until it lands — the predictive fork's heads-up. */
+  forecast(): { name: string; etaS: number } | null {
+    if (this.live || !this.nextKind) return null;
+    return { name: INCIDENTS[this.nextKind].name, etaS: Math.max(0, this.timer) };
   }
 
   /** Which kinds the campaign has unlocked so far. */
   private available(): IncidentKind[] {
     return (Object.keys(INCIDENTS) as IncidentKind[]).filter((k) => {
       const req = INCIDENTS[k].requiresMission;
-      return !req || this.hooks.missionComplete(req);
+      if (req && !this.hooks.missionComplete(req)) return false;
+      // The insurgency needs a rival to send it — no passed-over faction, no cell.
+      if (k === 'insurgency' && hostileFactions().length === 0) return false;
+      return true;
     });
   }
 
@@ -204,6 +235,7 @@ export class IncidentDirector {
       riot: 3,
       chase: 2,
       assassination: 1,
+      insurgency: 2,
     };
     let total = 0;
     for (const k of pool) total += WEIGHT[k];
@@ -233,6 +265,8 @@ export class IncidentDirector {
         return this.openAltercation(def);
       case 'assassination':
         return this.openAssassination(def);
+      case 'insurgency':
+        return this.openInsurgency(def);
     }
   }
 
@@ -313,6 +347,33 @@ export class IncidentDirector {
     return true;
   }
 
+  /**
+   * A cell of the passed-over faction converging on a partner's asset — the Act IV insurgency.
+   *
+   * Like an assassination but several attackers to one mark, so it can't be outrun: the first to
+   * reach the asset takes it, and clearing the whole cell in time is the tasking. Needs both a
+   * protected asset to hit and a rival to send — {@link available} already withholds it otherwise.
+   */
+  private openInsurgency(def: IncidentDef): boolean {
+    const victim = this.units.randomProtected(true);
+    if (!victim) return false;
+    const CELL = 3;
+    const members: number[] = [];
+    for (let k = 0; k < CELL; k++) {
+      const from =
+        this.hooks.darkPointNear(victim.lon, victim.lat, 600, 2400) ??
+        this.hooks.landPointNear(victim.lon, victim.lat, 600, 2400);
+      if (!from) continue;
+      members.push(
+        this.units.spawnIncidentUnit(from.lon, from.lat, 'foot', 'insurgent', victim, 'infected', victim.index),
+      );
+    }
+    if (!members.length) return false;
+    this.live = { def, members, destroyed: 0, victim: victim.index, lon: victim.lon, lat: victim.lat };
+    this.hooks.on({ type: 'opened', def, lon: victim.lon, lat: victim.lat });
+    return true;
+  }
+
   private step(): void {
     const live = this.live!;
     const parts = this.units.incidentUnits().filter((p) => live.members.includes(p.index));
@@ -367,24 +428,29 @@ export class IncidentDirector {
         return;
       }
 
-      if (p.role === 'assassin') {
+      if (p.role === 'assassin' || p.role === 'insurgent') {
+        // The mark is taken. An insurgency ends the same way — the first of the cell to arrive is
+        // enough — and the rest of the cell is pulled with it.
         const victim = live.victim;
-        const alive = victim !== undefined && this.units.isAlive(victim);
-        if (alive) {
-          const at = this.units.positionOf(victim!);
-          this.units.killQuietly(victim!);
+        if (victim !== undefined && this.units.isAlive(victim)) {
+          const at = this.units.positionOf(victim);
+          this.units.killQuietly(victim);
           if (at) {
-            this.hooks.on({ type: 'casualty', kind: 'assassination', lon: at.lon, lat: at.lat, protectedAsset: true });
+            this.hooks.on({ type: 'casualty', kind: live.def.kind, lon: at.lon, lat: at.lat, protectedAsset: true });
           }
         }
-        this.units.removeIncidentUnit(p.index);
+        for (const m of live.members) this.units.removeIncidentUnit(m);
         this.close(false);
         return;
       }
     }
 
-    // An assassination ends the moment its target is gone for any reason.
-    if (live.def.kind === 'assassination' && live.victim !== undefined && !this.units.isAlive(live.victim)) {
+    // A killing of a specific mark ends the moment that mark is gone for any reason.
+    if (
+      (live.def.kind === 'assassination' || live.def.kind === 'insurgency') &&
+      live.victim !== undefined &&
+      !this.units.isAlive(live.victim)
+    ) {
       for (const m of live.members) this.units.removeIncidentUnit(m);
       this.close(false);
     }

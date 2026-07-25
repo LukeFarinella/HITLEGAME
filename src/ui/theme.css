@@ -234,7 +234,9 @@ body:has(#globe-ui) #hint { display: none; }
   position: absolute;
   top: calc(56px + env(safe-area-inset-top, 0px));
   right: calc(clamp(20px, 4vw, 44px) + 38px);
-  z-index: 80;
+  /* Above the title screen (z 400) too, so the audio settings are reachable from the menus — the
+     one place a player might want to turn the score down before they've even started. */
+  z-index: 500;
   pointer-events: auto;
   width: 32px; height: 32px;
   display: flex; align-items: center; justify-content: center;
@@ -249,6 +251,24 @@ body:has(#globe-ui) #hint { display: none; }
 #snd-toggle.muted { color: var(--gunmetal); }
 #snd-toggle:focus-visible { outline: 2px solid var(--steel); outline-offset: 2px; }
 @media (max-width: 500px) { #snd-toggle { right: calc(16px + 38px); } }
+
+/* Player-facing audio settings, dropped under the ♪ button. Reuses the .dev-* panel styling but
+   floats above the title screen (z 500) so music/volume can be set from the menus as well. */
+#audio-panel {
+  position: absolute;
+  top: calc(96px + env(safe-area-inset-top, 0px));
+  right: clamp(20px, 4vw, 44px);
+  z-index: 500;
+  width: 250px; pointer-events: auto;
+  border: 1px solid var(--gunmetal); border-top: 2px solid var(--steel);
+  background: rgba(11, 12, 14, .82); backdrop-filter: blur(8px);
+  font-family: var(--mono);
+  animation: up-in .16s ease-out;
+}
+#audio-panel[hidden] { display: none; }
+@media (max-width: 500px) {
+  #audio-panel { right: 12px; width: calc(100vw - 24px); max-width: 280px; }
+}
 
 #dev-toggle {
   position: absolute;
@@ -654,6 +674,8 @@ body:has(#globe-ui) #hint { display: none; }
 .up-row .v.state-infected { color: var(--warn); }
 .up-row .v.sensor-dark { color: var(--ash); }
 .up-row .v.sensor-tracked { color: var(--sel, #6FD3E8); }
+/* Coasting on the sensor net's short-term memory: still actionable, but the window is closing. */
+.up-row .v.sensor-grace { color: var(--warn); }
 /* Assessment bands, along the field's white → yellow ramp.
    SUSPECT used to be green. It can't be any more: green now means a contact is actively attacking
    something, and a card that says "SUSPECT" in the attacker colour is a card that will get somebody
@@ -692,6 +714,37 @@ body:has(#globe-ui) #hint { display: none; }
 .up-record li.sev-3 { color: #F2C13B; border-left-color: #F2C13B; }
 .up-record li.sev-4 { color: var(--red); border-left-color: var(--red); font-weight: 700; }
 .up-record li.clean { color: var(--ok); border-left-color: var(--ok); }
+/* Record withheld until PAST INFRACTIONS is unlocked (DRAGNET). */
+.up-record li.sealed { color: var(--ash); border-left-color: var(--warn); font-style: italic; }
+
+/* ===== DOSSIER =================================================================================
+   Fields the network releases a tasking at a time. Sealed rows read [SEALED] until the authority is
+   earned; SEARCH pulls the ones held behind a click, or a not-yet-earned field as overreach. */
+.up-mug.nocam {
+  display: flex; align-items: center; justify-content: center;
+  background: var(--graphite-2); border-style: dashed;
+}
+.up-nocam { font: 600 7.5px/1.35 var(--mono); letter-spacing: .12em; color: var(--ash); text-align: center; }
+
+.up-dossier { display: flex; flex-direction: column; gap: 5px; padding-top: 3px; }
+.up-dossier[hidden] { display: none; }
+.up-drow {
+  display: flex; justify-content: space-between; gap: 12px; align-items: baseline;
+  font-size: 11px; letter-spacing: .05em; text-transform: uppercase;
+}
+.up-drow .k { color: var(--ash); white-space: nowrap; }
+.up-drow .v { color: var(--bone); text-align: right; font-variant-numeric: tabular-nums; }
+.up-drow .v .dnote { font-style: normal; font-size: 8.5px; letter-spacing: .08em; color: var(--warn); margin-left: 4px; }
+.up-drow .sealed-v { color: var(--ash); font-style: italic; }
+.up-pull {
+  font: 600 8.5px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase;
+  color: var(--steel); background: var(--graphite-2); border: 1px solid var(--gunmetal);
+  padding: 3px 6px; cursor: pointer; pointer-events: auto;
+  transition: border-color .12s, color .12s;
+}
+.up-pull:hover { border-color: var(--steel); color: var(--bone); }
+.up-pull.overreach { color: var(--warn); border-color: rgba(217,160,56,.4); }
+.up-pull.overreach:hover { border-color: var(--warn); }
 
 /* mark (investigate) action */
 .up-actions { padding: 10px 12px; border-top: 1px solid var(--gunmetal); }
@@ -848,6 +901,17 @@ body:has(#globe-ui) #hint { display: none; }
 .c2-modal-actions { display: flex; gap: 9px; }
 .c2-modal-actions .c2-buy { flex: 1; }
 
+/* Mission-complete window: a quieter "continue" beside the primary "return to world map", and the
+   heads-up that a fork decision is waiting there. */
+.c2-buy.ghost { background: var(--graphite-2); border-color: var(--gunmetal); color: var(--steel); }
+.c2-buy.ghost:hover:not(:disabled) { border-color: var(--steel); color: var(--bone); background: var(--graphite); }
+.c2-modal.c2-complete { border-left-color: var(--ok); }
+.c2-modal.c2-complete .c2-modal-head .c2-glyph { color: var(--ok); }
+.c2-complete-fork {
+  color: var(--warn); border-top: 1px solid var(--gunmetal);
+  padding-top: 10px; margin-top: 4px; font-size: 10.5px; line-height: 1.5;
+}
+
 /* Automation threshold slider, shown on an owned auto-marking asset */
 .c2-autorow { display: flex; flex-direction: column; gap: 5px; padding-top: 4px; }
 .c2-autorow label {
@@ -876,43 +940,46 @@ body:has(#globe-ui) #hint { display: none; }
 /* ---------- fielded platform roster (theater, top left) ----------
    Platforms sit in different cities and are sub-pixel from altitude, so hunting for one on the map
    to click it is the wrong interaction. These cards are the handle. */
+/* A row of compact chips centred along the TOP — icon + a letter handle (A, B, C …) — so the fleet
+   is one glanceable strip rather than a column of cards down the side that covers the data panel. */
 #g-roster {
   position: absolute;
-  top: calc(104px + env(safe-area-inset-top, 0px));
-  left: clamp(20px, 4vw, 44px);
+  top: calc(58px + env(safe-area-inset-top, 0px));
+  left: 50%; transform: translateX(-50%);
   z-index: 62;
   pointer-events: auto;
-  display: flex; flex-direction: column; gap: 5px;
+  display: flex; flex-direction: row; flex-wrap: wrap; justify-content: center; gap: 5px;
+  max-width: min(720px, 70vw);
   font-family: var(--mono);
 }
 #g-roster[hidden] { display: none; }
-.gr-card {
-  display: flex; align-items: center; gap: 8px;
-  width: 158px; padding: 6px 9px;
-  pointer-events: auto; cursor: pointer; text-align: left;
+.gr-chip {
+  position: relative;
+  display: flex; align-items: center; gap: 5px;
+  padding: 4px 8px 4px 6px;
+  pointer-events: auto; cursor: pointer;
   background: rgba(11, 12, 14, .74); backdrop-filter: blur(6px);
-  border: 1px solid var(--gunmetal); border-left: 2px solid var(--red);
+  border: 1px solid var(--gunmetal); border-bottom: 2px solid var(--red);
   font-family: var(--mono);
 }
-.gr-card:hover { border-color: var(--red); background: rgba(30, 10, 8, .8); }
-.gr-card.selected { background: var(--red-deep); border-color: var(--red); }
-.gr-card:focus-visible { outline: 2px solid var(--red); outline-offset: 2px; }
+.gr-chip:hover { border-color: var(--red); background: rgba(30, 10, 8, .8); }
+.gr-chip.selected { background: var(--red-deep); border-color: var(--red); }
+.gr-chip:focus-visible { outline: 2px solid var(--red); outline-offset: 2px; }
 .gr-icon { display: flex; flex: none; }
-.gr-icon .c2-glyph { width: 17px; height: 17px; color: var(--red); }
-.gr-card.selected .gr-icon .c2-glyph { color: var(--bone); }
-.gr-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.gr-id { color: var(--bone); font-size: 10px; letter-spacing: .1em; }
-.gr-state { color: var(--ash); font-size: 8.5px; letter-spacing: .1em; }
-.gr-state.moving { color: var(--red); }
+.gr-icon .c2-glyph { width: 18px; height: 18px; color: var(--red); }
+.gr-chip.selected .gr-icon .c2-glyph { color: var(--bone); }
+.gr-letter { color: var(--bone); font-size: 11px; font-weight: 700; letter-spacing: .1em; }
+/* A small amber dot on any unit that's currently under a move order. */
+.gr-dot { width: 5px; height: 5px; border-radius: 50%; background: transparent; flex: none; }
+.gr-chip.moving .gr-dot { background: var(--warn); box-shadow: 0 0 4px var(--warn); }
 
 @media (max-width: 500px) {
-  /* On a phone the roster goes horizontal under the exit button and scrolls. */
+  /* On a phone the strip can scroll horizontally rather than wrap. */
   #g-roster {
-    top: calc(100px + env(safe-area-inset-top, 0px));
-    left: 12px; right: 12px;
-    flex-direction: row; overflow-x: auto; gap: 6px;
+    top: calc(96px + env(safe-area-inset-top, 0px));
+    max-width: calc(100vw - 24px);
+    flex-wrap: nowrap; overflow-x: auto; justify-content: flex-start;
   }
-  .gr-card { width: auto; flex: none; }
 }
 
 /* Resistance sits under tolerance — the two are a pair, so they share the stack and the type. */
@@ -1457,10 +1524,40 @@ body.dev-open #c2-tasking { display: none; }
  * 300px is the card's height budget (264px wide, and taller than it is wide once a portrait plate
  * and a charge sheet are in it) plus the gutter.
  */
-#g-roster {
-  max-height: calc(100vh - 104px - 300px);
-  overflow-y: auto;
+/* The roster is a wrapping top strip now, not a scrolling side column — no vertical budget to cap. */
+
+/* ===== PROCESS ACTIONS EDITOR ===================================================================
+   The operator's standing rules. Theater only, and only once a slot is released — a plain config
+   surface tucked bottom-left, out of the data panel's way. */
+#g-process { display: none; }
+.in-theater #g-process {
+  position: absolute;
+  /* Docked at the top, centred under the unit roster, so it never covers the data panels. */
+  top: calc(98px + env(safe-area-inset-top, 0px));
+  left: 50%; transform: translateX(-50%);
+  z-index: 60;
+  display: flex; flex-direction: column; gap: 5px;
+  max-width: min(560px, 80vw);
+  background: rgba(11, 12, 14, .82); backdrop-filter: blur(6px);
+  border: 1px solid var(--gunmetal); border-top: 2px solid var(--warn);
+  padding: 8px 10px;
+  font-family: var(--mono);
+  pointer-events: auto;
 }
+#g-process[hidden] { display: none !important; }
+.gp-head { font: 700 8.5px/1 var(--mono); letter-spacing: .22em; color: var(--warn); }
+.gp-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.gp-en { font-size: 12px; line-height: 1; color: var(--ash); background: none; border: none; cursor: pointer; padding: 0; pointer-events: auto; }
+.gp-row.on .gp-en { color: var(--warn); }
+.gp-name { font: 700 9px/1 var(--mono); letter-spacing: .12em; color: var(--steel); min-width: 20px; }
+.gp-k { font: 600 8px/1 var(--mono); letter-spacing: .12em; color: var(--ash); }
+.gp-k.arrow { color: var(--warn); font-size: 11px; }
+.gp-sel {
+  font: 500 9px/1 var(--mono); letter-spacing: .05em;
+  color: var(--bone); background: var(--graphite-2); border: 1px solid var(--gunmetal);
+  padding: 2px 4px; cursor: pointer; pointer-events: auto;
+}
+.gp-warn { font: 600 7.5px/1 var(--mono); letter-spacing: .1em; color: var(--red); }
 
 /* Below this the two rails plus the map no longer coexist: the store takes the screen and the
    tasking rail moves under it rather than over the top of it. */
@@ -1494,7 +1591,6 @@ body.dev-open #c2-tasking { display: none; }
   #g-cursor { display: none; }
   /* The unit card would sit on top of the tasking rail at this width — move it up and across. */
   #unit-panel { left: 12px; right: 12px; width: auto; bottom: auto; top: calc(140px + env(safe-area-inset-top, 0px)); }
-  #g-roster { max-height: 22vh; }
 }
 
 /* ===== INCIDENT ALERT ===========================================================================
@@ -1502,6 +1598,25 @@ body.dev-open #c2-tasking { display: none; }
    — a riot during a siege is a real situation — so this gets its own fixed slot rather than
    competing for one. Amber rather than red: the siege is an attack on us, an incident is the
    theater doing something to itself. */
+
+/* Live-violation alert pill — the STOP AND SEARCH fork's heads-up. Compact, top-right, click-to-snap. */
+#g-alert {
+  position: absolute;
+  top: calc(170px + env(safe-area-inset-top, 0px));
+  right: calc(clamp(20px, 4vw, 44px) + 42px);
+  z-index: 61;
+  pointer-events: auto; cursor: pointer;
+  display: flex; align-items: center; gap: 6px;
+  font-family: var(--mono);
+  border: 1px solid var(--warn); border-left: 2px solid var(--warn);
+  background: rgba(30, 22, 8, .82); backdrop-filter: blur(6px);
+  padding: 5px 9px;
+}
+#g-alert[hidden] { display: none; }
+#g-alert:hover { background: rgba(46, 34, 11, .9); }
+.ga-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 6px var(--warn); flex: none; }
+.ga-label { font: 700 8.5px/1 var(--mono); letter-spacing: .16em; color: var(--warn); }
+.ga-count { font: 700 11px/1 var(--mono); color: var(--bone); font-variant-numeric: tabular-nums; }
 
 #g-incident {
   position: absolute;
@@ -1519,6 +1634,8 @@ body.dev-open #c2-tasking { display: none; }
   animation: up-in .16s ease-out;
 }
 #g-incident[hidden] { display: none; }
+/* A forecast (predictive fork) rather than a live incident — quieter, and not yet a place to jump to. */
+#g-incident.forecast { opacity: .82; border-left-style: dashed; cursor: default; }
 #g-incident .gs-dot { background: var(--warn); }
 #g-incident #gi-brief { font-size: 9px; line-height: 1.4; text-align: right; }
 /* Time running out. The bar drains rather than fills, so this is the last stretch of it. */
@@ -1552,6 +1669,59 @@ body.dev-open #c2-tasking { display: none; }
   padding: 3px 5px;
 }
 .c2-row.mission.complete .c2-unlock { color: var(--ok); border-color: rgba(79,158,122,.4); }
+
+/* The authority a tasking grants keys warm (a new power), territory keys to the obelisk accent, and
+   the fork reads neutral until it's decided. */
+.c2-unlocks.authority .c2-unlock { color: var(--warn); border-color: rgba(217,160,56,.4); }
+.c2-unlocks.territory .c2-unlock { color: var(--steel); border-color: var(--gunmetal); letter-spacing: .1em; }
+.c2-unlocks.fork .c2-unlock.taken { color: var(--warn); border-color: rgba(217,160,56,.55); background: rgba(217,160,56,.08); }
+.c2-unlocks.fork .c2-unlock.foreclosed { opacity: .4; text-decoration: line-through; }
+
+/* ===== ACT DIVIDERS ============================================================================
+   The chain is now five acts. A thin header names each one, so the arc from citations to occupation
+   is legible in the list itself. */
+.c2-act-head {
+  display: flex; align-items: baseline; gap: 8px;
+  margin: 14px 0 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--gunmetal);
+}
+.c2-act-head:first-child { margin-top: 4px; }
+.c2-act-num { font: 700 9px/1 var(--mono); letter-spacing: .22em; color: var(--red); }
+.c2-act-title { font: 600 8.5px/1 var(--mono); letter-spacing: .18em; color: var(--ash); }
+
+/* ===== FORK · the permanent choice =============================================================
+   Surfaced above the active tasking the moment its mission clears, and held there until taken. An
+   exclusive, irreversible decision, so it reads as an alert rather than a menu item. */
+.c2-fork {
+  border: 1px solid var(--warn);
+  border-left: 2px solid var(--warn);
+  background: rgba(217,160,56,.06);
+  padding: 10px;
+  margin-bottom: 10px;
+}
+.c2-fork.kind-partner { border-color: var(--red); border-left-color: var(--red); background: rgba(226,58,46,.06); }
+.c2-fork-head {
+  display: flex; align-items: center; gap: 5px;
+  font: 700 9.5px/1 var(--mono); letter-spacing: .18em; color: var(--warn);
+}
+.c2-fork.kind-partner .c2-fork-head { color: var(--red); }
+.c2-fork-head svg { width: 11px; height: 11px; }
+.c2-fork-prompt { font: 400 11px/1.4 var(--mono); color: var(--steel); margin: 6px 0 8px; }
+.c2-fork-choices { display: flex; flex-direction: column; gap: 6px; }
+.c2-fork-choice {
+  display: flex; flex-direction: column; gap: 3px;
+  text-align: left; cursor: pointer;
+  padding: 8px 9px;
+  border: 1px solid var(--gunmetal);
+  background: var(--graphite-2);
+  transition: border-color .12s, background .12s;
+}
+.c2-fork-choice:hover { border-color: var(--warn); background: var(--graphite); }
+.c2-fork.kind-partner .c2-fork-choice:hover { border-color: var(--red); }
+.c2-fork-label { font: 700 10px/1 var(--mono); letter-spacing: .12em; color: var(--steel); }
+.c2-fork-blurb { font: 400 10px/1.35 var(--mono); color: var(--ash); }
+.c2-fork-bits { font: 600 8px/1.3 var(--mono); letter-spacing: .1em; color: var(--warn); margin-top: 2px; }
 
 /* ===== LIVE VIOLATION BLOCK =====================================================================
    The main thing an operator acts on, so it sits above the charge sheet and looks like an alert
@@ -1678,6 +1848,7 @@ body.dev-open #c2-tasking { display: none; }
 .up-consequence { font: 400 9.5px/1.45 var(--sans); color: var(--ash); }
 
 .up-activate {
+  position: relative; z-index: 0; overflow: hidden;
   width: 100%; pointer-events: auto; cursor: pointer;
   font-family: var(--mono); font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
   color: var(--bone); background: rgba(255, 255, 255, .05);
@@ -1689,6 +1860,20 @@ body.dev-open #c2-tasking { display: none; }
 .up-activate.lethal { color: var(--red); background: rgba(226, 58, 46, .1); border-color: rgba(226, 58, 46, .5); }
 .up-activate.lethal:hover:not(:disabled) { background: rgba(226, 58, 46, .22); border-color: var(--red); }
 .up-activate:disabled { color: var(--gunmetal); background: transparent; border-color: var(--gunmetal); cursor: not-allowed; }
+
+/* Protected-asset override: a single click won't do it. The operator must HOLD, and this bar sweeps
+   left-to-right over ~1s before the order commits — a conscious act, not a reflex. `--hold` (0→1) is
+   driven from JS each animation frame; the fill sits behind the label via z-index: -1. */
+.up-activate.hold { color: var(--warn); border-color: var(--warn); background: rgba(240, 179, 71, .06); }
+.up-activate.hold:hover:not(:disabled) { background: rgba(240, 179, 71, .12); border-color: var(--warn); }
+.up-activate.hold.lethal { color: var(--red); border-color: var(--red); background: rgba(226, 58, 46, .08); }
+.up-activate.holding { border-color: var(--bone); }
+.up-activate.hold.holding::after {
+  content: ''; position: absolute; inset: 0 auto 0 0; z-index: -1; pointer-events: none;
+  width: calc(var(--hold, 0) * 100%);
+  background: rgba(240, 179, 71, .30);
+}
+.up-activate.hold.lethal.holding::after { background: rgba(226, 58, 46, .38); }
 
 /* Header tag: PROTECTED ASSET, or a live incident role. Colour is set inline from the unit's own
    field tint, so the chip, the panel dot and the model on the map are one statement. */

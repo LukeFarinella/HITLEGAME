@@ -3,7 +3,7 @@
   "configurations": [
     {
       "name": "hitlgame",
-      "runtimeExecutable": "C:\\Program Files\\nodejs\\npm.cmd",
+      "runtimeExecutable": "C:\\PROGRA~1\\nodejs\\npm.cmd",
       "runtimeArgs": ["run", "dev"],
       "port": 5173
     }

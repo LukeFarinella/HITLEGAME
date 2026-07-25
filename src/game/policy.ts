@@ -8,9 +8,10 @@ import { slotKey, onSlotChange } from './saves';
  * authorized GORGON to do, and on how thin a case.
  *
  * They are deliberately allowed to disagree, because the disagreement is where the interesting
- * decisions live. Early on the public will forgive far more than the chain has licensed — nobody
- * minds a citation, and nobody has signed the paper that lets a contractor issue one. Late on it
- * inverts: the chain has granted lethal authority and the street has not agreed to be shot at.
+ * decisions live. As a rule the STREET is the harder audience — a killing is a bureaucratic
+ * authorisation but a public spectacle, so the people watching demand more than the contract does
+ * (see PUBLIC_STRICTNESS in game/sanctions.ts). The sharp exception is the PROTECTED asset, where it
+ * flips: the public is happy to see one touched and the chain forbids it outright.
  *
  * Like tolerance, this is a PRICE and never a wall. Acting outside policy is always permitted and
  * always costs: it hardens the ground the same way, and — unlike a public shortfall — it makes the

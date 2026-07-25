@@ -40,7 +40,7 @@ export class Store {
   private tokensEl: HTMLElement;
   private sitesEl: HTMLElement;
   private bodyEl: HTMLElement;
-  private tab: Tab = 'platforms';
+  private tab: Tab = 'territory';
   /** Which hardpoint slot has its gear menu open, if any. */
   private slotOpen: { id: PlatformId; slot: number } | null = null;
   /** Which territory block has its member states expanded. */
@@ -76,7 +76,11 @@ export class Store {
   // ---- rendering -------------------------------------------------------------------------------
 
   private render(): void {
-    this.tokensEl.textContent = fmt.format(progression.tokens);
+    // A boon fork's free-fitting credit rides alongside the balance, so the operator knows a gear can
+    // go on at no cost before they open a loadout.
+    const credits = progression.freeFittings;
+    this.tokensEl.textContent =
+      fmt.format(progression.tokens) + (credits > 0 ? `  ·  ${credits} FREE FIT${credits > 1 ? 'S' : ''}` : '');
     this.sitesEl.textContent = this.territory
       ? `${fmt.format(progression.activeObelisks(this.territory))} / ${fmt.format(this.territory.totalObelisks)}`
       : '—';
@@ -443,10 +447,16 @@ export class Store {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'c2-buy';
+    const gate = progression.territoryBlocker(s);
     if (!next) {
       btn.disabled = true;
       btn.classList.add('done');
       btn.textContent = 'FULLY PROLIFERATED';
+    } else if (gate) {
+      // The map opens a tasking at a time — a headline state can't be taken until DISTRICT CANVASS.
+      btn.disabled = true;
+      btn.classList.add('locked');
+      btn.textContent = gate;
     } else {
       const afford = progression.tokens >= next.cost;
       btn.disabled = !afford;
@@ -514,10 +524,16 @@ export class Store {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'c2-buy';
+    const gate = progression.regionBlocker(r);
     if (!next) {
       btn.disabled = true;
       btn.classList.add('done');
       btn.textContent = 'FULLY PROLIFERATED';
+    } else if (gate) {
+      // The blocks come last — nothing outside the headline states until PARTNER INFRASTRUCTURE.
+      btn.disabled = true;
+      btn.classList.add('locked');
+      btn.textContent = gate;
     } else {
       const afford = progression.tokens >= next.cost;
       btn.disabled = !afford;

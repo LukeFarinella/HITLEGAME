@@ -34,6 +34,9 @@
       <!-- Fielded platform roster, theater only. One card per commissioned unit, click to select. -->
       <div id="g-roster" hidden></div>
 
+      <!-- Process Actions: operator-authored auto-task rules, theater only. Built in src/ui/process.ts. -->
+      <div id="g-process" hidden></div>
+
       <!-- Command store: tabbed purchase panels, theater-select screen only.
            Rows are generated in src/ui/store.ts — this is just the shell. -->
       <div id="c2-store">
@@ -52,9 +55,9 @@
           </div>
         </div>
         <div class="c2-tabs">
-          <button class="c2-tab active" type="button" data-tab="platforms">PLATFORMS</button>
+          <button class="c2-tab active" type="button" data-tab="territory">TERRITORY</button>
+          <button class="c2-tab" type="button" data-tab="platforms">PLATFORMS</button>
           <button class="c2-tab" type="button" data-tab="assets">NETWORK</button>
-          <button class="c2-tab" type="button" data-tab="territory">TERRITORY</button>
         </div>
         <div class="c2-body" id="c2-body"></div>
       </div>
@@ -113,8 +116,31 @@
         <div class="gs-bar"><i id="gi-bar"></i></div>
       </div>
 
-      <!-- Audio toggle -->
-      <button id="snd-toggle" type="button" aria-label="Toggle sound" title="Toggle sound">♪</button>
+      <!-- Live-violation alert: shown when the alerting tech (STOP AND SEARCH fork) is chosen.
+           Click to snap the camera to the freshest event. -->
+      <button id="g-alert" type="button" hidden>
+        <span class="ga-dot"></span><span class="ga-label" id="ga-label">ALERTS</span><span class="ga-count" id="ga-count">0</span>
+      </button>
+
+      <!-- Audio settings (player-facing). The ♪ button opens this; music volume + SFX live here. -->
+      <button id="snd-toggle" type="button" aria-label="Audio settings" title="Audio">♪</button>
+      <div id="audio-panel" hidden>
+        <div class="dev-head">
+          <span class="dev-title">AUDIO</span>
+          <button class="dev-close" id="audio-close" type="button" aria-label="Close">✕</button>
+        </div>
+        <div class="dev-body">
+          <label class="dev-row" for="aud-music">
+            <span class="dev-k">Music <span class="dev-v" id="aud-music-val">—</span></span>
+            <input type="range" id="aud-music" min="0" max="100" step="1" value="55" />
+          </label>
+          <label class="dev-check" for="aud-sfx">
+            <input type="checkbox" id="aud-sfx" checked />
+            <span>Sound effects</span>
+          </label>
+          <p class="dev-note">Music plays across the menus and world map, and rests while you're in a theater.</p>
+        </div>
+      </div>
 
       <!-- Dev settings -->
       <button id="dev-toggle" type="button" aria-label="Dev settings" title="Dev settings">⚙</button>
@@ -237,6 +263,10 @@
           <span class="k">Past infractions</span>
           <ul id="up-charges"></ul>
         </div>
+        <!-- The dossier: fields the network unlocks a tasking at a time (home address through
+             biometrics). Sealed rows read [SEALED] until the authority is earned; SEARCH pulls the
+             ones held behind a click. Populated in gorgonGlobe.ts from game/dossier.ts. -->
+        <div class="up-dossier" id="up-dossier" hidden></div>
         <!-- Live accusation: what the net thinks this contact just did. When one is up, THIS is the
              figure a sanction is judged against — you are answering the event, not the person. -->
         <div class="up-live" id="up-live" hidden>

@@ -46,6 +46,13 @@ export interface Asset {
   requiresAuth?: 'detain' | 'execute';
   /** Tasking that must be cleared before this is offered at all. */
   requiresMission?: string;
+  /**
+   * A fork branch that must have been TAKEN before this is offered. This is how a tech fork's two
+   * halves stay exclusive: the airdrop rides the TEMPORARY OBELISKS branch, the sensor pod rides
+   * ADVANCED SENSOR RANGE, and taking one permanently closes the other. `label` names the branch so
+   * the store can say what a locked item is waiting on without importing the mission chain.
+   */
+  requiresChoice?: { mission: string; choice: string; label: string };
 }
 
 /**
@@ -64,7 +71,33 @@ export interface Asset {
  */
 export const AIRDROP_COST = 400;
 
+/** How much a fleet range/speed upgrade multiplies a platform's sensor reach and movement speed. */
+export const RANGE_SPEED_MULT = 1.3;
+
 export const ASSETS: Asset[] = [
+  {
+    id: 'up-ground-range',
+    requiresMission: 'mandate',
+    name: 'GROUND/WATER RANGE + SPEED',
+    blurb:
+      'A drivetrain and antenna refit for every legged and floating platform: +30% sensor reach and +30% speed across the ground and water fleet.',
+    cost: 6000,
+  },
+  {
+    id: 'up-air-range',
+    requiresMission: 'dragnet',
+    name: 'AIR RANGE + SPEED',
+    blurb: 'The same refit for the air fleet: +30% sensor reach and +30% speed on everything that flies.',
+    cost: 12_000,
+  },
+  {
+    id: 'orbital-platform',
+    requiresMission: 'pressure',
+    name: 'ORBITAL PLATFORM',
+    blurb:
+      'Persistent overhead presence over the whole theater. Every contact reads back and infection finds no dark ground to spread in — there is nowhere left it cannot see.',
+    cost: 90_000,
+  },
   {
     id: 'obelisk-uprate',
     requiresMission: 'trial',
@@ -82,7 +115,9 @@ export const ASSETS: Asset[] = [
   },
   {
     id: 'airdrop',
-    requiresMission: 'canvass',
+    // Rides the TEMPORARY OBELISKS branch of the mandate fork — taking ADVANCED SENSOR RANGE instead
+    // closes this off for the campaign.
+    requiresChoice: { mission: 'mandate', choice: 'temp-obelisks', label: 'TEMPORARY OBELISKS' },
     name: 'RAPID SITE DEPLOYMENT',
     blurb:
       'Drop a temporary obelisk anywhere in a theater for ' +
@@ -104,7 +139,7 @@ export const ASSETS: Asset[] = [
   },
   {
     id: 'auto-investigate',
-    requiresMission: 'quarantine',
+    requiresMission: 'sanction',
     name: 'AUTOMATED FLAGGING',
     blurb:
       'Flags contacts for investigation on its own, strongest case first, at the threshold you set.',
@@ -173,6 +208,8 @@ export interface Saved {
   homeState: string | null;
   /** Case-strength thresholds the marking automation works to, per order kind. */
   autoThresholds: Record<string, number>;
+  /** Unspent free-fitting credits from boon forks — each fits one gear at no cost. */
+  freeFittings?: number;
 }
 
 export class Progression {
@@ -190,6 +227,8 @@ export class Progression {
     ['investigate', 0.7],
     ['execute', 0.85],
   ]);
+  /** Free-fitting credits from boon forks — each covers one gear fitting's cost. */
+  private _freeFittings = 0;
   private listeners = new Set<() => void>();
 
   /**
@@ -207,6 +246,12 @@ export class Progression {
   private missionCheck: (id: string) => boolean = () => false;
   /** Display name for a tasking id, so a gated purchase can name what it waits on. */
   private missionNameOf: (id: string) => string = (id) => id;
+  /**
+   * Whether a specific fork branch was TAKEN. Injected like the two above — a forked item (the
+   * airdrop, the sensor pod) only unlocks on the branch that carries it, and the branch not taken
+   * stays closed for good.
+   */
+  private choiceCheck: (mission: string, choice: string) => boolean = () => false;
 
   constructor() {
     this.load();
@@ -228,10 +273,20 @@ export class Progression {
     this.missionNameOf = nameOf;
   }
 
+  setChoiceProvider(fn: (mission: string, choice: string) => boolean): void {
+    this.choiceCheck = fn;
+  }
+
   /** Name of the tasking a purchase is waiting on, or null if it isn't gated. */
   private missionGate(requires: string | undefined, nameOf: (id: string) => string): string | null {
     if (!requires || this.missionCheck(requires)) return null;
     return `REQUIRES ${nameOf(requires)}`;
+  }
+
+  /** The branch a purchase is waiting on, or null if it isn't fork-gated or the branch was taken. */
+  private choiceGate(req: { mission: string; choice: string; label: string } | undefined): string | null {
+    if (!req || this.choiceCheck(req.mission, req.choice)) return null;
+    return `REQUIRES ${req.label}`;
   }
 
   get tokens(): number {
@@ -262,6 +317,17 @@ export class Progression {
     }
     this.changed();
     return true;
+  }
+
+  /**
+   * Bring the home state to full PROLIFERATION — the trial's clearance payoff. The state you founded
+   * in opens at a single downtown site; clearing the opening tasking lights up its whole network at
+   * once, so the operator's own ground is fully covered before they start buying anywhere else.
+   */
+  proliferateHome(): void {
+    if (!this._homeState) return;
+    this.tiers.set(this._homeState, 3);
+    this.changed();
   }
 
   tierOf(state: StateTerritory | string): Tier {
@@ -331,6 +397,8 @@ export class Progression {
     }
     const gate = this.missionGate(a.requiresMission, this.missionNameOf);
     if (gate) return gate;
+    const choiceGate = this.choiceGate(a.requiresChoice);
+    if (choiceGate) return choiceGate;
     if (this._tokens < a.cost) return 'INSUFFICIENT FUNDING';
     return null;
   }
@@ -352,9 +420,33 @@ export class Progression {
     return null;
   }
 
+  /**
+   * Mission gates on ACQUIRING new ground.
+   *
+   * The map opens in stages, the way the design sheet lays it out: the ten headline economies come up
+   * for purchase on clearing the DISTRICT CANVASS, and the rest of the country — the blocks — on
+   * clearing PARTNER INFRASTRUCTURE. UPGRADING ground you already hold is never gated; the wall is
+   * only on taking somewhere new, so it bites once per territory and then never again.
+   */
+  private readonly HEADLINE_GATE = 'canvass';
+  private readonly REGION_GATE = 'protect2';
+
+  /** Why a headline state can't be taken yet, or null. Only bites on the first tier (acquisition). */
+  territoryBlocker(s: StateTerritory): string | null {
+    if (this.tierOf(s) > 0) return null;
+    return this.missionGate(this.HEADLINE_GATE, this.missionNameOf);
+  }
+
+  /** Why a block can't be taken yet, or null. Only bites on the first tier (acquisition). */
+  regionBlocker(r: Region): string | null {
+    if (this.tierOfRegion(r) > 0) return null;
+    return this.missionGate(this.REGION_GATE, this.missionNameOf);
+  }
+
   buyNextTier(s: StateTerritory): boolean {
     const next = this.nextTierCost(s);
     if (!next || this._tokens < next.cost) return false;
+    if (this.territoryBlocker(s)) return false;
     this._tokens -= next.cost;
     this.tiers.set(s.id, next.tier);
     this.changed();
@@ -403,6 +495,7 @@ export class Progression {
   buyRegionTier(r: Region): boolean {
     const next = this.nextRegionTier(r);
     if (!next || this._tokens < next.cost) return false;
+    if (this.regionBlocker(r)) return false;
     this._tokens -= next.cost;
     for (const s of r.states) {
       if (this.tierOf(s) < next.tier) this.tiers.set(s.id, next.tier);
@@ -487,6 +580,8 @@ export class Progression {
     }
     const gate = this.missionGate(def.requiresMission, this.missionNameOf);
     if (gate) return gate;
+    const choiceGate = this.choiceGate(def.requiresChoice);
+    if (choiceGate) return choiceGate;
     if (this._tokens < def.cost) return 'INSUFFICIENT FUNDING';
     return null;
   }
@@ -538,10 +633,25 @@ export class Progression {
     if (!gearFits(gear, id)) return 'INCOMPATIBLE';
     const gate = this.missionGate(gear.requiresMission, this.missionNameOf);
     if (gate) return gate;
+    const choiceGate = this.choiceGate(gear.requiresChoice);
+    if (choiceGate) return choiceGate;
     if (loadout.includes(gear.id)) return 'FITTED';
     if (!loadout.includes(null)) return 'NO FREE HARDPOINT';
-    if (this._tokens < gear.cost) return 'INSUFFICIENT FUNDING';
+    // A free-fitting credit covers the cost, so an operator with one can fit regardless of balance.
+    if (this._freeFittings <= 0 && this._tokens < gear.cost) return 'INSUFFICIENT FUNDING';
     return null;
+  }
+
+  /** Unspent free-fitting credits — a boon fork's "free upgrade", each good for one gear at no cost. */
+  get freeFittings(): number {
+    return this._freeFittings;
+  }
+
+  /** Grant free-fitting credits. Called when a boon fork's upgrade branch is taken. */
+  grantFreeFitting(n = 1): void {
+    if (n <= 0) return;
+    this._freeFittings += n;
+    this.changed();
   }
 
   /** Install gear into the platform's first free hardpoint. */
@@ -563,7 +673,9 @@ export class Progression {
     const blocker = this.gearBlocker(gear, id);
     if (blocker && blocker !== 'NO FREE HARDPOINT') return false;
     loadout[slot] = gear.id;
-    this._tokens -= gear.cost;
+    // A free-fitting credit is spent first, before tokens — that's what the boon fork bought.
+    if (this._freeFittings > 0) this._freeFittings--;
+    else this._tokens -= gear.cost;
     this.changed();
     return true;
   }
@@ -590,17 +702,51 @@ export class Progression {
     return loadout.some((g) => g && GEAR_BY_ID.get(g)?.grants === cap);
   }
 
+  /**
+   * The blast radius of the largest AREA weapon a platform carries, or 0 if it carries none.
+   *
+   * Read when an execution is serviced: a platform fitted with napalm/the orbital lance/the MOAB
+   * sweeps everyone in this radius, not just the target. Only lethal-service gear counts.
+   */
+  platformAreaM(id: PlatformId): number {
+    const loadout = this.loadouts.get(id);
+    if (!loadout) return 0;
+    let m = 0;
+    for (const g of loadout) {
+      const gd = g ? GEAR_BY_ID.get(g) : undefined;
+      if (gd?.grants === 'laser' && gd.areaM) m = Math.max(m, gd.areaM);
+    }
+    return m;
+  }
+
   /** Whether ANY owned platform carries a capability. */
   anyPlatformHas(cap: Capability): boolean {
     for (const id of this.loadouts.keys()) if (this.platformHas(id, cap)) return true;
     return false;
   }
 
-  /** A platform's effective sensor radius, with fitted gear applied. */
+  /**
+   * The range/speed fleet-upgrade multiplier for a platform, 1 or {@link RANGE_SPEED_MULT}.
+   *
+   * The upgrade is bought by DOMAIN, not per platform: a platform flies (altitude above ground) or it
+   * doesn't, and the two assets — AIR RANGE+SPEED and GROUND/WATER RANGE+SPEED — lift a whole fleet at
+   * once. Applied to both sensor reach (here) and movement speed (units.ts stepPlatform), so "range +
+   * speed" is one dial doing both.
+   */
+  classMult(id: PlatformId): number {
+    const def = PLATFORM_BY_ID.get(id);
+    if (!def) return 1;
+    const flies = def.altM > 0;
+    if (flies ? this.has('up-air-range') : this.has('up-ground-range')) return RANGE_SPEED_MULT;
+    return 1;
+  }
+
+  /** A platform's effective sensor radius, with fitted gear and the fleet range upgrade applied. */
   sensorRangeOf(id: PlatformId): number {
     const def = PLATFORM_BY_ID.get(id);
     if (!def) return 0;
-    return this.platformHas(id, 'wide-sensor') ? def.sensorM * WIDE_SENSOR_MULT : def.sensorM;
+    const base = this.platformHas(id, 'wide-sensor') ? def.sensorM * WIDE_SENSOR_MULT : def.sensorM;
+    return base * this.classMult(id);
   }
 
   // ---- automation ------------------------------------------------------------------------------
@@ -632,6 +778,7 @@ export class Progression {
       counts: Object.fromEntries(this.counts),
       homeState: this._homeState,
       autoThresholds: Object.fromEntries(this.autoThresholds),
+      freeFittings: this._freeFittings,
     };
   }
 
@@ -646,6 +793,7 @@ export class Progression {
     this.counts = new Map(Object.entries(snap.counts ?? {}) as [PlatformId, number][]);
     this._homeState = snap.homeState ?? null;
     for (const [k, v] of Object.entries(snap.autoThresholds ?? {})) this.autoThresholds.set(k, v);
+    this._freeFittings = snap.freeFittings ?? 0;
     this.changed();
   }
 
@@ -696,6 +844,7 @@ export class Progression {
     this.counts.clear();
     this.loadouts.clear();
     this.autoThresholds.clear();
+    this._freeFittings = 0;
   }
 
   private load(): void {
@@ -734,6 +883,7 @@ export class Progression {
       this.loadouts.set(id as PlatformId, slots);
     }
     this._homeState = saved.homeState ?? null;
+    this._freeFittings = saved.freeFittings ?? 0;
   }
 
   /** Wipe the campaign back to its opening position. Wired to the dev panel. */
@@ -747,6 +897,7 @@ export class Progression {
       ['investigate', 0.7],
       ['execute', 0.85],
     ]);
+    this._freeFittings = 0;
     // Back to the very beginning: no ground, no platform, and the start window again.
     this._homeState = null;
     this.changed();
