@@ -444,6 +444,52 @@ const INTERCEPTOR_HARDPOINT: Hardpoint = { x: 0, y: -11, z: 5 };
 /** Dorsal mount on the disc, just off the dome. */
 const DISC_HARDPOINT: Hardpoint = { x: 0, y: 0, z: 22 };
 
+// ---- RTS building meshes -----------------------------------------------------------------------
+//
+// Distinct low-poly silhouettes so the four facilities read apart at a glance, built up from z=0
+// (ground) like the unit meshes. Sized ~40-60 units; the build layer scales them to read at theater
+// zoom. Convention as above: x=right, y=forward, z=up.
+
+/** Data center: a long low server hall with a row of rooftop coolers — wide and squat. */
+export function dataCenterMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  m.box(0, 0, 11, 62, 40, 22); // main hall
+  for (const x of [-20, -7, 7, 20]) m.box(x, 6, 25, 8, 9, 6); // rooftop cooling units
+  m.box(0, -15, 9, 64, 6, 18); // side vent bank
+  return m.build();
+}
+
+/** Robotics factory: a boxy hangar with a ridged roof and a tall chimney. */
+export function roboticsMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  m.box(0, 0, 13, 50, 46, 26); // main hangar
+  for (const y of [-13, 0, 13]) m.box(0, y, 29, 50, 7, 8); // ridged roof
+  m.box(-18, -16, 34, 9, 9, 44); // chimney
+  return m.build();
+}
+
+/** Tech lab: a stepped ziggurat tower with an antenna mast — the tallest, most vertical shape. */
+export function techMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  m.box(0, 0, 9, 42, 42, 18); // base step
+  m.box(0, 0, 26, 30, 30, 18); // mid step
+  m.box(0, 0, 41, 18, 18, 14); // top step
+  m.box(0, 0, 58, 2.5, 2.5, 20); // antenna mast
+  return m.build();
+}
+
+/** Aviation hangar: a broad arched shed with a control tower off one corner. */
+export function aviationMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  m.box(0, 0, 11, 58, 48, 22); // hangar body
+  m.box(0, 0, 24, 52, 48, 8); // arched roof, stacked narrowing boxes
+  m.box(0, 0, 30, 40, 48, 8);
+  m.box(0, 0, 35, 26, 48, 6);
+  m.box(24, 17, 28, 12, 12, 46); // control tower
+  m.box(24, 17, 53, 16, 16, 6); // tower cab
+  return m.build();
+}
+
 export type UnitKind =
   | 'land'
   | 'sea'

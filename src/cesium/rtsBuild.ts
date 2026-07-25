@@ -1,5 +1,7 @@
 import * as Cesium from 'cesium';
 import type { RoadNet } from './roads';
+import { InstancedModelBatch } from './instancedModels';
+import { dataCenterMesh, roboticsMesh, techMesh, aviationMesh } from './unitModels';
 import {
   STRUCTURES,
   BUILD_RULES,
@@ -52,6 +54,20 @@ const FACILITY_GLYPH: Record<StructureType, string> = {
   tech: 'T',
   supply: 'D',
 };
+
+/** The facilities that render as a 3D building. Obelisks/the Nexus render as obelisk geometry. */
+type FacilityType = 'supply' | 'robotics' | 'tech' | 'aviation';
+const FACILITY_TYPES: FacilityType[] = ['supply', 'robotics', 'tech', 'aviation'];
+/** Built once at module load — one shared mesh per facility type. */
+const FACILITY_MESH: Record<FacilityType, ReturnType<typeof dataCenterMesh>> = {
+  supply: dataCenterMesh(),
+  robotics: roboticsMesh(),
+  tech: techMesh(),
+  aviation: aviationMesh(),
+};
+/** Per-type mesh scale so each building reads at theater zoom. */
+const FACILITY_SCALE: Record<FacilityType, number> = { supply: 2.4, robotics: 2.4, tech: 2.6, aviation: 2.4 };
+const isFacilityType = (t: StructureType): t is FacilityType => (FACILITY_TYPES as StructureType[]).includes(t);
 
 /**
  * A coarse spatial index of road vertices, so "is this point near a road" is a handful of cell
@@ -166,12 +182,34 @@ export class RtsBuildLayer {
   private roadGrid: RoadGrid;
   private ghostLine: Cesium.Polyline | undefined;
 
+  /** One instanced 3D-model batch per facility type — the buildings themselves. */
+  private facilityBatch: Record<FacilityType, InstancedModelBatch>;
+  /** Placed instances per type, kept so the batch can be re-written when one is added. */
+  private facilityList: Record<FacilityType, { lon: number; lat: number }[]> = {
+    supply: [],
+    robotics: [],
+    tech: [],
+    aviation: [],
+  };
+  /** The building batches, for the scene to add to / remove from the primitive collection. */
+  readonly meshBatches: InstancedModelBatch[];
+
   constructor(
     net: RoadNet | undefined,
     center: { lon: number; lat: number },
     private heightAt: (lon: number, lat: number) => number,
   ) {
     this.roadGrid = new RoadGrid(net, center.lat);
+    // A generous bounds so the buildings never cull inside the theater; culling here is a nicety,
+    // not a correctness concern.
+    const bounds = new Cesium.BoundingSphere(Cesium.Cartesian3.fromDegrees(center.lon, center.lat, 0), 500_000);
+    this.facilityBatch = {
+      supply: new InstancedModelBatch(FACILITY_MESH.supply, 24, bounds, false),
+      robotics: new InstancedModelBatch(FACILITY_MESH.robotics, 24, bounds, false),
+      tech: new InstancedModelBatch(FACILITY_MESH.tech, 24, bounds, false),
+      aviation: new InstancedModelBatch(FACILITY_MESH.aviation, 24, bounds, false),
+    };
+    this.meshBatches = FACILITY_TYPES.map((t) => this.facilityBatch[t]);
   }
 
   /** Redraw the dim "you may build an obelisk here" dots, excluding sites already built on. */
@@ -192,7 +230,7 @@ export class RtsBuildLayer {
     }
   }
 
-  /** Draw a facility: a footprint ring plus a glyph billboard standing over it. */
+  /** Draw a facility: the 3D building, a footprint ring, and an overview icon for when it's tiny. */
   addFacility(s: Structure): void {
     const def = STRUCTURES[s.type];
     const h = this.heightAt(s.lon, s.lat);
@@ -202,14 +240,34 @@ export class RtsBuildLayer {
       width: 2,
       material: Cesium.Material.fromType('Color', { color: color.withAlpha(0.8) }),
     });
+    // The building itself — a lit 3D model, coloured by type.
+    if (isFacilityType(s.type)) {
+      this.facilityList[s.type].push({ lon: s.lon, lat: s.lat });
+      this.rewriteFacilityBatch(s.type);
+    }
+    // A 24 px icon, but ONLY once the building has gone small at the overview — up close the mesh
+    // speaks for itself.
     this.icons.add({
-      position: Cesium.Cartesian3.fromDegrees(s.lon, s.lat, h + 220),
+      position: Cesium.Cartesian3.fromDegrees(s.lon, s.lat, h + 260),
       image: facilityTexture(s.type),
-      width: 34,
-      height: 34,
+      width: 30,
+      height: 30,
       verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+      distanceDisplayCondition: new Cesium.DistanceDisplayCondition(12_000, Number.MAX_VALUE),
       disableDepthTestDistance: 1e12,
     });
+  }
+
+  /** Re-upload one facility type's instances after a build. Buildings are static, so this is rare. */
+  private rewriteFacilityBatch(ft: FacilityType): void {
+    const batch = this.facilityBatch[ft];
+    const color = Cesium.Color.fromCssColorString(FACILITY_COLOR[ft]);
+    batch.beginFrame();
+    for (const inst of this.facilityList[ft]) {
+      const world = Cesium.Cartesian3.fromDegrees(inst.lon, inst.lat, this.heightAt(inst.lon, inst.lat));
+      batch.setInstance(world, 0, FACILITY_SCALE[ft], color);
+    }
+    batch.endFrame();
   }
 
   /** Show the placement preview at a point, tinted by whether the spot is legal. */

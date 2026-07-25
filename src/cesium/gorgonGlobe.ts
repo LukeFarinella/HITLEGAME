@@ -2143,6 +2143,7 @@ function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
   scene.primitives.add(rtsBuild.ghost);
   scene.primitives.add(rtsBuild.rallyDots);
   scene.primitives.add(rtsBuild.construction);
+  for (const b of rtsBuild.meshBatches) scene.primitives.add(b); // 3D building models
   rtsSitesAllOpen = false;
   rtsConstruction = [];
   rtsBuild.setSites(rtsSites, rtsBuiltSites);
@@ -2193,6 +2194,7 @@ function teardownRtsBuild(): void {
     scene.primitives.remove(rtsBuild.ghost);
     scene.primitives.remove(rtsBuild.rallyDots);
     scene.primitives.remove(rtsBuild.construction);
+    for (const b of rtsBuild.meshBatches) scene.primitives.remove(b);
     rtsBuild = null;
   }
   rtsConstruction = [];
