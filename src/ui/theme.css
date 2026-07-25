@@ -1196,7 +1196,19 @@ body:has(#globe-ui) #hint { display: none; }
   color: var(--ash);
 }
 
-.gt-actions { margin-top: 34px; }
+.gt-actions { margin-top: 34px; display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+
+/* The RTS entry sits beside START in a cooler steel so the two game modes read as siblings, not a
+   primary and a secondary. */
+.gt-rts {
+  border-color: var(--gunmetal);
+  background: linear-gradient(180deg, rgba(120, 140, 170, .16), rgba(120, 140, 170, .05));
+}
+.gt-rts:hover {
+  border-color: var(--steel);
+  background: linear-gradient(180deg, rgba(120, 140, 170, .3), rgba(120, 140, 170, .1));
+  box-shadow: 0 0 26px rgba(120, 140, 170, .35);
+}
 
 .gt-start {
   appearance: none;
@@ -1560,6 +1572,20 @@ body.dev-open #c2-tasking { display: none; }
 /* The warning drops onto its own line under the rule (the row wraps) so a longer "no weapon" note
    reads as a full sentence rather than being crushed against the action select. */
 .gp-warn { flex-basis: 100%; font: 600 7.5px/1.3 var(--mono); letter-spacing: .1em; color: var(--red); }
+
+/* ===== RTS MATCH HUD ============================================================================
+   The skirmish economy readout, top-centre in a theater. Money against its cap, plus the obelisk
+   count that scales both income and cap. Steel rather than red — this is your resource line, not an
+   alert. */
+#g-rts {
+  position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+  font-family: var(--mono); text-align: center; pointer-events: none; z-index: 20;
+}
+.grts-res { display: flex; align-items: baseline; gap: 6px; justify-content: center; }
+.grts-glyph { color: var(--warn); font-size: 13px; }
+.grts-money { font: 700 22px/1 var(--mono); color: var(--bone); letter-spacing: .04em; }
+.grts-cap { font: 500 12px/1 var(--mono); color: var(--ash); }
+.grts-sub { margin-top: 3px; font: 600 8.5px/1 var(--mono); letter-spacing: .16em; color: var(--steel); }
 
 /* Below this the two rails plus the map no longer coexist: the store takes the screen and the
    tasking rail moves under it rather than over the top of it. */

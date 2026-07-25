@@ -50,6 +50,7 @@ import { MissionPanel, showMissionComplete, presentPendingForks } from '../ui/mi
 import { ProcessPanel } from '../ui/process';
 import { showStartWindow } from '../ui/start';
 import { showTitle, setTitleTerritory } from '../ui/title';
+import { RtsGame } from '../game/rts/rtsGame';
 import { showLoading, setStage, hideLoading } from '../ui/loading';
 import { setActiveSlot, migrateLegacySave } from '../game/saves';
 import { LaserBeams } from './lasers';
@@ -695,6 +696,13 @@ function siegeApex(local: number): Cesium.Cartesian3 | undefined {
  * Falls back to the centre if a theater is too sparse to have distinguishable cities.
  */
 function platformStations(center: { lon: number; lat: number }, map: TheaterMap) {
+  // An RTS match ignores campaign ownership entirely: it opens with exactly one dog, stationed on
+  // the Nexus, and everything else is built in-match. (Production spawns later units at their
+  // facility — this only seeds the opening.)
+  if (rtsGame && obelisks) {
+    const i = rtsGame.nexusIndex;
+    return [{ id: 'dog' as PlatformId, lon: obelisks.lon[i], lat: obelisks.lat[i] }];
+  }
   // One entry per fielded UNIT, so four arachnids get four different cities rather than one.
   const units = progression.fieldedUnits();
   const sites = theaterSiteLonLat;
@@ -759,14 +767,23 @@ function addUnits(center: { lon: number; lat: number }, map: TheaterMap, net: Ro
   scene.primitives.add(field.marksLayer); // investigate + execution markers
   scene.primitives.add(field.droneRing); // platform sensor footprints
   scene.primitives.add(field.platformIcons); // 24 px markers, shown when zoomed out
-  field.toleranceOverride = progression.has('emergency-powers');
-  field.autoPatrol = {
-    ground: missions.hasChosen('dragnet', 'patrol-ground'),
-    air: missions.hasChosen('dragnet', 'patrol-air'),
-  };
-  field.hvtDesignate = missions.hasChosen('defend', 'hvt');
-  seedHiddenPockets(field);
-  seedStarterTarget(field);
+  // An RTS match runs none of the campaign's surveillance rules — no tolerance gate, no auto-patrol
+  // forks, no infected pockets or starter target. Its enemy is Millstone (a later phase), not the
+  // ambient contagion, so the field is set to a clean, fully-orderable baseline.
+  if (rtsGame) {
+    field.toleranceOverride = true;
+    field.autoPatrol = { ground: false, air: false };
+    field.hvtDesignate = false;
+  } else {
+    field.toleranceOverride = progression.has('emergency-powers');
+    field.autoPatrol = {
+      ground: missions.hasChosen('dragnet', 'patrol-ground'),
+      air: missions.hasChosen('dragnet', 'patrol-air'),
+    };
+    field.hvtDesignate = missions.hasChosen('defend', 'hvt');
+    seedHiddenPockets(field);
+    seedStarterTarget(field);
+  }
   deliveryTimer = DELIVERY_INTERVAL_S;
   unitField = field;
   lasers = new LaserBeams();
@@ -797,8 +814,12 @@ function addUnits(center: { lon: number; lat: number }, map: TheaterMap, net: Ro
   // The round landing is what puts the mark down, so the two read as one event.
   cuffs.onLand = (at) => impacts?.at(at, 110, 0.55, 14);
   scene.primitives.add(cuffs.collection);
-  startSiege(field);
-  startIncidents(field);
+  // The campaign's obelisk siege and incident directors don't run in an RTS match — Millstone (a
+  // later phase) is the RTS threat, and it builds and attacks on its own director.
+  if (!rtsGame) {
+    startSiege(field);
+    startIncidents(field);
+  }
   updateUnitHud();
 }
 
@@ -1225,34 +1246,49 @@ scene.preUpdate.addEventListener(() => {
       sensorField.updateThreat(inf.buf, inf.count); // lights up obelisks that see an infected
     }
     unitField.render(sensorField); // out-of-range units drawn faint
-    // Orders age first: an investigation that commits this frame goes on the ledger, and an
-    // execution that commits becomes eligible for the laser pass immediately below.
-    const committed = unitField.advanceOrders(dt);
-    if (committed.length) sound.play('commit');
-    for (const c of committed) {
-      missions.report('investigate', c.valid);
-      markAction(c.lon, c.lat, 'investigate');
-      reactAt(c.lon, c.lat, c.valid ? 'approve' : 'dismay');
-    }
-    resolveExecutions();
+    // Arrivals resolve in both modes — it's how a move (or, later, an attack) order completes.
     resolveArrivals(dt);
-    updateScanBeams(dt);
-    updateSiegeSparks(dt);
-    runLiveViolations(dt);
-    updatePings(dt);
-    runAutoMarking(dt);
-    runProcessActions(dt);
-    runDelivery(dt);
-    runAssetGoodwill(dt);
-    siege?.update(dt);
-    incidents?.update(dt);
-    updateSiegeHud();
-    updateIncidentHud();
-    updateAlertHud();
-    rebuildRoster();
-    refreshRoster();
-    updateRouteLayer();
-    updateUnitPanel(); // keep the selection panel + reticle tracking the live unit
+
+    if (rtsGame) {
+      // RTS frame: the economy ticks and the selection/route UI tracks the units. NONE of the
+      // surveillance subsystems (violations, marking, process actions, siege, incidents) run — an
+      // RTS match is a different game that only borrows the scene.
+      rtsGame.tick(dt, countLiveObelisks());
+      updateRtsHud();
+      rebuildRoster();
+      refreshRoster();
+      updateRouteLayer();
+      updateUnitPanel();
+    } else {
+      // Campaign frame: the full surveillance loop.
+      // Orders age first: an investigation that commits this frame goes on the ledger, and an
+      // execution that commits becomes eligible for the laser pass immediately below.
+      const committed = unitField.advanceOrders(dt);
+      if (committed.length) sound.play('commit');
+      for (const c of committed) {
+        missions.report('investigate', c.valid);
+        markAction(c.lon, c.lat, 'investigate');
+        reactAt(c.lon, c.lat, c.valid ? 'approve' : 'dismay');
+      }
+      resolveExecutions();
+      updateScanBeams(dt);
+      updateSiegeSparks(dt);
+      runLiveViolations(dt);
+      updatePings(dt);
+      runAutoMarking(dt);
+      runProcessActions(dt);
+      runDelivery(dt);
+      runAssetGoodwill(dt);
+      siege?.update(dt);
+      incidents?.update(dt);
+      updateSiegeHud();
+      updateIncidentHud();
+      updateAlertHud();
+      rebuildRoster();
+      refreshRoster();
+      updateRouteLayer();
+      updateUnitPanel(); // keep the selection panel + reticle tracking the live unit
+    }
   }
   lasers?.update(dt);
   reactions?.update(dt);
@@ -1977,6 +2013,85 @@ async function openCampaign(slot: number): Promise<void> {
   presentPendingForks();
 }
 
+// ---- RTS skirmish ------------------------------------------------------------------------------
+//
+// A separate game that reuses the theater scene. It does not touch the campaign singletons — no slot
+// is opened, progression/missions are left where they sit — so an RTS match and a campaign never
+// bleed into each other. Everything RTS-specific hangs off the `rtsGame` flag.
+
+/** Washington's FIPS. The skirmish always deploys here, the way the design sheet asks. */
+const RTS_HOME_FIPS = '53';
+
+/**
+ * Start (or restart) an RTS skirmish over Washington.
+ *
+ * Resolves Washington's downtown obelisk as the Nexus, masks the theater down to that single site,
+ * and enters the theater. buildTheater then stands up the mesh, the lone obelisk and the opening dog
+ * (see platformStations / addUnits, which branch on `rtsGame`), and the economy tick begins.
+ */
+async function startRtsMatch(): Promise<void> {
+  showLoading({ title: 'RTS SKIRMISH', subtitle: 'DEPLOYING TO WASHINGTON' });
+  setStage('SURVEYING GROUND');
+  await worldReady;
+  const wa = territory?.byId.get(RTS_HOME_FIPS);
+  if (!obelisks || !wa) {
+    hideLoading();
+    toast('◈ WASHINGTON SURVEY UNAVAILABLE');
+    bootTitle();
+    return;
+  }
+  const nexusIndex = wa.downtown;
+  rtsGame = new RtsGame(nexusIndex);
+
+  // The match opens with the Nexus alone live; every other obelisk site in the theater is a build
+  // slot the player fills later. Setting the mask directly bypasses the campaign ownership model
+  // entirely — there is no progression behind an RTS game.
+  obeliskMask = new Uint8Array(obelisks.count);
+  obeliskMask[nexusIndex] = 1;
+  fallenObelisks = new Set();
+  sensorRangeM = SENSOR_RANGE_BASE;
+  for (const p of PLATFORMS) PLATFORM_SENSOR[p.id] = PLATFORM_BY_ID.get(p.id)?.sensorM ?? BASE_SENSOR_M;
+
+  el('g-rts')?.removeAttribute('hidden');
+  updateRtsHud();
+
+  // enterTheater sets mode='theater', flies the camera and kicks buildTheater (which owns its own
+  // loading screen), so hand the overlay off to it.
+  hideLoading();
+  enterTheater(Cesium.Cartographic.fromDegrees(obelisks.lon[nexusIndex], obelisks.lat[nexusIndex]));
+}
+
+/** End the current RTS match and return to the title screen. */
+function endRtsMatch(): void {
+  if (!rtsGame) return;
+  // Tear the theater down the normal way, then clear RTS state and re-show the menu.
+  if (mode === 'theater') exitTheater();
+  rtsGame = null;
+  obeliskMask = undefined;
+  el('g-rts')?.setAttribute('hidden', '');
+  // exitTheater flew the camera to the world map; pull straight back to the title instead.
+  hideUnitPanel();
+  bootTitle();
+}
+
+/** Push the RTS economy numbers into the match HUD. Cheap; called on every economy change. */
+function updateRtsHud(): void {
+  if (!rtsGame) return;
+  const obeliskCount = territory ? countLiveObelisks() : 1;
+  setText('grts-money', rtsGame.money.toLocaleString('en-US'));
+  setText('grts-cap', `/ ${rtsGame.cap(obeliskCount).toLocaleString('en-US')}`);
+  setText('grts-obelisks', String(obeliskCount));
+}
+
+/** How many obelisks the match currently fields — the mask minus anything fallen. */
+function countLiveObelisks(): number {
+  const mask = liveObeliskMask();
+  if (!mask) return 0;
+  let n = 0;
+  for (let i = 0; i < mask.length; i++) n += mask[i];
+  return n;
+}
+
 /**
  * Resolve after the next paint — or after a short timeout, whichever lands first.
  *
@@ -2017,7 +2132,10 @@ function bootTitle(): void {
   // The score belongs to the menus and the world map — bring it up as the title goes on. (The first
   // fadeIn before any click is blocked by autoplay policy; music.ts starts it on the first gesture.)
   music.fadeIn();
-  showTitle({ onPlay: (slot) => void openCampaign(slot) });
+  showTitle({
+    onPlay: (slot) => void openCampaign(slot),
+    onPlayRts: () => void startRtsMatch(),
+  });
 }
 
 migrateLegacySave();
@@ -3207,6 +3325,14 @@ function restoreGlobeControls() {
 // ---- mode + chrome ----
 type Mode = 'globe' | 'theater';
 let mode: Mode = 'globe';
+
+/**
+ * The active RTS match, or null in the surveillance campaign. An RTS game runs UNDER `mode='theater'`
+ * so it inherits every theater input, movement and render path for free — this flag is what the
+ * handful of RULE differences branch on (Nexus-only obelisks, an economy tick, no siege/incident
+ * director, an RTS money HUD instead of the mission chrome). See src/game/rts/rtsGame.ts.
+ */
+let rtsGame: RtsGame | null = null;
 let theaterCenter: { lon: number; lat: number } | null = null;
 
 // Function declarations (not const arrows): these are called during module evaluation by the
@@ -4012,7 +4138,9 @@ window.addEventListener('blur', () => {
   shiftHeld = false;
 });
 
-el('g-exit')?.addEventListener('click', exitTheater);
+// In a campaign this is "back to the world map"; in an RTS match there is no world map, so it ends
+// the skirmish and returns to the title.
+el('g-exit')?.addEventListener('click', () => (rtsGame ? endRtsMatch() : exitTheater()));
 
 // The siege alert is a jump-to: an attack you can't see is one you can't do anything about.
 el('g-incident')?.addEventListener('click', () => {
@@ -4480,7 +4608,7 @@ el('up-mark')?.addEventListener('click', () => {
 });
 
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') exitTheater();
+  if (e.key === 'Escape') rtsGame ? endRtsMatch() : exitTheater();
   // I cycles the infection: spread it to more units so the red state is easy to watch, then reset.
   if ((e.key === 'i' || e.key === 'I') && mode === 'theater' && unitField) {
     unitField.cycleInfection();

@@ -21,6 +21,8 @@ const fmt = new Intl.NumberFormat('en-US');
 export interface TitleHooks {
   /** A slot was opened. The campaign has been loaded by the time this fires. */
   onPlay(slot: number, summary: SlotSummary): void;
+  /** The RTS skirmish was chosen — a separate game entirely, no campaign slot involved. */
+  onPlayRts(): void;
 }
 
 let hooks: TitleHooks | null = null;
@@ -59,7 +61,10 @@ export function showTitle(h: TitleHooks): void {
     `<div class="gt-sub">// SENTINEL C2</div>` +
     `<p class="gt-blurb">A private contractor has been retained to identify threats inside the ` +
     `civilian population. You are the operator. Everything you do here is on the record.</p>` +
-    `<div class="gt-actions"><button type="button" class="gt-start" id="gt-start">START</button></div>` +
+    `<div class="gt-actions">` +
+    `<button type="button" class="gt-start" id="gt-start">START</button>` +
+    `<button type="button" class="gt-start gt-rts" id="gt-rts">RTS GAME</button>` +
+    `</div>` +
     `<div class="gt-slots" id="gt-slots" hidden></div>` +
     `</div>` +
     `<div class="gt-foot">PROTOTYPE BUILD · NO REAL PERSONS ARE DEPICTED</div>`;
@@ -67,13 +72,21 @@ export function showTitle(h: TitleHooks): void {
 
   document.getElementById('gt-start')?.addEventListener('click', () => {
     sound.play('enter');
-    const start = document.getElementById('gt-start');
+    const actions = document.querySelector('.gt-actions');
     const slots = document.getElementById('gt-slots');
-    if (!start || !slots) return;
-    // The START button becomes the heading for the slot list rather than lingering above it.
-    start.remove();
+    if (!actions || !slots) return;
+    // The action buttons become the heading for the slot list rather than lingering above it.
+    actions.remove();
     slots.hidden = false;
     renderSlots();
+  });
+
+  // RTS skirmish: no slot picker, no campaign. Straight into a match — the scene resolves Washington,
+  // stands up the Nexus and the opening dog, and starts the economy.
+  document.getElementById('gt-rts')?.addEventListener('click', () => {
+    sound.play('enter');
+    document.getElementById('g-title-screen')?.remove();
+    hooks?.onPlayRts();
   });
 }
 

@@ -76,6 +76,17 @@
       <!-- Transient notice (e.g. clicking ground you don't hold) -->
       <div id="g-toast" hidden></div>
 
+      <!-- RTS match HUD: the skirmish economy. Only shown during an RTS game, driven by
+           src/game/rts/rtsGame.ts via the scene. -->
+      <div id="g-rts" hidden>
+        <div class="grts-res">
+          <span class="grts-glyph">◈</span>
+          <span class="grts-money" id="grts-money">0</span>
+          <span class="grts-cap" id="grts-cap">/ 0</span>
+        </div>
+        <div class="grts-sub"><span id="grts-obelisks">1</span> OBELISKS · <span id="grts-mode">RTS SKIRMISH</span></div>
+      </div>
+
       <!-- Active tasking reminder, theater only. The full panel lives on the select screen; in a
            theater you just need to know what you're being scored on and how close the ceiling is. -->
       <div id="g-tasking" hidden>
