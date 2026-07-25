@@ -95,6 +95,29 @@ export class RtsGame {
     return s;
   }
 
+  /**
+   * A structure has fallen. Removes it from the match — and everything that hung off it: its
+   * production queue (releasing the supply those queued units had reserved — they were paid for
+   * and will never exist, but supply is a headcount, not money), its rally point, and any research
+   * it was running (the project is lost, not refunded — Millstone burned the lab). The scene owns
+   * the visual teardown and what the loss MEANS (a freed site, a defeat).
+   */
+  removeStructure(id: number): Structure | undefined {
+    const i = this.structures.findIndex((s) => s.id === id);
+    if (i < 0) return undefined;
+    const [s] = this.structures.splice(i, 1);
+    const q = this.production.get(id);
+    if (q) {
+      for (const item of q) this._supplyUsed -= RTS_UNITS[item.unit].supply;
+      this._supplyUsed = Math.max(0, this._supplyUsed);
+    }
+    this.production.delete(id);
+    this.rally.delete(id);
+    this.researching.delete(id);
+    this.changed();
+    return s;
+  }
+
   /** Structures of a given type — the command bar reads this to know what you can already produce from. */
   structuresOfType(type: StructureType): Structure[] {
     return this.structures.filter((s) => s.type === type);

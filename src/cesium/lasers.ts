@@ -25,6 +25,8 @@ interface Beam {
   material: Cesium.Material;
   age: number;
   live: boolean;
+  /** This beam's colour — the default execution red unless the shot said otherwise. */
+  color: Cesium.Color;
 }
 
 export class LaserBeams {
@@ -40,7 +42,7 @@ export class LaserBeams {
       ];
       const material = Cesium.Material.fromType('Color', { color: BEAM_COLOR.withAlpha(0) });
       const line = this.collection.add({ positions, width: BEAM_WIDTH, material, show: false });
-      this.beams.push({ line, positions, material, age: 0, live: false });
+      this.beams.push({ line, positions, material, age: 0, live: false, color: BEAM_COLOR });
     }
   }
 
@@ -48,12 +50,13 @@ export class LaserBeams {
    * Fire one beam. Oldest slot wins if the pool is saturated — dropping the tail of a burst is
    * better than growing the pool for a worst case that lasts half a second.
    */
-  fire(from: Cesium.Cartesian3, to: Cesium.Cartesian3): void {
+  fire(from: Cesium.Cartesian3, to: Cesium.Cartesian3, color?: Cesium.Color): void {
     const b = this.beams[this.cursor];
     this.cursor = (this.cursor + 1) % POOL;
     Cesium.Cartesian3.clone(from, b.positions[0]);
     Cesium.Cartesian3.clone(to, b.positions[1]);
     b.line.positions = b.positions; // reassign so Cesium re-uploads
+    b.color = color ?? BEAM_COLOR;
     b.age = 0;
     b.live = true;
     b.line.show = true;
@@ -72,7 +75,7 @@ export class LaserBeams {
       // Hot flat start, then a fast falloff — reads as a discharge rather than a fading line.
       const t = b.age / LIFETIME;
       const alpha = t < 0.25 ? 1 : 1 - (t - 0.25) / 0.75;
-      (b.material.uniforms as { color: Cesium.Color }).color = BEAM_COLOR.withAlpha(alpha);
+      (b.material.uniforms as { color: Cesium.Color }).color = b.color.withAlpha(alpha);
     }
   }
 }

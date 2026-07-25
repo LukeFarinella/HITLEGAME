@@ -164,6 +164,30 @@ function facilityTexture(type: StructureType): HTMLCanvasElement {
   return c;
 }
 
+/** The Millstone Nexus chip — the nexus glyph in hostile green. Built once, cached. */
+let enemyNexusTex: HTMLCanvasElement | null = null;
+function enemyNexusTexture(): HTMLCanvasElement {
+  if (enemyNexusTex) return enemyNexusTex;
+  const c = document.createElement('canvas');
+  c.width = 64;
+  c.height = 64;
+  const g = c.getContext('2d')!;
+  g.fillStyle = 'rgba(10,12,16,0.9)';
+  g.strokeStyle = '#3FBF6F';
+  g.lineWidth = 4;
+  g.beginPath();
+  g.roundRect(6, 6, 52, 52, 12);
+  g.fill();
+  g.stroke();
+  g.fillStyle = '#3FBF6F';
+  g.font = '700 34px ui-monospace, monospace';
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillText('◈', 32, 36);
+  enemyNexusTex = c;
+  return c;
+}
+
 export class RtsBuildLayer {
   /** Dim dots at every unbuilt surveyed obelisk site. */
   readonly siteDots = new Cesium.PointPrimitiveCollection();
@@ -184,13 +208,17 @@ export class RtsBuildLayer {
 
   /** One instanced 3D-model batch per facility type — the buildings themselves. */
   private facilityBatch: Record<FacilityType, InstancedModelBatch>;
-  /** Placed instances per type, kept so the batch can be re-written when one is added. */
-  private facilityList: Record<FacilityType, { lon: number; lat: number }[]> = {
+  /** Placed instances per type, kept so the batch can be re-written when one is added or falls. */
+  private facilityList: Record<FacilityType, { id: number; lon: number; lat: number }[]> = {
     supply: [],
     robotics: [],
     tech: [],
     aviation: [],
   };
+  /** Ring + icon per structure id, so a destroyed structure can take its chrome down with it. */
+  private structureVisuals = new Map<number, { ring: Cesium.Polyline; icon: Cesium.Billboard }>();
+  /** The Millstone Nexus marker, present only during a match with an enemy still standing. */
+  private enemyNexus: { ring: Cesium.Polyline; icon: Cesium.Billboard } | null = null;
   /** The building batches, for the scene to add to / remove from the primitive collection. */
   readonly meshBatches: InstancedModelBatch[];
 
@@ -235,19 +263,19 @@ export class RtsBuildLayer {
     const def = STRUCTURES[s.type];
     const h = this.heightAt(s.lon, s.lat);
     const color = Cesium.Color.fromCssColorString(FACILITY_COLOR[s.type]);
-    this.rings.add({
+    const ring = this.rings.add({
       positions: ringPositions(s.lon, s.lat, def.footprintM, h + 25),
       width: 2,
       material: Cesium.Material.fromType('Color', { color: color.withAlpha(0.8) }),
     });
     // The building itself — a lit 3D model, coloured by type.
     if (isFacilityType(s.type)) {
-      this.facilityList[s.type].push({ lon: s.lon, lat: s.lat });
+      this.facilityList[s.type].push({ id: s.id, lon: s.lon, lat: s.lat });
       this.rewriteFacilityBatch(s.type);
     }
     // A 24 px icon, but ONLY once the building has gone small at the overview — up close the mesh
     // speaks for itself.
-    this.icons.add({
+    const icon = this.icons.add({
       position: Cesium.Cartesian3.fromDegrees(s.lon, s.lat, h + 260),
       image: facilityTexture(s.type),
       width: 30,
@@ -256,6 +284,54 @@ export class RtsBuildLayer {
       distanceDisplayCondition: new Cesium.DistanceDisplayCondition(12_000, Number.MAX_VALUE),
       disableDepthTestDistance: 1e12,
     });
+    this.structureVisuals.set(s.id, { ring, icon });
+  }
+
+  /** Take a fallen structure's chrome down: ring, icon, and its slot in the building batch. */
+  removeFacility(s: Structure): void {
+    const vis = this.structureVisuals.get(s.id);
+    if (vis) {
+      this.rings.remove(vis.ring);
+      this.icons.remove(vis.icon);
+      this.structureVisuals.delete(s.id);
+    }
+    if (isFacilityType(s.type)) {
+      this.facilityList[s.type] = this.facilityList[s.type].filter((f) => f.id !== s.id);
+      this.rewriteFacilityBatch(s.type);
+    }
+  }
+
+  /**
+   * Mark the Millstone Nexus: a hostile-green ring and glyph on the enemy's home site. The obelisk
+   * pyramid under it is ambient network geometry, the way the player's own Nexus renders — the
+   * marker is what says WHOSE it is.
+   */
+  setEnemyNexus(lon: number, lat: number): void {
+    this.clearEnemyNexus();
+    const h = this.heightAt(lon, lat);
+    const green = Cesium.Color.fromCssColorString('#3FBF6F');
+    const ring = this.rings.add({
+      positions: ringPositions(lon, lat, STRUCTURES.nexus.footprintM, h + 25),
+      width: 3,
+      material: Cesium.Material.fromType('Color', { color: green.withAlpha(0.85) }),
+    });
+    const icon = this.icons.add({
+      position: Cesium.Cartesian3.fromDegrees(lon, lat, h + 260),
+      image: enemyNexusTexture(),
+      width: 30,
+      height: 30,
+      verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+      disableDepthTestDistance: 1e12,
+    });
+    this.enemyNexus = { ring, icon };
+  }
+
+  /** The enemy Nexus fell — its marker goes with it. */
+  clearEnemyNexus(): void {
+    if (!this.enemyNexus) return;
+    this.rings.remove(this.enemyNexus.ring);
+    this.icons.remove(this.enemyNexus.icon);
+    this.enemyNexus = null;
   }
 
   /** Re-upload one facility type's instances after a build. Buildings are static, so this is rare. */

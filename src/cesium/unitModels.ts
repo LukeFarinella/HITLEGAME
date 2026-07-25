@@ -719,6 +719,34 @@ export function platformIcon(kind: UnitKind): HTMLCanvasElement | undefined {
   return PLATFORM_ICONS[kind];
 }
 
+/**
+ * The same icon in Millstone's colours, for enemy hardware in an RTS match. Derived from the
+ * company icon by swapping the red and green channels — company red (#E23A2E) becomes hostile
+ * green — so every chassis keeps its silhouette and only changes flag. Cached per kind.
+ */
+const HOSTILE_ICONS = new Map<UnitKind, HTMLCanvasElement>();
+export function hostilePlatformIcon(kind: UnitKind): HTMLCanvasElement | undefined {
+  const hit = HOSTILE_ICONS.get(kind);
+  if (hit) return hit;
+  const base = PLATFORM_ICONS[kind];
+  if (!base) return undefined;
+  const c = document.createElement('canvas');
+  c.width = base.width;
+  c.height = base.height;
+  const g = c.getContext('2d')!;
+  g.drawImage(base, 0, 0);
+  const img = g.getImageData(0, 0, c.width, c.height);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const r = d[i];
+    d[i] = d[i + 1];
+    d[i + 1] = r;
+  }
+  g.putImageData(img, 0, 0);
+  HOSTILE_ICONS.set(kind, c);
+  return c;
+}
+
 /** Where gear installs on each platform. Only platform kinds have one. */
 export const HARDPOINTS: Partial<Record<UnitKind, Hardpoint>> = {
   drone: DISC_HARDPOINT,

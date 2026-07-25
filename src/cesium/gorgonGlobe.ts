@@ -18,6 +18,7 @@ import {
   INFECTED_FLEE,
   CONTAGION,
   INTERCEPT,
+  type RtsStructTarget,
 } from './units';
 import { UNIT_KINDS, type UnitKind } from './unitModels';
 import { SensorField } from './sensors';
@@ -56,6 +57,8 @@ import { RtsCommandBar } from '../ui/rtsCommand';
 import { STRUCTURES, BUILDABLE, BUILD_RULES, metresBetween, type StructureType, type Structure } from '../game/rts/structures';
 import { RTS_UNITS, unitsFrom, producesUnits, type RtsUnitId } from '../game/rts/units';
 import { RESEARCH, researchFrom, type ResearchId } from '../game/rts/research';
+import { RTS_COMBAT, combatStats } from '../game/rts/combat';
+import { MillstoneDirector, MILLSTONE } from '../game/rts/millstone';
 import { showLoading, setStage, hideLoading } from '../ui/loading';
 import { setActiveSlot, migrateLegacySave } from '../game/saves';
 import { LaserBeams } from './lasers';
@@ -775,8 +778,9 @@ function addUnits(center: { lon: number; lat: number }, map: TheaterMap, net: Ro
     ...UNIT_COUNTS,
     ports: findPorts(map),
     platforms: platformStations(center, map),
-    // An RTS match builds a real army, so size the hero-platform batches for one.
-    platformCap: rtsGame ? 48 : undefined,
+    // An RTS match builds a real army — and Millstone fields one out of the same per-kind batches —
+    // so size the hero-platform batches for both sides at once.
+    platformCap: rtsGame ? 96 : undefined,
   };
   const field = new UnitField(center, THEATER_RADIUS_M, map.heightAt, net, counts, covered, map.shoreDistance);
   for (const k of UNIT_KINDS) scene.primitives.add(field.batches[k]);
@@ -784,8 +788,8 @@ function addUnits(center: { lon: number; lat: number }, map: TheaterMap, net: Ro
   scene.primitives.add(field.droneRing); // platform sensor footprints
   scene.primitives.add(field.platformIcons); // 24 px markers, shown when zoomed out
   // An RTS match runs none of the campaign's surveillance rules — no tolerance gate, no auto-patrol
-  // forks, no infected pockets or starter target. Its enemy is Millstone (a later phase), not the
-  // ambient contagion, so the field is set to a clean, fully-orderable baseline.
+  // forks, no infected pockets or starter target. Its enemy is Millstone, not the ambient
+  // contagion, so the field is set to a clean, fully-orderable baseline.
   if (rtsGame) {
     field.toleranceOverride = true;
     field.autoPatrol = { ground: false, air: false };
@@ -830,8 +834,8 @@ function addUnits(center: { lon: number; lat: number }, map: TheaterMap, net: Ro
   // The round landing is what puts the mark down, so the two read as one event.
   cuffs.onLand = (at) => impacts?.at(at, 110, 0.55, 14);
   scene.primitives.add(cuffs.collection);
-  // The campaign's obelisk siege and incident directors don't run in an RTS match — Millstone (a
-  // later phase) is the RTS threat, and it builds and attacks on its own director.
+  // The campaign's obelisk siege and incident directors don't run in an RTS match — Millstone is
+  // the RTS threat, and it attacks on its own director (see runMillstone / runRtsCombat).
   if (!rtsGame) {
     startSiege(field);
     startIncidents(field);
@@ -1276,6 +1280,8 @@ scene.preUpdate.addEventListener(() => {
       // Advance any structures a worker is building on site.
       rtsConstructionTick(dt);
       rtsGame.tickResearch(dt);
+      runMillstone(dt);
+      runRtsCombat(dt);
       // Traffic-incident economy: obelisks catch violations; auto-fine collects them, else they ping.
       runRtsViolations(dt);
       updateRtsHud();
@@ -2112,6 +2118,18 @@ function updateRtsHud(): void {
   setText('grts-cap', `/ ${rtsGame.cap(obeliskCount).toLocaleString('en-US')}`);
   setText('grts-obelisks', String(obeliskCount));
   setText('grts-supply', `${rtsGame.supplyUsed} / ${rtsGame.supplyCap()}`);
+  // The threat line: how much of Millstone stands, and how long until it knocks again.
+  if (millstone) {
+    const pct = Math.round((millstone.hp / millstone.maxHp) * 100);
+    setText(
+      'grts-threat',
+      millstone.destroyed
+        ? 'MILLSTONE RAZED'
+        : `MILLSTONE ${pct}% · NEXT WAVE ${Math.ceil(millstone.nextWaveS)}S`,
+    );
+  } else {
+    setText('grts-threat', '');
+  }
 }
 
 /** How many obelisks the match currently fields — the mask minus anything fallen. */
@@ -2161,6 +2179,23 @@ function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
       if (u.kind === 'skid') {
         rtsUnitRole.set(u.index, 'worker');
         rtsGame.reserveSupply(RTS_UNITS.worker.supply);
+      }
+      // Everything the player opens with is a combatant from the first frame — the dog fights,
+      // the worker just has hit points to lose.
+      const stats = RTS_COMBAT[u.kind];
+      if (stats) unitField.armRtsCombat(u.index, 0, stats);
+    }
+  }
+
+  // Millstone stands its base up across the map: a Nexus on a surveyed site at raiding distance,
+  // a garrison around it, and the wave clock starts running.
+  rtsEnded = false;
+  millstone = pickMillstoneBase();
+  if (millstone) {
+    rtsBuild.setEnemyNexus(millstone.lon, millstone.lat);
+    if (unitField) {
+      for (const g of millstone.garrison()) {
+        unitField.spawnRtsEnemy(g.kind, g.lon, g.lat, combatStats(g.kind), true);
       }
     }
   }
@@ -2212,6 +2247,9 @@ function teardownRtsBuild(): void {
   rtsCmd = null;
   rtsSites = [];
   rtsBuiltSites.clear();
+  millstone = null;
+  rtsEnded = false;
+  document.getElementById('c2-rts-end')?.remove();
 }
 
 // ---- RTS selection + production ----------------------------------------------------------------
@@ -2387,6 +2425,7 @@ function spawnProducedUnit(structureId: number, unit: RtsUnitId): void {
   const spawnLon = s.lon + (STRUCTURES[s.type].footprintM + 60) / mLon;
   const idx = unitField.spawnRtsUnit(def.meshKind, spawnLon, s.lat);
   rtsUnitRole.set(idx, unit);
+  unitField.armRtsCombat(idx, 0, combatStats(def.meshKind));
   const rally = rtsGame.rally.get(structureId);
   if (rally) unitField.moveUnitTo(idx, rally.lon, rally.lat);
   updateUnitHud();
@@ -2523,6 +2562,8 @@ function validateObelisk(site: BuildSite): string | null {
   if (!rtsGame) return 'NO MATCH';
   if (rtsBuiltSites.has(site.index)) return 'ALREADY BUILT';
   if (theaterMap && theaterMap.heightAt(site.lon, site.lat) < 1) return 'AT SEA';
+  // Millstone's home site is not a build slot while Millstone is still standing on it.
+  if (millstone && !millstone.destroyed && site.index === millstone.siteIndex) return 'MILLSTONE HOLDS THIS SITE';
   // Must be within reach of an existing obelisk (the Nexus counts), so expansion runs in a chain.
   const near = rtsGame.structures.some(
     (s) => (s.type === 'obelisk' || s.type === 'nexus') && metresBetween(site.lon, site.lat, s.lon, s.lat) <= BUILD_RULES.OBELISK_REACH_M,
@@ -2663,6 +2704,194 @@ function buildObeliskAt(siteIndex: number, lon: number, lat: number): void {
   rtsGame.addStructure('obelisk', lon, lat, siteIndex);
   addObeliskPyramids(theaterCenter.lon, theaterCenter.lat, theaterMap);
   rtsBuild?.setSites(rtsSites, rtsBuiltSites);
+}
+
+// ---- RTS combat: Millstone ----------------------------------------------------------------------
+//
+// The enemy. Millstone's match state (Nexus health, wave clock) lives in game/rts/millstone.ts; its
+// army lives in the unit field as hostile combatants; and this section is the scene glue — where the
+// base is seeded, waves are fielded, combat events become beams/blasts/damage, and a Nexus falling
+// on either side ends the match.
+
+/**
+ * Seed Millstone's base: the surveyed site nearest to raiding distance from the player's Nexus
+ * that isn't at sea. Distance-targeted rather than "farthest" deliberately — the enemy should be a
+ * march away, not a pilgrimage across a 300 km theater.
+ */
+function pickMillstoneBase(): MillstoneDirector | null {
+  if (!rtsGame || !theaterMap) return null;
+  const nexus = rtsGame.nexus;
+  if (!nexus) return null;
+  let best: BuildSite | null = null;
+  let bestScore = Infinity;
+  for (const s of inTheaterObeliskSites()) {
+    if (s.index === rtsGame.nexusIndex) continue;
+    if (theaterMap.heightAt(s.lon, s.lat) < 1) continue;
+    const score = Math.abs(metresBetween(s.lon, s.lat, nexus.lon, nexus.lat) - MILLSTONE.BASE_RANGE_M);
+    if (score < bestScore) {
+      bestScore = score;
+      best = s;
+    }
+  }
+  return best ? new MillstoneDirector(best) : null;
+}
+
+/** Advance Millstone's wave clock and field anything it sends. */
+function runMillstone(dt: number): void {
+  if (!millstone || !unitField || rtsEnded) return;
+  const wave = millstone.tick(dt);
+  if (!wave) return;
+  for (const w of wave) unitField.spawnRtsEnemy(w.kind, w.lon, w.lat, combatStats(w.kind), w.hold);
+  sound.play('alert');
+  toast(`◈ MILLSTONE WAVE ${millstone.waveN} INBOUND · ${wave.length} UNITS`);
+}
+
+/** Every structure combat can march on or shoot at, both sides, rebuilt each tick. */
+function rtsStructTargets(): RtsStructTarget[] {
+  const out: RtsStructTarget[] = [];
+  if (rtsGame) {
+    for (const s of rtsGame.structures) {
+      out.push({ id: s.id, side: 0, lon: s.lon, lat: s.lat, radiusM: STRUCTURES[s.type].footprintM });
+    }
+  }
+  if (millstone && !millstone.destroyed) {
+    out.push({ id: ENEMY_NEXUS_ID, side: 1, lon: millstone.lon, lat: millstone.lat, radiusM: STRUCTURES.nexus.footprintM });
+  }
+  return out;
+}
+
+/** Run one frame of combat and render/score what it did. */
+function runRtsCombat(dt: number): void {
+  if (!rtsGame || !unitField || rtsEnded) return;
+  const ev = unitField.rtsCombatTick(dt, rtsStructTargets());
+
+  for (const s of ev.shots) {
+    lasers?.fire(
+      Cesium.Cartesian3.fromDegrees(s.flon, s.flat, s.falt),
+      Cesium.Cartesian3.fromDegrees(s.tlon, s.tlat, s.talt),
+      s.side === 1 ? MILLSTONE_BEAM : undefined,
+    );
+  }
+  // One report per frame, however thick the volley — per-shot playback stacks into a screech.
+  if (ev.shots.length) sound.play('laser');
+
+  for (const k of ev.kills) {
+    const h = theaterMap?.heightAt(k.lon, k.lat) ?? 0;
+    blasts?.fire(k.lon, k.lat, h, 90);
+    if (k.side === 0) {
+      // One of ours. Give its supply back and drop its role; the field already took it off the board.
+      const role = rtsUnitRole.get(k.index);
+      if (role) {
+        rtsGame.releaseSupply(RTS_UNITS[role].supply);
+        rtsUnitRole.delete(k.index);
+        toast(`◈ ${RTS_UNITS[role].name} LOST`);
+      } else {
+        toast('◈ UNIT LOST');
+      }
+    }
+  }
+
+  for (const hit of ev.hits) {
+    // A structure under fire throws sparks — the "your base is being hit" signal that reads from
+    // any altitude even before the health loss shows.
+    if (sparks && Math.random() < 0.5) {
+      const h = theaterMap?.heightAt(hit.lon, hit.lat) ?? 0;
+      sparks.emit(Cesium.Cartesian3.fromDegrees(hit.lon, hit.lat, h + 50), 2);
+    }
+    applyStructureHit(hit);
+  }
+}
+
+/** Land one hit on a structure — the player's or Millstone's Nexus — and handle its fall. */
+function applyStructureHit(hit: { id: number; dmg: number }): void {
+  if (hit.id === ENEMY_NEXUS_ID) {
+    if (millstone && millstone.damage(hit.dmg)) onMillstoneRazed();
+    return;
+  }
+  const s = rtsGame?.structures.find((x) => x.id === hit.id);
+  if (!s) return;
+  s.hp -= hit.dmg;
+  if (s.hp <= 0) destroyPlayerStructure(s);
+}
+
+/** A player structure has fallen: blast, teardown, and whatever the loss means. */
+function destroyPlayerStructure(s: Structure): void {
+  if (!rtsGame) return;
+  blasts?.fire(s.lon, s.lat, theaterMap?.heightAt(s.lon, s.lat) ?? 0, STRUCTURES[s.type].footprintM);
+  sound.play('lost');
+  rtsGame.removeStructure(s.id);
+  if (rtsSelectedStructure?.id === s.id) clearStructureSelection();
+
+  if (s.type === 'nexus') {
+    // The match. Everything else is cleanup for a game that just ended.
+    endRtsWith(false);
+    return;
+  }
+  if (s.type === 'obelisk' && s.siteIndex !== undefined) {
+    // An obelisk is a network site: clear its mask bit and rebuild pyramids + sensors from what's
+    // left — the exact inverse of buildObeliskAt. The site frees for a rebuild.
+    if (obeliskMask) obeliskMask[s.siteIndex] = 0;
+    rtsBuiltSites.delete(s.siteIndex);
+    if (theaterCenter && theaterMap) addObeliskPyramids(theaterCenter.lon, theaterCenter.lat, theaterMap);
+    rtsBuild?.setSites(rtsSites, rtsBuiltSites);
+  } else {
+    rtsBuild?.removeFacility(s);
+  }
+  toast(`◈ ${STRUCTURES[s.type].name} DESTROYED`);
+  rtsCmd?.render();
+  updateRtsHud();
+}
+
+/** Millstone's Nexus is down — the win. */
+function onMillstoneRazed(): void {
+  if (!millstone) return;
+  blasts?.fire(millstone.lon, millstone.lat, theaterMap?.heightAt(millstone.lon, millstone.lat) ?? 0, 500);
+  rtsBuild?.clearEnemyNexus();
+  endRtsWith(true);
+}
+
+/** Decide the match, once. The world keeps rendering behind the modal; the directors stop. */
+function endRtsWith(victory: boolean): void {
+  if (rtsEnded) return;
+  rtsEnded = true;
+  sound.play(victory ? 'success' : 'lost');
+  showRtsEnd(victory);
+}
+
+/** The end-of-match modal: one line on what happened, one button back to the title. */
+function showRtsEnd(victory: boolean): void {
+  if (document.getElementById('c2-rts-end')) return;
+  const back = document.createElement('div');
+  back.className = 'c2-modal-back';
+  back.id = 'c2-rts-end';
+
+  const box = document.createElement('div');
+  box.className = 'c2-modal' + (victory ? ' c2-complete' : '');
+  box.innerHTML =
+    `<div class="c2-modal-head">` +
+    `<span class="c2-name">${victory ? 'MILLSTONE RAZED' : 'NEXUS LOST'}</span>` +
+    `<span class="c2-order ${victory ? 'order-investigate' : 'order-execute'}">${victory ? 'VICTORY' : 'DEFEAT'}</span>` +
+    `</div>` +
+    `<p class="c2-modal-p">${
+      victory
+        ? 'Their Nexus is rubble and the waves have stopped. The theater is yours — such as it is.'
+        : 'Your Nexus is down. A network with no heart is scrap with good sightlines; Millstone will strip the rest at its leisure.'
+    }</p>`;
+
+  const actions = document.createElement('div');
+  actions.className = 'c2-modal-actions';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'c2-buy';
+  btn.textContent = 'RETURN TO TITLE';
+  btn.addEventListener('click', () => {
+    back.remove();
+    endRtsMatch();
+  });
+  actions.append(btn);
+  box.append(actions);
+  back.append(box);
+  document.body.append(back);
 }
 
 /**
@@ -3906,6 +4135,14 @@ let mode: Mode = 'globe';
  * director, an RTS money HUD instead of the mission chrome). See src/game/rts/rtsGame.ts.
  */
 let rtsGame: RtsGame | null = null;
+/** The Millstone director — the RTS opponent's base, wave clock and Nexus health. Null outside a match. */
+let millstone: MillstoneDirector | null = null;
+/** Set once a match has been decided, so the end modal fires exactly once. */
+let rtsEnded = false;
+/** Millstone's beams fire in its own green, so a firefight reads as two sides at a glance. */
+const MILLSTONE_BEAM = Cesium.Color.fromCssColorString('#3FBF6F');
+/** The structure id the combat pass knows Millstone's Nexus by — no player id is ever negative. */
+const ENEMY_NEXUS_ID = -1;
 /** The RTS build layer (facility markers, site dots, placement ghost), or null outside a match. */
 let rtsBuild: RtsBuildLayer | null = null;
 /** The RTS build command bar, or null outside a match. */
@@ -5353,6 +5590,15 @@ if (import.meta.env.DEV) {
     finishConstruction,
     maybeOpenAllSites,
     runRtsViolations,
+    get millstone() {
+      return millstone;
+    },
+    runMillstone,
+    runRtsCombat,
+    rtsStructTargets,
+    applyStructureHit,
+    showRtsEnd,
+    RTS_COMBAT,
     startResearchAt,
     openViolationMenu,
     inTheaterObeliskSites,
