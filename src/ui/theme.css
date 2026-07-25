@@ -1604,6 +1604,9 @@ body.dev-open #c2-tasking { display: none; }
 .grc-chip.active { border-color: var(--ok); border-bottom-color: var(--ok); box-shadow: 0 0 16px rgba(63, 191, 111, .3); }
 .grc-chip.broke { opacity: .5; }
 .grc-chip.broke .grc-cost { color: var(--red); }
+/* Tech-tree locked: dimmer than merely unaffordable, and the requirement shows in place of the price. */
+.grc-chip.locked { opacity: .42; border-style: dashed; cursor: not-allowed; }
+.grc-lock { font: 600 7px/1.1 var(--mono); letter-spacing: .04em; color: var(--red); text-align: center; }
 .grc-key {
   font: 700 9px/1 var(--mono); letter-spacing: .08em; color: var(--void);
   background: var(--steel); border-radius: 2px; padding: 2px 5px; min-width: 12px; text-align: center;

@@ -99,6 +99,32 @@ export class RtsGame {
     return this.structures.find((s) => s.type === 'nexus');
   }
 
+  /** Obelisks on the map — the Nexus counts as one. Drives the data-center prerequisite. */
+  obeliskCount(): number {
+    return this.structures.filter((s) => s.type === 'obelisk' || s.type === 'nexus').length;
+  }
+
+  /** Whether a structure type has been built at least once. */
+  hasStructure(type: StructureType): boolean {
+    return this.structures.some((s) => s.type === type);
+  }
+
+  /**
+   * Why a structure can't be built yet — its tech-tree prerequisite, or null. The chain is
+   * 3 obelisks → data center → robotics → tech → aviation, so each rung reads its own gate here.
+   */
+  structureBlocker(type: StructureType): string | null {
+    const req = STRUCTURES[type].requires;
+    if (!req) return null;
+    if (req.obelisks && this.obeliskCount() < req.obelisks) {
+      return `NEEDS ${req.obelisks} OBELISKS`;
+    }
+    if (req.structure && !this.hasStructure(req.structure)) {
+      return `NEEDS ${STRUCTURES[req.structure].name}`;
+    }
+    return null;
+  }
+
   // ---- supply --------------------------------------------------------------------------------
 
   /** Total supply the standing structures provide — the ceiling on your army. */
@@ -129,6 +155,9 @@ export class RtsGame {
   /** Why a unit can't be queued right now, or null if it can. */
   enqueueBlocker(unit: RtsUnitId): string | null {
     const def = RTS_UNITS[unit];
+    if (def.requiresStructure && !this.hasStructure(def.requiresStructure)) {
+      return `NEEDS ${STRUCTURES[def.requiresStructure].name}`;
+    }
     if (this._money < def.cost) return 'INSUFFICIENT FUNDS';
     if (this._supplyUsed + def.supply > this.supplyCap()) return 'BUILD A DATA CENTER';
     return null;

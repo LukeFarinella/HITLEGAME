@@ -35,6 +35,12 @@ export interface StructureDef {
   supplyProvided?: number;
   /** Seconds a worker spends building it on site. 0 for the Nexus (never built). */
   buildTimeS: number;
+  /**
+   * Tech-tree prerequisite: a number of obelisks that must stand, and/or a structure that must
+   * already be built. This is what makes the base a chain — 3 obelisks → data center → robotics →
+   * tech → aviation → the special unit — rather than a menu you buy in any order.
+   */
+  requires?: { obelisks?: number; structure?: StructureType };
 }
 
 export const STRUCTURES: Record<StructureType, StructureDef> = {
@@ -71,6 +77,7 @@ export const STRUCTURES: Record<StructureType, StructureDef> = {
     hotkey: 'R',
     footprintM: 300,
     buildTimeS: 22,
+    requires: { structure: 'supply' },
   },
   aviation: {
     type: 'aviation',
@@ -82,6 +89,7 @@ export const STRUCTURES: Record<StructureType, StructureDef> = {
     hotkey: 'V',
     footprintM: 300,
     buildTimeS: 26,
+    requires: { structure: 'tech' },
   },
   tech: {
     type: 'tech',
@@ -93,6 +101,7 @@ export const STRUCTURES: Record<StructureType, StructureDef> = {
     hotkey: 'T',
     footprintM: 280,
     buildTimeS: 20,
+    requires: { structure: 'robotics' },
   },
   supply: {
     type: 'supply',
@@ -105,6 +114,7 @@ export const STRUCTURES: Record<StructureType, StructureDef> = {
     footprintM: 260,
     supplyProvided: 10,
     buildTimeS: 14,
+    requires: { obelisks: 3 },
   },
 };
 

@@ -30,6 +30,10 @@ export interface RtsCommandHooks {
   onProduce(unit: RtsUnitId): void;
   /** The live queue at a producing structure, for the progress strip. */
   queueOf(structureId: number): QueueItem[];
+  /** A tech-tree reason this structure can't be built yet, or null. Locks the chip. */
+  buildBlocker(type: StructureType): string | null;
+  /** A tech-tree reason this unit can't be built yet, or null. Locks the chip. */
+  produceBlocker(unit: RtsUnitId): string | null;
 }
 
 export class RtsCommandBar {
@@ -68,11 +72,13 @@ export class RtsCommandBar {
     const placing = this.hooks.placing();
     const chips = BUILDABLE.map((type) => {
       const def = STRUCTURES[type];
+      const locked = this.hooks.buildBlocker(type);
       return this.chip({
-        cls: `type-${type}${placing === type ? ' active' : ''}${money >= def.cost ? '' : ' broke'}`,
+        cls: `type-${type}${placing === type ? ' active' : ''}${locked ? ' locked' : money >= def.cost ? '' : ' broke'}`,
         hotkey: def.hotkey,
         name: def.name.replace(' FACILITY', ''),
         cost: def.cost,
+        locked,
         title: `${def.name} — ${def.blurb}`,
         onClick: () => this.hooks.onBuild(type),
       });
@@ -84,16 +90,18 @@ export class RtsCommandBar {
   private renderProduce(structureId: number, structureType: StructureType): void {
     const money = this.hooks.money();
     const units = unitsFrom(structureType);
-    const chips = units.map((u) =>
-      this.chip({
-        cls: `cat-${u.category}${money >= u.cost ? '' : ' broke'}`,
+    const chips = units.map((u) => {
+      const locked = this.hooks.produceBlocker(u.id);
+      return this.chip({
+        cls: `cat-${u.category}${locked ? ' locked' : money >= u.cost ? '' : ' broke'}`,
         hotkey: u.hotkey,
-        name: u.name.replace(' DRONE', '').replace(' WALKER', ''),
+        name: u.name.replace(' WALKER', ''),
         cost: u.cost,
+        locked,
         title: `${u.name} — ${u.buildTimeS}s · ${u.supply} supply`,
         onClick: () => this.hooks.onProduce(u.id),
-      }),
-    );
+      });
+    });
     const children: (HTMLElement | Node)[] = [this.label(STRUCTURES[structureType].name.replace(' FACILITY', '')), ...chips];
     const queue = this.hooks.queueOf(structureId);
     if (queue.length) children.push(this.queueStrip(queue));
@@ -112,17 +120,18 @@ export class RtsCommandBar {
     hotkey: string;
     name: string;
     cost: number;
+    locked?: string | null;
     title: string;
     onClick: () => void;
   }): HTMLElement {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = `grc-chip ${o.cls}`;
-    btn.title = o.title;
-    btn.innerHTML =
-      `<span class="grc-key">${o.hotkey}</span>` +
-      `<span class="grc-name">${o.name}</span>` +
-      `<span class="grc-cost">◈ ${o.cost}</span>`;
+    btn.title = o.locked ? `${o.title} — LOCKED: ${o.locked}` : o.title;
+    // A locked chip shows the tech-tree requirement in place of its price, so the chain reads off
+    // the command bar itself.
+    const foot = o.locked ? `<span class="grc-lock">🔒 ${o.locked}</span>` : `<span class="grc-cost">◈ ${o.cost}</span>`;
+    btn.innerHTML = `<span class="grc-key">${o.hotkey}</span><span class="grc-name">${o.name}</span>${foot}`;
     btn.addEventListener('click', o.onClick);
     return btn;
   }

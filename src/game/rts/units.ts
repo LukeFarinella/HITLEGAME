@@ -30,6 +30,8 @@ export interface RtsUnitDef {
   supply: number;
   /** The one building that produces it. Selecting that building offers this unit. */
   producedBy: StructureType;
+  /** A structure that must ALSO be built before this unit unlocks — the special unit's tech gate. */
+  requiresStructure?: StructureType;
   hotkey: string;
 }
 
@@ -76,6 +78,7 @@ export const RTS_UNITS: Record<RtsUnitId, RtsUnitDef> = {
     buildTimeS: 45,
     supply: 8,
     producedBy: 'robotics',
+    requiresStructure: 'aviation', // the special unit sits at the top of the tech chain
     hotkey: 'G',
   },
 };

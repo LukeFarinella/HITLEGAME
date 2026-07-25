@@ -2167,6 +2167,13 @@ function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
     onBuild: (type) => beginPlacement(type),
     onProduce: (unit) => enqueueUnit(unit),
     queueOf: (sid) => rtsGame?.queueAt(sid) ?? [],
+    buildBlocker: (type) => rtsGame?.structureBlocker(type) ?? null,
+    produceBlocker: (unit) => {
+      const def = RTS_UNITS[unit];
+      return def.requiresStructure && !rtsGame?.hasStructure(def.requiresStructure)
+        ? `NEEDS ${STRUCTURES[def.requiresStructure].name}`
+        : null;
+    },
   });
   rtsCmd.show();
   // The command card greys chips by affordability and shows queue progress, so it repaints on every
@@ -2339,6 +2346,13 @@ function computeRtsSites(): BuildSite[] {
 /** Arm placement for a structure type, if it can be afforded. */
 function beginPlacement(type: StructureType): void {
   if (!rtsGame || !rtsBuild) return;
+  // Tech-tree gate first: "you can't build this yet" outranks "you can't afford it".
+  const gate = rtsGame.structureBlocker(type);
+  if (gate) {
+    sound.play('denied');
+    toast(`◈ ${gate}`);
+    return;
+  }
   const def = STRUCTURES[type];
   if (rtsGame.money < def.cost) {
     sound.play('denied');
