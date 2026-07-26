@@ -59,6 +59,7 @@ import { RTS_UNITS, unitsFrom, producesUnits, type RtsUnitId } from '../game/rts
 import { RESEARCH, researchFrom, type ResearchId } from '../game/rts/research';
 import { RTS_COMBAT, combatStats } from '../game/rts/combat';
 import { MillstoneDirector, MILLSTONE } from '../game/rts/millstone';
+import { RtsUnitCard, type RtsCardUnit } from '../ui/rtsUnitCard';
 import { showLoading, setStage, hideLoading } from '../ui/loading';
 import { setActiveSlot, migrateLegacySave } from '../game/saves';
 import { LaserBeams } from './lasers';
@@ -1282,6 +1283,7 @@ scene.preUpdate.addEventListener(() => {
       rtsGame.tickResearch(dt);
       runMillstone(dt);
       runRtsCombat(dt);
+      rtsGame.tickUnits(dt); // shield/energy regen
       // Traffic-incident economy: obelisks catch violations; auto-fine collects them, else they ping.
       runRtsViolations(dt);
       updateRtsHud();
@@ -1290,7 +1292,7 @@ scene.preUpdate.addEventListener(() => {
       rebuildRoster();
       refreshRoster();
       updateRouteLayer();
-      updateUnitPanel();
+      updateUnitPanel(); // in a match this renders the RTS unit card (see the guard inside)
     } else {
       // Campaign frame: the full surveillance loop.
       // Orders age first: an investigation that commits this frame goes on the ledger, and an
@@ -2170,16 +2172,13 @@ function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
   rtsConstruction = [];
   rtsBuild.setSites(rtsSites, rtsBuiltSites);
 
-  // The opening worker drones were spawned by the UnitField constructor (as 'quad' platforms) — tag
-  // them as workers and charge their supply, so the command card treats them as builders and the
-  // supply line opens honest.
-  rtsUnitRole.clear();
+  // The opening workers were spawned by the UnitField constructor — register them into the RTS unit
+  // roster (which sets health/shield/energy and charges their supply), so they read as builders and
+  // carry a unit card like anything produced later.
+  rtsGame.unitStates.clear();
   if (unitField) {
     for (const u of unitField.platformUnits()) {
-      if (u.kind === 'skid') {
-        rtsUnitRole.set(u.index, 'worker');
-        rtsGame.reserveSupply(RTS_UNITS.worker.supply);
-      }
+      if (u.kind === 'skid') rtsGame.registerUnit(u.index, 'worker');
       // Everything the player opens with is a combatant from the first frame — the dog fights,
       // the worker just has hit points to lose.
       const stats = RTS_COMBAT[u.kind];
@@ -2225,13 +2224,24 @@ function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
   // The command card greys chips by affordability and shows queue progress, so it repaints on every
   // economy/production change (and per-frame while a queue runs — see the RTS update branch).
   rtsGame.onChange(() => rtsCmd?.render());
+
+  // Your own machines get a unit card instead of the surveillance contact dossier.
+  rtsUnitCard = new RtsUnitCard({
+    units: rtsSelectedCardUnits,
+    onPick: (index) => {
+      unitField?.selectIndexPublic(index);
+      rtsUnitCard?.render();
+      rtsCmd?.render();
+    },
+  });
 }
 
 /** Tear the build layer + command bar down at the end of a match. */
 function teardownRtsBuild(): void {
   rtsPlacing = null;
   rtsSelectedStructure = null;
-  rtsUnitRole.clear();
+  rtsUnitCard?.hide();
+  rtsUnitCard = null;
   if (rtsBuild) {
     scene.primitives.remove(rtsBuild.siteDots);
     scene.primitives.remove(rtsBuild.rings);
@@ -2269,7 +2279,7 @@ function rtsCommandContext(): { kind: 'none' } | { kind: 'build' } | { kind: 'pr
 /** Whether the currently selected unit is a worker drone — the only unit that opens the build menu. */
 function selectedIsWorker(): boolean {
   const sel = unitField?.selectedPlatform();
-  return !!sel && rtsUnitRole.get(sel.index) === 'worker';
+  return !!sel && rtsGame?.unitIdOf(sel.index) === 'worker';
 }
 
 /** Pick the structure nearest a screen point, or null. Structures aren't units, so this projects each. */
@@ -2415,6 +2425,51 @@ function openViolationMenu(screenX: number, screenY: number, index: number): voi
   window.setTimeout(() => window.addEventListener('pointerdown', dismiss, true), 0);
 }
 
+/**
+ * What a unit is doing this second, for its card.
+ *
+ * Order of precedence is what the operator cares about: a construction assignment outranks "moving",
+ * because a worker driving to a site is doing a job, not commuting.
+ */
+function rtsUnitAction(index: number): string {
+  const cs = rtsConstruction.find((c) => c.workerIndex === index);
+  if (cs) {
+    const st = unitField?.platformStatus(index);
+    const onSite = !!st && metresBetween(st.lon, st.lat, cs.lon, cs.lat) <= BUILD_CONTACT_M;
+    const name = STRUCTURES[cs.type].name.replace(' FACILITY', '');
+    if (!onSite) return `MOVING TO ${name} SITE`;
+    return `BUILDING ${name} · ${Math.ceil(cs.remainingS)}s`;
+  }
+  return unitField?.platformStatus(index)?.moving ? 'MOVING' : 'HOLDING';
+}
+
+/** The selected units, shaped for the unit card. Only YOUR registered RTS units appear. */
+function rtsSelectedCardUnits(): RtsCardUnit[] {
+  if (!rtsGame || !unitField) return [];
+  const out: RtsCardUnit[] = [];
+  for (const { index, id, kind } of unitField.platformUnits()) {
+    if (!unitField.isSelected(index)) continue;
+    const st = rtsGame.unitStateOf(index);
+    if (!st) continue; // not one of ours (or not registered) — no card for it
+    // Health comes from the COMBAT state on the field, not the roster: that's the number Millstone
+    // is actually shooting at, so the bar can never drift from the fight.
+    const hp = unitField.rtsHpOf(index) ?? { hp: 0, maxHp: 0 };
+    out.push({
+      index,
+      unit: st.unit,
+      callsign: id,
+      hp: hp.hp,
+      maxHp: hp.maxHp,
+      shield: st.shield,
+      energy: st.energy,
+      action: rtsUnitAction(index),
+      speedMs: KIND_SPEED[kind],
+      sensorKm: (PLATFORM_SENSOR[kind] ?? 0) / 1000,
+    });
+  }
+  return out;
+}
+
 /** Roll a finished unit out of its building and send it to the rally point (or just clear of the building). */
 function spawnProducedUnit(structureId: number, unit: RtsUnitId): void {
   if (!rtsGame || !unitField) return;
@@ -2424,7 +2479,8 @@ function spawnProducedUnit(structureId: number, unit: RtsUnitId): void {
   const mLon = 111_320 * Math.cos((s.lat * Math.PI) / 180);
   const spawnLon = s.lon + (STRUCTURES[s.type].footprintM + 60) / mLon;
   const idx = unitField.spawnRtsUnit(def.meshKind, spawnLon, s.lat);
-  rtsUnitRole.set(idx, unit);
+  // Supply was already reserved when this was queued, so don't charge it twice.
+  rtsGame.registerUnit(idx, unit, false);
   unitField.armRtsCombat(idx, 0, combatStats(def.meshKind));
   const rally = rtsGame.rally.get(structureId);
   if (rally) unitField.moveUnitTo(idx, rally.lon, rally.lat);
@@ -2614,7 +2670,7 @@ function tryPlaceAt(screen: Cesium.Cartesian2): void {
   }
   // A structure is built BY a worker — you must have one selected, and it's the one dispatched.
   const worker = unitField.selectedPlatform();
-  if (!worker || rtsUnitRole.get(worker.index) !== 'worker') {
+  if (!worker || rtsGame.unitIdOf(worker.index) !== 'worker') {
     sound.play('denied');
     toast('◈ SELECT A WORKER TO BUILD');
     return;
@@ -2779,15 +2835,11 @@ function runRtsCombat(dt: number): void {
     const h = theaterMap?.heightAt(k.lon, k.lat) ?? 0;
     blasts?.fire(k.lon, k.lat, h, 90);
     if (k.side === 0) {
-      // One of ours. Give its supply back and drop its role; the field already took it off the board.
-      const role = rtsUnitRole.get(k.index);
-      if (role) {
-        rtsGame.releaseSupply(RTS_UNITS[role].supply);
-        rtsUnitRole.delete(k.index);
-        toast(`◈ ${RTS_UNITS[role].name} LOST`);
-      } else {
-        toast('◈ UNIT LOST');
-      }
+      // One of ours. Dropping it from the roster releases its supply too; the field already took it
+      // off the board.
+      const role = rtsGame.unitIdOf(k.index);
+      rtsGame.removeUnit(k.index);
+      toast(role ? `◈ ${RTS_UNITS[role].name} LOST` : '◈ UNIT LOST');
     }
   }
 
@@ -3877,6 +3929,14 @@ function renderOrder(mark: string | null, timer: number | undefined) {
 
 /** Refresh the panel + reticle from the current selection. Called each frame. */
 function updateUnitPanel() {
+  // In an RTS match the selection panel IS the unit card: a dossier on your own machine (assessment,
+  // charge sheet, sanction ladder) is meaningless. Routing it here rather than guarding a dozen call
+  // sites means every path that used to raise the contact panel now raises the right one.
+  if (rtsGame) {
+    hideUnitPanel();
+    rtsUnitCard?.render();
+    return;
+  }
   if (!unitField) return hideUnitPanel();
   const sel = unitField.selected();
   if (!sel || !panelEl) return hideUnitPanel();
@@ -4155,8 +4215,8 @@ const rtsBuiltSites = new Set<number>();
 let rtsPlacing: StructureType | null = null;
 /** The selected structure (its command card is shown), or null. */
 let rtsSelectedStructure: Structure | null = null;
-/** What RTS role each produced unit fills, by unit index — so the command card knows a worker. */
-const rtsUnitRole = new Map<number, RtsUnitId>();
+/** The RTS unit card — portrait/HP/shield/energy for your own machines. Null outside a match. */
+let rtsUnitCard: RtsUnitCard | null = null;
 /** Screen-space radius for clicking a structure. */
 const STRUCTURE_PICK_PX = 30;
 
@@ -5611,9 +5671,12 @@ if (import.meta.env.DEV) {
     get rtsSelectedStructure() {
       return rtsSelectedStructure;
     },
-    get rtsUnitRole() {
-      return rtsUnitRole;
+    get rtsUnitStates() {
+      return rtsGame?.unitStates;
     },
+    rtsSelectedCardUnits,
+    rtsUnitAction,
+    updateUnitPanel,
     spawnUnits,
     clearUnits,
     devSettings,

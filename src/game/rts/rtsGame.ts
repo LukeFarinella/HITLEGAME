@@ -14,7 +14,7 @@
  */
 
 import { STRUCTURES, type Structure, type StructureType } from './structures';
-import { RTS_UNITS, type RtsUnitId } from './units';
+import { RTS_UNITS, RTS_REGEN, type RtsUnitId } from './units';
 import { RESEARCH, type ResearchId } from './research';
 
 /** Economy tuning. One place, so the whole balance of the opening is a handful of readable numbers. */
@@ -36,6 +36,21 @@ export const RTS_ECON = {
 };
 
 export type RtsListener = () => void;
+
+/**
+ * A fielded unit's live state, keyed by its index in the UnitField.
+ *
+ * Deliberately NOT where hit points live. The UnitField owns position, movement AND combat hp (the
+ * combat pass stamps hp onto a unit when it's armed — see cesium/units.ts `armRtsCombat`), because
+ * both armies field the same chassis and the fight has to read one number. This owns only what the
+ * roster adds on top: which unit it is, and the shield/energy the combat model has no concept of.
+ */
+export interface RtsUnitState {
+  index: number;
+  unit: RtsUnitId;
+  shield: number;
+  energy: number;
+}
 
 /** One unit waiting in a building's production queue. */
 export interface QueueItem {
@@ -65,6 +80,9 @@ export class RtsGame {
   readonly rally = new Map<number, { lon: number; lat: number }>();
   /** Supply consumed by living + queued units. Cap comes from the structures (see supplyCap). */
   private _supplyUsed = 0;
+
+  /** Every fielded unit's live state, keyed by its UnitField index. */
+  readonly unitStates = new Map<number, RtsUnitState>();
 
   /** Research completed — a set of standing capabilities (e.g. auto-fine). */
   private _researched = new Set<ResearchId>();
@@ -167,18 +185,6 @@ export class RtsGame {
     return this._supplyUsed;
   }
 
-  /** Charge supply for a unit that's being fielded outside the queue (the opening worker). */
-  reserveSupply(n: number): void {
-    this._supplyUsed += n;
-    this.changed();
-  }
-
-  /** Release supply when a unit dies (Phase 4). */
-  releaseSupply(n: number): void {
-    this._supplyUsed = Math.max(0, this._supplyUsed - n);
-    this.changed();
-  }
-
   // ---- production ----------------------------------------------------------------------------
 
   /** Why a unit can't be queued right now, or null if it can. */
@@ -235,6 +241,52 @@ export class RtsGame {
   setRally(structureId: number, lon: number, lat: number): void {
     this.rally.set(structureId, { lon, lat });
     this.changed();
+  }
+
+  // ---- fielded units -------------------------------------------------------------------------
+
+  /**
+   * Register a unit the field has just spawned, at full health.
+   *
+   * `chargeSupply` is false for anything that came out of a production queue: {@link enqueue} already
+   * reserved that supply when the unit was ordered, and the reservation simply becomes the unit's own
+   * on rollout. It is true for units fielded outside the queue — the opening workers — which nothing
+   * has charged for yet.
+   */
+  registerUnit(index: number, unit: RtsUnitId, chargeSupply = true): RtsUnitState {
+    const def = RTS_UNITS[unit];
+    const s: RtsUnitState = { index, unit, shield: def.maxShield, energy: def.maxEnergy };
+    this.unitStates.set(index, s);
+    if (chargeSupply) this._supplyUsed += def.supply;
+    this.changed();
+    return s;
+  }
+
+  unitStateOf(index: number): RtsUnitState | undefined {
+    return this.unitStates.get(index);
+  }
+
+  /** What kind of unit this is, or undefined if it isn't one of ours. */
+  unitIdOf(index: number): RtsUnitId | undefined {
+    return this.unitStates.get(index)?.unit;
+  }
+
+  /** Drop a unit from the roster (destroyed), releasing its supply. */
+  removeUnit(index: number): void {
+    const s = this.unitStates.get(index);
+    if (!s) return;
+    this.unitStates.delete(index);
+    this._supplyUsed = Math.max(0, this._supplyUsed - RTS_UNITS[s.unit].supply);
+    this.changed();
+  }
+
+  /** Regenerate shields and energy on everything fielded. HP is deliberately NOT regenerated. */
+  tickUnits(dt: number): void {
+    for (const s of this.unitStates.values()) {
+      const def = RTS_UNITS[s.unit];
+      if (s.shield < def.maxShield) s.shield = Math.min(def.maxShield, s.shield + RTS_REGEN.shield * dt);
+      if (s.energy < def.maxEnergy) s.energy = Math.min(def.maxEnergy, s.energy + RTS_REGEN.energy * dt);
+    }
   }
 
   // ---- research ------------------------------------------------------------------------------

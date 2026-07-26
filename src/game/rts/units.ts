@@ -14,6 +14,13 @@ import type { StructureType } from './structures';
  * command card just reads {@link unitsFrom}.
  */
 
+/**
+ * NOTE ON HEALTH. Hit points are NOT defined here — they live in {@link ../rts/combat RTS_COMBAT},
+ * keyed by chassis, because both armies field the same chassis and the combat pass stamps those
+ * stats onto a unit when it is armed. The unit card reads the LIVE value off the field
+ * (`unitField.rtsHpOf`), so what it shows is always the number combat is actually shooting at.
+ * Shield and energy have no combat model yet and are owned here.
+ */
 export type UnitCategory = 'worker' | 'infantry' | 'aerial' | 'special';
 export type RtsUnitId = 'worker' | 'quadruped' | 'interceptor' | 'giga';
 
@@ -21,8 +28,17 @@ export interface RtsUnitDef {
   id: RtsUnitId;
   name: string;
   category: UnitCategory;
+  /** One line on what it's for — the unit card's description. */
+  blurb: string;
   /** The existing platform mesh this unit renders as. */
   meshKind: PlatformId;
+  /**
+   * Regenerating damage buffer, absorbed before HP. Zero on units that carry no emitter — a worker
+   * has nothing to project a screen with, which is part of why it must be escorted.
+   */
+  maxShield: number;
+  /** Ability charge, spent by special actions. Regenerates. Zero on units with no abilities. */
+  maxEnergy: number;
   cost: number;
   /** Seconds in the production queue before it rolls out. */
   buildTimeS: number;
@@ -40,7 +56,10 @@ export const RTS_UNITS: Record<RtsUnitId, RtsUnitDef> = {
     id: 'worker',
     name: 'WORKER',
     category: 'worker',
+    blurb: 'Skid-steer loader. Constructs and repairs. Unarmed and unscreened — keep it behind the line.',
     meshKind: 'skid', // a skid-steer loader — the ground construction unit
+    maxShield: 0,
+    maxEnergy: 0,
     cost: 50,
     buildTimeS: 8,
     supply: 1,
@@ -51,7 +70,10 @@ export const RTS_UNITS: Record<RtsUnitId, RtsUnitDef> = {
     id: 'quadruped',
     name: 'QUADRUPED',
     category: 'infantry',
+    blurb: 'Four-legged line unit. Cheap, quick to field, and the backbone of any ground push.',
     meshKind: 'dog',
+    maxShield: 40,
+    maxEnergy: 0,
     cost: 75,
     buildTimeS: 12,
     supply: 2,
@@ -62,7 +84,10 @@ export const RTS_UNITS: Record<RtsUnitId, RtsUnitDef> = {
     id: 'interceptor',
     name: 'INTERCEPTOR',
     category: 'aerial',
+    blurb: 'Flying wing. Crosses the theater in seconds and strikes ground it was sent at.',
     meshKind: 'interceptor',
+    maxShield: 80,
+    maxEnergy: 100,
     cost: 150,
     buildTimeS: 20,
     supply: 3,
@@ -73,7 +98,10 @@ export const RTS_UNITS: Record<RtsUnitId, RtsUnitDef> = {
     id: 'giga',
     name: 'GIGA WALKER',
     category: 'special',
+    blurb: 'Siege platform spanning several city blocks. Slow, enormous, and very hard to stop.',
     meshKind: 'walker',
+    maxShield: 300,
+    maxEnergy: 200,
     cost: 400,
     buildTimeS: 45,
     supply: 8,
@@ -82,6 +110,9 @@ export const RTS_UNITS: Record<RtsUnitId, RtsUnitDef> = {
     hotkey: 'G',
   },
 };
+
+/** Shield/energy regeneration, per second. Shields come back after a fight; HP does not. */
+export const RTS_REGEN = { shield: 2, energy: 1.5 };
 
 export const RTS_UNIT_LIST: RtsUnitDef[] = Object.values(RTS_UNITS);
 

@@ -1635,6 +1635,59 @@ body.dev-open #c2-tasking { display: none; }
 .grc-qbar { display: block; width: 26px; height: 4px; background: var(--graphite-2); border: 1px solid var(--gunmetal); }
 .grc-qbar > i { display: block; height: 100%; background: var(--ok); }
 
+/* ===== RTS UNIT CARD ============================================================================
+   Your own machines get a unit card, not a dossier: portrait, the three bars, what it is, what it is
+   doing. Bottom-left, clear of the command bar. */
+#rts-unit {
+  position: absolute; left: 14px; bottom: 14px; z-index: 21;
+  width: 300px; font-family: var(--mono); pointer-events: auto;
+  background: rgba(11, 12, 14, .94);
+  border: 1px solid var(--gunmetal); border-left: 2px solid var(--cat, var(--steel));
+}
+.ruc-single { display: flex; flex-direction: column; }
+.ruc-top { display: flex; gap: 10px; padding: 10px; }
+/* The portrait plate: the unit's own silhouette, framed in its category colour. */
+.ruc-portrait {
+  width: 62px; height: 62px; flex: none;
+  border: 1px solid var(--cat, var(--steel));
+  background: radial-gradient(circle at 50% 40%, rgba(255,255,255,.07), rgba(0,0,0,.35));
+  display: flex; align-items: center; justify-content: center;
+}
+.ruc-portrait img { width: 46px; height: 46px; image-rendering: auto; }
+.ruc-ident { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.ruc-name { font: 700 12px/1 var(--mono); letter-spacing: .12em; color: var(--bone); }
+.ruc-class { font: 600 8px/1 var(--mono); letter-spacing: .14em; color: var(--cat, var(--steel)); margin-bottom: 2px; }
+/* HP / shield / energy */
+.ruc-bar { display: flex; align-items: center; gap: 5px; }
+.ruc-bk { font: 700 7.5px/1 var(--mono); letter-spacing: .1em; color: var(--ash); width: 26px; }
+.ruc-btrack { flex: 1; height: 7px; background: var(--graphite-2); border: 1px solid var(--gunmetal); }
+.ruc-btrack > i { display: block; height: 100%; width: 0; transition: width .12s linear; }
+.ruc-bar.hp .ruc-btrack > i { background: var(--ok); }
+.ruc-bar.sh .ruc-btrack > i { background: #3fa0e0; }
+.ruc-bar.en .ruc-btrack > i { background: #8b6fe0; }
+.ruc-bv { font: 600 8px/1 var(--mono); color: var(--steel); width: 54px; text-align: right; }
+.ruc-blurb {
+  margin: 0; padding: 0 10px 8px; font-size: 10px; line-height: 1.5;
+  color: var(--ash); text-transform: none; letter-spacing: .01em;
+}
+.ruc-stats { border-top: 1px solid var(--gunmetal); padding: 7px 10px 9px; display: flex; flex-direction: column; gap: 4px; }
+.ruc-stat { display: flex; justify-content: space-between; gap: 10px; }
+.ruc-stat .k { font: 600 7.5px/1.2 var(--mono); letter-spacing: .14em; color: var(--ash); }
+.ruc-stat .v { font: 600 9px/1.2 var(--mono); color: var(--bone); text-align: right; }
+.ruc-stat .v.act { color: var(--warn); }
+/* multi-select portrait grid */
+.ruc-grid-head { font: 700 8px/1 var(--mono); letter-spacing: .16em; color: var(--ash); padding: 9px 10px 7px; }
+.ruc-cells { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 10px 10px; max-height: 148px; overflow-y: auto; }
+.ruc-cell {
+  width: 38px; padding: 3px; cursor: pointer;
+  background: var(--graphite-2); border: 1px solid var(--cat, var(--gunmetal));
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+}
+.ruc-cell:hover { background: var(--graphite); }
+.ruc-cell img { width: 26px; height: 26px; }
+.ruc-cell-hp { display: block; width: 100%; height: 3px; background: var(--void); }
+.ruc-cell-hp > i { display: block; height: 100%; width: 100%; background: var(--ok); }
+
 /* Below this the two rails plus the map no longer coexist: the store takes the screen and the
    tasking rail moves under it rather than over the top of it. */
 @media (max-width: 860px) {
