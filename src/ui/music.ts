@@ -14,7 +14,12 @@
  *     keypress — which, at the title screen, is the START button.
  */
 
-const SRC = '/music/midnight-protocol.mp3';
+/**
+ * Built off Vite's `base`, not a root-absolute path — a project-site host serves the app from a
+ * subpath, where a leading slash would reach past the deployment and 404. Same reason
+ * `obelisks.ts` resolves its binary this way.
+ */
+const SRC = `${import.meta.env.BASE_URL}music/midnight-protocol.mp3`;
 /** Player's target volume, 0..1. */
 const VOL_KEY = 'gorgon.music.vol.v1';
 const DEFAULT_VOL = 0.55;

@@ -1,0 +1,72 @@
+# Publish the playable build to GitHub Pages.
+#
+# This is possible at all because the app has no server-side component: AWS enabled CORS on the
+# terrain bucket, so tiles are fetched straight from S3 (see terrariumTileUrl) and `dist/` is a
+# plain static bundle. Before that it needed a tile proxy and a static host was not an option.
+#
+# VITE_BASE is set because a project site is served from a subpath, not the domain root.
+name: Pages
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never let two deploys race; the newer push wins.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # `enablement: true` turns Pages on for the repo the first time this runs, so no dashboard
+      # visit is needed to get the first URL.
+      - uses: actions/configure-pages@v5
+        id: pages
+        with:
+          enablement: true
+
+      - name: Build
+        run: npm run build
+        env:
+          VITE_BASE: ${{ steps.pages.outputs.base_path }}/
+          VITE_CESIUM_ION_TOKEN: ${{ secrets.VITE_CESIUM_ION_TOKEN }}
+
+      # vite-plugin-cesium joins Vite's `base` into BOTH the asset URL and its copy destination, so a
+      # subpath build lands the Cesium payload at dist/<base>/cesium while index.html asks for
+      # <base>/cesium — which on a project site resolves to dist/cesium. Hoist it, and fail loudly
+      # rather than deploying a site whose globe engine 404s.
+      - name: Hoist Cesium out of the duplicated base prefix
+        run: |
+          found=$(find dist -mindepth 2 -maxdepth 2 -type d -name cesium | head -1)
+          if [ -n "$found" ]; then
+            mv "$found" dist/cesium
+            rmdir "$(dirname "$found")" 2>/dev/null || true
+          fi
+          test -f dist/cesium/Cesium.js
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - uses: actions/deploy-pages@v4
+        id: deploy

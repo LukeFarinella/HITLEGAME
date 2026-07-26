@@ -49,8 +49,13 @@ Two things worth knowing, both measured:
   naively trusting them makes the seabed rise to sea level as you zoom. Tiles that decode to all
   zeros above z10 are rebuilt from their z10 ancestor (bilinear overzoom). Land (data to z14+) is
   unaffected. Verified: Mariana Trench holds ~−10,590 m from z10 through z13.
-- **Tiles need the dev proxy.** The S3 bucket sends no CORS header and we read pixels off a canvas,
-  so `vite.config.ts` proxies `/tiles/terrarium/*`. **A hosted build would need its own proxy.**
+- **Tiles are fetched straight from S3.** This *used* to need a dev proxy — the bucket served no
+  CORS header and we read pixels off a canvas, so a tainted response was useless. AWS has since
+  enabled CORS on `elevation-tiles-prod` (measured: `Access-Control-Allow-Origin: *`,
+  `Access-Control-Allow-Methods: GET`), so the proxy is gone and **the build is plain static, with no
+  server-side component.** One place builds a tile URL: `terrariumTileUrl` in
+  `TerrariumTerrainProvider.ts`. If CORS ever regresses the symptom is every tile failing at the
+  fetch rather than the decode, and the fix is to reinstate the proxy and point that helper at it.
 
 Quality is device-adaptive: phones get 33×33 samples/tile, max level 13, and a 0.75 resolution
 scale; desktop gets 65×65 and level 14.
@@ -343,39 +348,27 @@ tools/build-globe-preview.mjs         generates the preview by inlining real coa
 `window.__gorgon` is exposed in dev only (`Cesium`, `viewer`, `enterTheater`, `exitTheater`,
 `spawnUnits`, `mode`) for inspection.
 
-## Deploying (Cloudflare Pages)
+## Deploying
 
-The build is static except for one thing: **terrain tiles need a server-side proxy.** AWS Terrain
-Tiles answer `200` with no `Access-Control-Allow-Origin`, so a browser can fetch the bytes but not
-read the pixels — and the elevation is *encoded in the pixels*. In dev `vite.config.ts` proxies
-`/tiles/terrarium/*`; in production `functions/tiles/terrarium/[[path]].js` does the same job as a
-Pages Function. Identical URL shape both sides, so nothing in `src/` knows which is serving it.
+`dist/` is a plain static bundle — no proxy, no functions, no server. Any static host works.
 
-That's why a plain static host (GitHub Pages, S3) will load the game with **no terrain**. Any host
-with server-side rewrites works; this repo is set up for Pages.
+**GitHub Pages is wired up already.** `.github/workflows/pages.yml` builds and publishes on every
+push (`actions/configure-pages` with `enablement: true`, so the first run turns Pages on by itself)
+and the site lands at `https://<owner>.github.io/HITLEGAME/`. Pages serves one deployment at a time,
+so the most recent push to any branch is what's live.
 
-One-time setup:
+Two things a subpath deploy has to get right, both handled in the workflow:
 
-1. Cloudflare dashboard → **Workers & Pages → Create → Pages → Connect to Git**, pick this repo.
-2. Build command `npm run build`, output directory `dist`. (`wrangler.toml` also declares the
-   output dir, so this should be pre-filled.)
-3. Optional: add `VITE_CESIUM_ION_TOKEN` under Settings → Environment variables for the Ion
-   basemap. Without it the globe uses the stylized fallback — theater terrain works regardless,
-   since that comes through the Function.
+- **`base`.** A project site is served from `/HITLEGAME/`, not the root, so the workflow passes
+  `VITE_BASE` and `vite.config.ts` reads it (defaulting to `/` for a root-served host). Anything
+  loading an asset must go through `import.meta.env.BASE_URL` — see `obelisks.ts` and `ui/music.ts`.
+- **Cesium's payload.** `vite-plugin-cesium` joins `base` into both the asset URL *and* its copy
+  destination, so a subpath build writes `dist/<base>/cesium` while `index.html` asks for
+  `<base>/cesium`. The workflow hoists it to `dist/cesium` and asserts `Cesium.js` is there, so a
+  layout change fails the build instead of shipping a site with no globe engine.
 
-After that every push builds: `main` gets the production URL, every other branch its own preview
-URL. To test the Function locally without deploying:
-
-```
-npm run build
-npx wrangler pages dev          # serves dist/ + functions/ together
-```
-
-**Playtesting the RTS opponent.** Millstone is off by default. The toggle lives in the dev panel
-(gear icon, top right) which *does* ship in production — but the title screen covers the gear, so
-the order is: start a match → gear → tick **RTS: Millstone attacks** → `Esc` → start another match.
-The flag applies to the next match, because an enemy base can't be conjured into a theater that was
-built without one.
+Optional: set a `VITE_CESIUM_ION_TOKEN` repository secret for the Ion basemap. Without it the globe
+uses the stylized fallback; theater terrain works either way.
 
 ## Data & attribution
 

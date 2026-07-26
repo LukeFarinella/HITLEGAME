@@ -1,4 +1,5 @@
 import * as Cesium from 'cesium';
+import { terrariumTileUrl } from './TerrariumTerrainProvider';
 
 /**
  * A theater is ONE static mesh, built once, at a single fixed resolution.
@@ -362,7 +363,7 @@ async function fetchElevation(bbox: [number, number, number, number], zoom: numb
       const cx = i % cols;
       const cy = (i / cols) | 0;
       try {
-        const res = await fetch(`/tiles/terrarium/${zoom}/${xMin + cx}/${yMin + cy}.png`);
+        const res = await fetch(terrariumTileUrl(zoom, xMin + cx, yMin + cy));
         if (!res.ok) return;
         const bmp = await createImageBitmap(await res.blob());
         ctx.drawImage(bmp, cx * TILE_PX, cy * TILE_PX);

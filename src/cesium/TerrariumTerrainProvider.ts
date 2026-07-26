@@ -7,8 +7,14 @@ import * as Cesium from 'cesium';
  * land PLUS ETOPO1/GEBCO bathymetry for the seafloor, in one global source — so we get relief
  * above AND below water with no Ion asset.
  *
- * Tiles come through the Vite dev proxy (`/tiles/terrarium/...`): the S3 bucket sends no CORS
- * header and we must read pixels back off a canvas.
+ * Tiles are fetched STRAIGHT FROM S3. That was not always possible: this provider used to go
+ * through a Vite dev proxy because the bucket served no CORS header, and we read pixels back off a
+ * canvas, so a tainted response was useless. AWS has since enabled CORS on `elevation-tiles-prod`
+ * — measured: `Access-Control-Allow-Origin: *`, `Access-Control-Allow-Methods: GET` — so the proxy
+ * is gone and the app is a plain static bundle again, hostable anywhere.
+ *
+ * If that ever regresses, the symptom is every tile failing at the fetch (not the decode), and the
+ * fix is to reinstate a `/tiles/terrarium/*` proxy and point {@link terrariumTileUrl} back at it.
  *
  * Encoding: elevation(m) = R*256 + G + B/256 - 32768
  *
@@ -61,7 +67,15 @@ const scratchCtx = scratch.getContext('2d', { willReadFrequently: true })!;
 const maskCanvas = document.createElement('canvas');
 const maskCtx = maskCanvas.getContext('2d', { willReadFrequently: true })!;
 
-const tileUrl = (z: number, x: number, y: number) => `/tiles/terrarium/${z}/${x}/${y}.png`;
+/**
+ * One terrarium tile's URL. The single place either consumer builds one — this provider for
+ * Cesium's terrain, and theaterMap's stitcher for the baked elevation grid — so switching source
+ * (or reinstating a proxy) is a one-line change rather than a hunt.
+ */
+export const terrariumTileUrl = (z: number, x: number, y: number) =>
+  `https://elevation-tiles-prod.s3.amazonaws.com/terrarium/${z}/${x}/${y}.png`;
+
+const tileUrl = terrariumTileUrl;
 
 export class TerrariumTerrainProvider {
   private readonly _tilingScheme = new Cesium.WebMercatorTilingScheme();
