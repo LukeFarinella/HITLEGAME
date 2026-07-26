@@ -5,12 +5,13 @@ import {
   UNIT_SCALE,
   UNIT_KINDS,
   PLATFORM_KINDS,
+  MILLSTONE_KINDS,
   platformIcon,
   hostilePlatformIcon,
   type UnitKind,
 } from './unitModels';
 import { PLATFORM_BY_ID, type PlatformId } from '../game/platforms';
-import type { CombatStats } from '../game/rts/combat';
+import type { AttackKind, Weapon } from '../game/rts/weapons';
 import type { RoadNet, RoadClass } from './roads';
 import { makeViolation, VIOLATION_TTL_S, type LiveViolation } from '../game/violations';
 import { RouteGraph } from './routeGraph';
@@ -180,6 +181,19 @@ const SPEED: Record<UnitKind, number> = {
   // The worker skidsteer is RTS-only and has no campaign catalog entry, so its speed is set here
   // directly. Brisk — it has to cross a base to build without feeling like a chore.
   skid: 300,
+  // Millstone. Set here for the same reason as the skid: none of these has a campaign catalog
+  // entry, because none of them is for sale. Each is pitched against the Gorgon unit it answers,
+  // and the melee line is deliberately FASTER than what it chases — a melee army that can be
+  // outrun is a melee army that never fights.
+  drudge: 300,
+  ripper: 175, // beats the quadruped's 132, so falling back is not a free answer
+  flenser: 900, // beats the arachnid's 780 — nothing on the ground escapes it
+  bulwark: 300, // artillery: slower than the marshal it outguns
+  mote: 200,
+  shrike: 3400,
+  hulk: 460,
+  censer: 4800,
+  leviathan: 70, // slower than the giga walker. It arrives when it arrives.
 };
 /**
  * Height above the sampled ground, metres. Land/foot clear the road ribbon (draped at +12) so
@@ -203,6 +217,17 @@ const RIDE_HEIGHT: Record<UnitKind, number> = {
   naval: 1, // floats on the water plane, like the ambient shipping
   interceptor: 0,
   skid: 5, // a wheeled vehicle sitting on the road drape
+  // Millstone. Its flyers have no campaign catalog entry to read a cruise altitude from, so their
+  // altitude IS their ride height — which is why these three are the only large numbers in here.
+  drudge: 5,
+  ripper: 4,
+  flenser: 4,
+  bulwark: 3,
+  mote: 400, // against the kite's 400
+  shrike: 2400, // against the raptor's 2400
+  hulk: 1, // floats
+  censer: 1800, // against the disc's 1800
+  leviathan: 3,
 };
 
 /**
@@ -210,8 +235,33 @@ const RIDE_HEIGHT: Record<UnitKind, number> = {
  * wide-aperture pod widens it), and read every frame — so it's mutable state rather than a constant.
  */
 export const PLATFORM_SENSOR: Record<string, number> = {};
+/**
+ * A counter per unit kind, all zero. Built from {@link UNIT_KINDS} rather than written out, so
+ * adding a chassis can't silently leave a tally short one column.
+ */
+function zeroByKind(): Record<UnitKind, number> {
+  return Object.fromEntries(UNIT_KINDS.map((k) => [k, 0])) as Record<UnitKind, number>;
+}
+
 /** Within this many metres of its ordered destination, a platform is "on station". */
 const ARRIVE_M = 120;
+
+/**
+ * How far a Millstone unit will divert from its march to fight something.
+ *
+ * Wide enough that a wave engages the army sent to stop it rather than filing past it into the
+ * base, narrow enough that it doesn't abandon the assault to chase one scout across the theater.
+ */
+const MILLSTONE_AGGRO_M = 2500;
+
+/**
+ * How far past its own reach a melee unit will lunge, unordered, to close the last gap.
+ *
+ * Small on purpose. This exists so a melee unit that has been walked into a fight actually fights,
+ * not so it goes hunting: at 2.5x a ripper's 120 m drum that is 300 m, which is a step, not a
+ * decision. Anything further is the operator's call.
+ */
+const MELEE_LUNGE_MULT = 2.5;
 
 /** Clicking this close to a leg already on the route closes the loop instead of adding a leg. */
 const LOOP_SNAP_M = 1500;
@@ -595,11 +645,16 @@ interface Unit {
     side: 0 | 1;
     hp: number;
     maxHp: number;
-    rangeM: number;
-    dmg: number;
-    periodS: number;
-    /** Seconds until this weapon can fire again. */
-    cd: number;
+    /**
+     * Everything this unit fires, each on its own clock. A unit with a mortar and a hull gun runs
+     * both independently — the gun keeps working while the mortar reloads, which is the whole
+     * reason to fit a second weapon rather than a bigger one.
+     */
+    weapons: { w: Weapon; cd: number }[];
+    /** Longest reach across all weapons — what the march logic halts at. */
+    reachM: number;
+    /** True when every weapon it owns is melee: the units that have to close to matter. */
+    meleeOnly: boolean;
     /** Garrison flag: stand the ground instead of marching on the enemy (Millstone's Nexus guard). */
     hold?: boolean;
   };
@@ -610,6 +665,10 @@ const CALLSIGN: Record<UnitKind, string> = {
   land: 'CV', sea: 'SV', air: 'AV', foot: 'FT',
   drone: 'GORGON', dog: 'K9', quad: 'KITE', spider: 'ARC', biped: 'MAR', walker: 'COL',
   naval: 'LIT', interceptor: 'RAP', skid: 'WRK',
+  // Millstone's callsigns are numbered rather than named — you don't get to know what they call
+  // their hardware, only what it is.
+  drudge: 'MS-D', ripper: 'MS-R', flenser: 'MS-F', bulwark: 'MS-B', mote: 'MS-M',
+  shrike: 'MS-S', hulk: 'MS-H', censer: 'MS-C', leviathan: 'MS-L',
 };
 /** Human label per kind, for the panel. */
 export const KIND_LABEL: Record<UnitKind, string> = {
@@ -626,6 +685,15 @@ export const KIND_LABEL: Record<UnitKind, string> = {
   naval: 'LITTORAL DRONE',
   interceptor: 'RAPTOR INTERCEPTOR',
   skid: 'WORKER SKIDSTEER',
+  drudge: 'MILLSTONE DRUDGE',
+  ripper: 'MILLSTONE RIPPER',
+  flenser: 'MILLSTONE FLENSER',
+  bulwark: 'MILLSTONE BULWARK',
+  mote: 'MILLSTONE MOTE',
+  shrike: 'MILLSTONE SHRIKE',
+  hulk: 'MILLSTONE HULK',
+  censer: 'MILLSTONE CENSER',
+  leviathan: 'MILLSTONE LEVIATHAN',
 };
 
 /** Metres/second per kind (mirrors SPEED) surfaced for the panel. */
@@ -644,14 +712,58 @@ export interface RtsStructTarget {
   radiusM: number;
 }
 
+/** One weapon discharge, for the renderer. `kind` decides how it is drawn. */
+export interface RtsShot {
+  flon: number;
+  flat: number;
+  falt: number;
+  tlon: number;
+  tlat: number;
+  talt: number;
+  side: 0 | 1;
+  /**
+   * How it should read. A RANGED shot is a beam from muzzle to target and the damage has already
+   * landed; a MELEE shot is a short flash at contact; a PROJECTILE shot is only the muzzle event —
+   * the round itself is in {@link RtsCombatEvents.rounds} until it arrives.
+   */
+  kind: AttackKind;
+}
+
 /** What one frame of RTS combat did, for the scene to render and score. */
 export interface RtsCombatEvents {
-  /** Every weapon discharge: draw a beam. `side` picks the beam's colour. */
-  shots: { flon: number; flat: number; falt: number; tlon: number; tlat: number; talt: number; side: 0 | 1 }[];
+  /** Every weapon discharge this frame. */
+  shots: RtsShot[];
   /** Combatants destroyed this frame. Their supply/roles are the scene's to release. */
   kills: { index: number; kind: UnitKind; side: 0 | 1; lon: number; lat: number }[];
   /** Damage dealt to structures, keyed by the id the scene passed in. */
   hits: { id: number; dmg: number; lon: number; lat: number }[];
+  /** Every round currently in the air, rebuilt each frame — the renderer just draws this list. */
+  rounds: { lon: number; lat: number; alt: number; side: 0 | 1 }[];
+  /** Where rounds landed this frame, and how wide. Drives the blast. */
+  impacts: { lon: number; lat: number; alt: number; radiusM: number; side: 0 | 1 }[];
+}
+
+/**
+ * A round in the air.
+ *
+ * Projectiles are the one part of combat that outlives the frame that created it, so they're field
+ * state rather than an event. Aim is fixed at FIRE time — the round flies at where the target stood
+ * when the trigger went, never at where it is now — which is what makes leading a fast unit fail and
+ * makes artillery a weapon for hitting slow things and ground.
+ */
+interface Munition {
+  side: 0 | 1;
+  flon: number;
+  flat: number;
+  falt: number;
+  tlon: number;
+  tlat: number;
+  talt: number;
+  /** Seconds elapsed and total, so position is a straight lerp. */
+  t: number;
+  flightS: number;
+  dmg: number;
+  splashM: number;
 }
 
 /** What the panel renders for the current selection (one unit, or a summary of many). */
@@ -851,10 +963,7 @@ export class UnitField {
   private heightAt: (lon: number, lat: number) => number;
   private shoreAt: (lon: number, lat: number) => number;
   private scratch = new Cesium.Cartesian3();
-  private nextId: Record<UnitKind, number> = {
-    land: 0, sea: 0, air: 0, foot: 0, drone: 0, dog: 0, quad: 0, spider: 0, biped: 0, walker: 0,
-    naval: 0, interceptor: 0, skid: 0,
-  };
+  private nextId: Record<UnitKind, number> = zeroByKind();
   /** Obelisk coverage test, used both to seed infection and to steer it toward the dark. */
   private isCovered?: (lon: number, lat: number) => boolean;
   /**
@@ -931,7 +1040,12 @@ export class UnitField {
       naval: new InstancedModelBatch(UNIT_MESHES.naval, pcap('naval'), bounds, true),
       interceptor: new InstancedModelBatch(UNIT_MESHES.interceptor, pcap('interceptor'), bounds, true),
       skid: new InstancedModelBatch(UNIT_MESHES.skid, pcap('skid'), bounds, true),
-    };
+    } as Record<UnitKind, InstancedModelBatch>;
+    // Millstone's batches. Sized by the RTS override like the player's, and left at 1 in the
+    // campaign, where none of these is ever fielded and an empty batch costs nothing to draw.
+    for (const k of MILLSTONE_KINDS) {
+      this.batches[k] = new InstancedModelBatch(UNIT_MESHES[k], counts.platformCap ?? 1, bounds, true);
+    }
 
     // Vehicles favour freeways heavily (constant motorway flow); pedestrians stay on surface streets.
     this.spawnRoadUnits('land', counts.land, 0.45);
@@ -1258,19 +1372,32 @@ export class UnitField {
   /** Indices of every living RTS combatant, so the pass never scans 24,000 civilians. */
   private rtsCombatants = new Set<number>();
 
-  /** Arm an existing platform unit for the match — the opening units and everything produced. */
-  armRtsCombat(index: number, side: 0 | 1, stats: CombatStats): void {
+  /** Rounds in the air, both sides. Advanced by the combat pass, drawn by the scene. */
+  private munitions: Munition[] = [];
+
+  /**
+   * Arm an existing platform unit for the match — the opening units and everything produced.
+   *
+   * Called again whenever a loadout changes, so it has to be idempotent about health: a unit that
+   * has already taken damage keeps the damage. Refitting a weapon is not a repair.
+   */
+  armRtsCombat(index: number, side: 0 | 1, arms: { hp: number; weapons: Weapon[] }): void {
     const u = this.units[index];
     if (!u) return;
+    const prev = u.rtsc;
     u.rtsc = {
       side,
-      hp: stats.hp,
-      maxHp: stats.hp,
-      rangeM: stats.rangeM,
-      dmg: stats.dmg,
-      periodS: stats.periodS,
-      // Staggered so a simultaneously-fielded squad doesn't fire in eerie unison forever.
-      cd: Math.random() * stats.periodS,
+      // Keep the current hp across a refit, but let the ceiling move if the chassis' did.
+      hp: prev ? Math.min(prev.hp, arms.hp) : arms.hp,
+      maxHp: arms.hp,
+      weapons: arms.weapons.map((w) => ({
+        w,
+        // Staggered so a simultaneously-fielded squad doesn't fire in eerie unison forever.
+        cd: Math.random() * w.periodS,
+      })),
+      reachM: arms.weapons.reduce((m, w) => Math.max(m, w.rangeM), 0),
+      meleeOnly: arms.weapons.length > 0 && arms.weapons.every((w) => w.kind === 'melee'),
+      hold: prev?.hold,
     };
     this.rtsCombatants.add(index);
   }
@@ -1280,7 +1407,13 @@ export class UnitField {
    * green ring/icon, never marquee- or click-selectable, and NOT registered in platformIdx — so it
    * never shows up in "your platforms", never extends your sensor coverage, and never takes orders.
    */
-  spawnRtsEnemy(kind: PlatformId, lon: number, lat: number, stats: CombatStats, hold = false): number {
+  spawnRtsEnemy(
+    kind: UnitKind,
+    lon: number,
+    lat: number,
+    arms: { hp: number; weapons: Weapon[] },
+    hold = false,
+  ): number {
     const i = this.units.length;
     this.units.push({
       id: this.mkId(kind),
@@ -1297,7 +1430,7 @@ export class UnitField {
     grown.set(this.ecef);
     this.ecef = grown;
     this.addPlatformVisual(kind, i, true);
-    this.armRtsCombat(i, 1, stats);
+    this.armRtsCombat(i, 1, arms);
     this.units[i].rtsc!.hold = hold;
     return i;
   }
@@ -1322,115 +1455,267 @@ export class UnitField {
   }
 
   /**
+   * Land damage on one combatant, killing it and recording the kill if that takes it to zero.
+   * Every path that hurts a unit goes through here so "died" is decided in exactly one place.
+   */
+  private damageUnit(j: number, dmg: number, ev: RtsCombatEvents): void {
+    const v = this.units[j];
+    if (!v || v.dead || !v.rtsc) return;
+    v.rtsc.hp -= dmg;
+    if (v.rtsc.hp > 0) return;
+    v.dead = true;
+    this.selection.delete(j);
+    this.rtsCombatants.delete(j);
+    ev.kills.push({ index: j, kind: v.kind, side: v.rtsc.side, lon: v.lon, lat: v.lat });
+  }
+
+  /** Ground distance between two lon/lat points, metres. */
+  private distLL(alon: number, alat: number, blon: number, blat: number): number {
+    const mLon = mPerLat * Math.cos(alat * DEG);
+    return Math.hypot((blon - alon) * mLon, (blat - alat) * mPerLat);
+  }
+
+  /**
+   * Advance every round in the air, landing the ones that arrive.
+   *
+   * A round that arrives applies its damage in a RADIUS and does not check flags — anything inside
+   * the splash takes it, including the side that fired. Firing units refuse to loose a splash round
+   * into their own people (see the fire logic), so this only ever catches someone who walked into a
+   * round that was already committed. That is the honest version of an area weapon: the decision to
+   * fire is answerable, and the seconds afterwards are not yours.
+   */
+  private stepMunitions(dt: number, structs: RtsStructTarget[], live: number[], ev: RtsCombatEvents): void {
+    if (!this.munitions.length) return;
+    const still: Munition[] = [];
+    for (const m of this.munitions) {
+      m.t += dt;
+      if (m.t < m.flightS) {
+        const k = m.t / m.flightS;
+        ev.rounds.push({
+          lon: m.flon + (m.tlon - m.flon) * k,
+          lat: m.flat + (m.tlat - m.flat) * k,
+          // Lofted, so a shell arcs over the ground between the gun and the target instead of
+          // sliding along it. The lift is proportional to the flight, so a long shot arcs high.
+          alt: m.falt + (m.talt - m.falt) * k + Math.sin(Math.PI * k) * m.flightS * 60,
+          side: m.side,
+        });
+        still.push(m);
+        continue;
+      }
+
+      // Arrival.
+      const r = m.splashM;
+      ev.impacts.push({ lon: m.tlon, lat: m.tlat, alt: m.talt, radiusM: Math.max(40, r), side: m.side });
+      if (r <= 0) continue;
+      for (const j of live) {
+        const v = this.units[j];
+        if (!v || v.dead || !v.rtsc) continue;
+        if (this.distLL(m.tlon, m.tlat, v.lon, v.lat) <= r) this.damageUnit(j, m.dmg, ev);
+      }
+      for (const s of structs) {
+        if (s.side === m.side) continue; // a shell does not raze the base that fired it
+        if (this.distLL(m.tlon, m.tlat, s.lon, s.lat) - s.radiusM <= r) {
+          ev.hits.push({ id: s.id, dmg: m.dmg, lon: s.lon, lat: s.lat });
+        }
+      }
+    }
+    this.munitions = still;
+  }
+
+  /** Whether any unit on `side` is standing inside `r` of a point — the splash safety check. */
+  private friendlyWithin(side: 0 | 1, lon: number, lat: number, r: number, live: number[]): boolean {
+    for (const j of live) {
+      const v = this.units[j];
+      if (!v || v.dead || !v.rtsc || v.rtsc.side !== side) continue;
+      if (this.distLL(lon, lat, v.lon, v.lat) <= r) return true;
+    }
+    return false;
+  }
+
+  /**
    * Run one frame of RTS combat.
    *
    * `structs` is every standing structure on both sides (player base + Millstone's Nexus), because
-   * structures are combat's other target class. March logic first, then fire: Millstone's units
-   * head for the nearest player structure and stop just inside their own weapon's reach; everything
-   * armed then shoots the nearest opposing UNIT in range, or failing that the nearest opposing
-   * STRUCTURE. Units die in here (they're this module's); structure damage is handed back to the
-   * scene, which owns what a structure's fall means.
+   * structures are combat's other target class. The pass runs in three stages:
+   *
+   *   1. ROUNDS IN THE AIR advance and land. Done first, so a shell fired last frame kills its
+   *      target before that target gets another turn to shoot.
+   *   2. MOVEMENT. Millstone's units march — at the nearest player UNIT if one is close enough to
+   *      be worth fighting, otherwise at the nearest player STRUCTURE — halting just inside their
+   *      own reach. A melee unit on either side that has no standing order lunges at anything it
+   *      can nearly touch, which is what lets melee work without being micromanaged into contact.
+   *   3. FIRE. Every weapon on every unit, each on its own cooldown, at the nearest opposing unit
+   *      in ITS range or failing that the nearest opposing structure.
+   *
+   * Units die in here (they're this module's); structure damage is handed back to the scene, which
+   * owns what a structure's fall means.
    */
   rtsCombatTick(dt: number, structs: RtsStructTarget[]): RtsCombatEvents {
-    const ev: RtsCombatEvents = { shots: [], kills: [], hits: [] };
-    if (!this.rtsCombatants.size) return ev;
+    const ev: RtsCombatEvents = { shots: [], kills: [], hits: [], rounds: [], impacts: [] };
     const list: number[] = [];
     for (const i of this.rtsCombatants) {
       const u = this.units[i];
       if (!u || u.dead || !u.rtsc) this.rtsCombatants.delete(i);
       else list.push(i);
     }
+    this.stepMunitions(dt, structs, list, ev);
+    if (!list.length) return ev;
 
     for (const i of list) {
       const u = this.units[i];
       if (u.dead) continue; // killed earlier this same tick
       const c = u.rtsc!;
 
-      // Millstone's march: at the nearest player structure, halting just inside weapon range. Re-
-      // aimed every frame so a structure's fall reroutes the survivors without anyone remembering
-      // anything. Garrison units hold their ground and let the fight come to them.
+      // ---- movement ----------------------------------------------------------------------------
       if (c.side === 1 && !c.hold) {
-        let best: RtsStructTarget | null = null;
-        let bd = Infinity;
-        for (const s of structs) {
-          if (s.side !== 0) continue;
-          const d = this.distM(u, s.lon, s.lat);
+        // Something to fight, close by, beats a building further off. Without this a melee army
+        // walks straight past the army shooting it in order to chew on a supply depot.
+        let tlon: number | undefined;
+        let tlat: number | undefined;
+        let bd = MILLSTONE_AGGRO_M;
+        for (const j of list) {
+          const v = this.units[j];
+          if (v.dead || !v.rtsc || v.rtsc.side === 1) continue;
+          const d = this.distM(u, v.lon, v.lat);
           if (d < bd) {
             bd = d;
-            best = s;
+            tlon = v.lon;
+            tlat = v.lat;
           }
         }
-        if (best) {
-          const stop = Math.max(250, (c.rangeM || 400) * 0.9);
+        if (tlon === undefined) {
+          // Nothing worth chasing — back to the base. Re-aimed every frame, so a structure's fall
+          // reroutes the survivors without anyone remembering anything.
+          bd = Infinity;
+          for (const s of structs) {
+            if (s.side !== 0) continue;
+            const d = this.distM(u, s.lon, s.lat);
+            if (d < bd) {
+              bd = d;
+              tlon = s.lon;
+              tlat = s.lat;
+            }
+          }
+        }
+        if (tlon !== undefined && tlat !== undefined) {
+          const stop = Math.max(120, (c.reachM || 400) * 0.9);
           if (bd > stop) {
-            u.tlon = best.lon;
-            u.tlat = best.lat;
+            u.tlon = tlon;
+            u.tlat = tlat;
           } else if (u.tlon !== undefined) {
             u.tlon = undefined;
             u.tlat = undefined;
             u.route = undefined;
           }
         }
-      }
-
-      if (c.dmg <= 0) continue; // a worker only ever dies in here
-      c.cd = Math.max(0, c.cd - dt);
-      if (c.cd > 0) continue;
-
-      // Prefer the nearest opposing unit in range — the thing shooting back.
-      let tj = -1;
-      let bd = c.rangeM;
-      for (const j of list) {
-        if (j === i) continue;
-        const v = this.units[j];
-        if (v.dead || !v.rtsc || v.rtsc.side === c.side) continue;
-        const d = this.distM(u, v.lon, v.lat);
-        if (d <= bd) {
-          bd = d;
-          tj = j;
+      } else if (c.meleeOnly && u.tlon === undefined) {
+        // A melee unit with no orders takes the last few metres itself. Bounded hard: it will lunge
+        // at something already on top of it, and it will not wander off across the map to find one,
+        // because that would be the field overriding an operator who chose to hold this ground.
+        let bd = c.reachM * MELEE_LUNGE_MULT;
+        for (const j of list) {
+          const v = this.units[j];
+          if (v.dead || !v.rtsc || v.rtsc.side === c.side) continue;
+          const d = this.distM(u, v.lon, v.lat);
+          if (d < bd && d > c.reachM * 0.8) {
+            bd = d;
+            u.tlon = v.lon;
+            u.tlat = v.lat;
+          }
         }
       }
-      if (tj >= 0) {
-        const v = this.units[tj];
-        c.cd = c.periodS;
-        ev.shots.push({
-          flon: u.lon, flat: u.lat, falt: this.combatAltOf(u),
-          tlon: v.lon, tlat: v.lat, talt: this.combatAltOf(v),
-          side: c.side,
-        });
-        v.rtsc!.hp -= c.dmg;
-        if (v.rtsc!.hp <= 0) {
-          v.dead = true;
-          this.selection.delete(tj);
-          this.rtsCombatants.delete(tj);
-          ev.kills.push({ index: tj, kind: v.kind, side: v.rtsc!.side, lon: v.lon, lat: v.lat });
-        }
-        continue;
-      }
 
-      // No unit in reach — pound the nearest opposing structure, measured to its rim, not its
-      // centre, so a wide footprint doesn't put its own middle out of range.
-      let ts: RtsStructTarget | null = null;
-      let bs = c.rangeM;
-      for (const s of structs) {
-        if (s.side === c.side) continue;
-        const d = this.distM(u, s.lon, s.lat) - s.radiusM;
-        if (d <= bs) {
-          bs = d;
-          ts = s;
+      // ---- fire --------------------------------------------------------------------------------
+      const falt = this.combatAltOf(u);
+      for (const slot of c.weapons) {
+        slot.cd = Math.max(0, slot.cd - dt);
+        if (slot.cd > 0) continue;
+        const w = slot.w;
+
+        // Prefer the nearest opposing unit in THIS weapon's range — the thing shooting back.
+        let tj = -1;
+        let bd = w.rangeM;
+        for (const j of list) {
+          if (j === i) continue;
+          const v = this.units[j];
+          if (v.dead || !v.rtsc || v.rtsc.side === c.side) continue;
+          const d = this.distM(u, v.lon, v.lat);
+          if (d <= bd) {
+            bd = d;
+            tj = j;
+          }
         }
-      }
-      if (ts) {
-        c.cd = c.periodS;
-        ev.shots.push({
-          flon: u.lon, flat: u.lat, falt: this.combatAltOf(u),
-          tlon: ts.lon, tlat: ts.lat, talt: this.heightAt(ts.lon, ts.lat) + 60,
-          side: c.side,
-        });
-        ev.hits.push({ id: ts.id, dmg: c.dmg, lon: ts.lon, lat: ts.lat });
+        if (tj >= 0) {
+          const v = this.units[tj];
+          // Never loose a splash round into a scrum containing your own people. The cooldown is
+          // deliberately NOT reset: the weapon is held, ready, for a shot that isn't suicide.
+          if (w.splashM && this.friendlyWithin(c.side, v.lon, v.lat, w.splashM, list)) continue;
+          slot.cd = w.periodS;
+          this.fireAt(u, c.side, falt, w, v.lon, v.lat, this.combatAltOf(v), ev);
+          if (w.kind !== 'projectile') this.damageUnit(tj, w.dmg, ev);
+          continue;
+        }
+
+        // No unit in reach — pound the nearest opposing structure, measured to its rim, not its
+        // centre, so a wide footprint doesn't put its own middle out of range.
+        let ts: RtsStructTarget | null = null;
+        let bs = w.rangeM;
+        for (const s of structs) {
+          if (s.side === c.side) continue;
+          const d = this.distM(u, s.lon, s.lat) - s.radiusM;
+          if (d <= bs) {
+            bs = d;
+            ts = s;
+          }
+        }
+        if (ts) {
+          slot.cd = w.periodS;
+          const talt = this.heightAt(ts.lon, ts.lat) + 60;
+          this.fireAt(u, c.side, falt, w, ts.lon, ts.lat, talt, ev);
+          // A projectile books its damage on arrival, not on firing.
+          if (w.kind !== 'projectile') ev.hits.push({ id: ts.id, dmg: w.dmg, lon: ts.lon, lat: ts.lat });
+        }
       }
     }
     return ev;
+  }
+
+  /**
+   * Discharge one weapon at a point: record the muzzle event, and for a projectile put a round in
+   * the air. Hitscan damage is the caller's to apply — it knows whether it hit a unit or a wall.
+   */
+  private fireAt(
+    u: Unit,
+    side: 0 | 1,
+    falt: number,
+    w: Weapon,
+    tlon: number,
+    tlat: number,
+    talt: number,
+    ev: RtsCombatEvents,
+  ): void {
+    ev.shots.push({
+      flon: u.lon, flat: u.lat, falt,
+      tlon, tlat, talt,
+      side,
+      kind: w.kind,
+    });
+    if (w.kind !== 'projectile') return;
+    const d = this.distLL(u.lon, u.lat, tlon, tlat);
+    this.munitions.push({
+      side,
+      flon: u.lon, flat: u.lat, falt,
+      tlon, tlat, talt,
+      t: 0,
+      flightS: Math.max(0.15, d / (w.speedMps ?? 800)),
+      dmg: w.dmg,
+      splashM: w.splashM ?? 0,
+    });
+  }
+
+  /** Drop every round in the air — a match ending shouldn't rain shells on the next one. */
+  clearMunitions(): void {
+    this.munitions.length = 0;
   }
 
   /** Platform TYPES currently fielded, in catalog order. */
@@ -2842,7 +3127,7 @@ export class UnitField {
    * The two collections stay index-aligned with {@link platformUnitOrder} because every platform kind
    * has an icon; that alignment is what updatePlatformVisuals relies on.
    */
-  private addPlatformVisual(kind: PlatformId, index: number, hostile = false): void {
+  private addPlatformVisual(kind: UnitKind, index: number, hostile = false): void {
     const SEG = 72;
     this.platformUnitOrder.push(index);
 
@@ -3225,10 +3510,7 @@ export class UnitField {
   /** Live info for the selection: one unit's full stats, or a summary of many. */
   selected(): SelectionInfo | null {
     if (this.selection.size === 0) return null;
-    const byKind: Record<UnitKind, number> = {
-      land: 0, sea: 0, air: 0, foot: 0, drone: 0, dog: 0, quad: 0, spider: 0, biped: 0, walker: 0,
-      naval: 0, interceptor: 0, skid: 0,
-    };
+    const byKind: Record<UnitKind, number> = zeroByKind();
     const byBand: Record<'clear' | 'suspect' | 'threat', number> = { clear: 0, suspect: 0, threat: 0 };
     let markedCount = 0;
     let trackedCount = 0;

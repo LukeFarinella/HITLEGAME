@@ -16,6 +16,8 @@
 import { STRUCTURES, type Structure, type StructureType } from './structures';
 import { RTS_UNITS, RTS_REGEN, type RtsUnitId } from './units';
 import { RESEARCH, type ResearchId } from './research';
+import { hardpointsOf } from './combat';
+import { MOUNT_BY_ID, mountFits, type RtsLoadout, type WeaponId } from './weapons';
 
 /** Economy tuning. One place, so the whole balance of the opening is a handful of readable numbers. */
 export const RTS_ECON = {
@@ -50,6 +52,12 @@ export interface RtsUnitState {
   unit: RtsUnitId;
   shield: number;
   energy: number;
+  /**
+   * What is bolted into this unit's hardpoints, one entry per slot. Per-UNIT, not per-type: two
+   * marshals rolled off the same line can carry different weapons, which is the whole point of
+   * fitting rather than researching. Empty slots are null.
+   */
+  loadout: RtsLoadout;
 }
 
 /** One unit waiting in a building's production queue. */
@@ -255,11 +263,59 @@ export class RtsGame {
    */
   registerUnit(index: number, unit: RtsUnitId, chargeSupply = true): RtsUnitState {
     const def = RTS_UNITS[unit];
-    const s: RtsUnitState = { index, unit, shield: def.maxShield, energy: def.maxEnergy };
+    const s: RtsUnitState = {
+      index,
+      unit,
+      shield: def.maxShield,
+      energy: def.maxEnergy,
+      // Rolls out with every slot empty. A unit is never born with a weapon it didn't get fitted —
+      // the basic attack is the chassis', and everything else is bought.
+      loadout: new Array(hardpointsOf(def.meshKind)).fill(null),
+    };
     this.unitStates.set(index, s);
     if (chargeSupply) this._supplyUsed += def.supply;
     this.changed();
     return s;
+  }
+
+  // ---- hardpoints ------------------------------------------------------------------------------
+
+  /**
+   * Why a mount can't go into a slot right now, or null if it can.
+   *
+   * Fitting is deliberately cheap to check and impossible to undo: there's no "unfit and refund"
+   * path, because a pod bolted to a chassis in the field is spent. Replacing one costs full price,
+   * which is what stops the loadout screen becoming a free toybox to fiddle with between waves.
+   */
+  fitBlocker(index: number, slot: number, mount: WeaponId): string | null {
+    const s = this.unitStates.get(index);
+    if (!s) return 'NO SUCH UNIT';
+    if (slot < 0 || slot >= s.loadout.length) return 'NO SUCH HARDPOINT';
+    const def = MOUNT_BY_ID.get(mount);
+    if (!def) return 'NO SUCH MOUNT';
+    if (!mountFits(def, RTS_UNITS[s.unit].meshKind)) return 'DOES NOT FIT';
+    if (s.loadout[slot] === mount) return 'ALREADY FITTED';
+    if (this._money < def.cost) return 'INSUFFICIENT FUNDS';
+    return null;
+  }
+
+  /**
+   * Bolt a mount into one of a unit's hardpoints, charging for it. Returns false and changes
+   * nothing if {@link fitBlocker} would have refused. The caller re-arms the unit in the field —
+   * this owns the money and the record of what is fitted, not the combat stats.
+   */
+  fitMount(index: number, slot: number, mount: WeaponId): boolean {
+    if (this.fitBlocker(index, slot, mount)) return false;
+    const s = this.unitStates.get(index)!;
+    this._money -= MOUNT_BY_ID.get(mount)!.cost;
+    s.loadout[slot] = mount;
+    this.changed();
+    return true;
+  }
+
+  /** What a unit is carrying, or an empty list if it isn't ours. */
+  loadoutOf(index: number): RtsLoadout {
+    return this.unitStates.get(index)?.loadout ?? [];
   }
 
   /**

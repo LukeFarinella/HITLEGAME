@@ -1624,6 +1624,17 @@ body.dev-open #c2-tasking { display: none; }
 .grc-chip.cat-research .grc-key { background: #8b6fe0; }
 .grc-chip.type-supply .grc-key { background: var(--ok); }
 .grc-chip.type-special .grc-key { background: #e0553f; }
+/* loadout card: hardpoint slots read as sockets, mounts as the things that go in them */
+.grc-chip.cat-slot .grc-key { background: var(--bone); }
+.grc-chip.cat-slot { border-style: dashed; }
+.grc-chip.cat-slot.active { border-style: solid; }
+.grc-chip.cat-slot .grc-cost { color: var(--steel); font-size: 7px; }
+.grc-chip.cat-mount .grc-key { background: #e0553f; }
+/* a readout is shown, not offered: no hover, no pointer, and the detail line wraps rather than
+   being truncated, because it carries the weapon's actual numbers */
+.grc-readout { cursor: default; max-width: 190px; }
+.grc-readout:hover { border-color: var(--gunmetal); background: rgba(11, 12, 14, .92); }
+.grc-readout .grc-cost { color: var(--steel); font-size: 7px; text-align: center; white-space: normal; }
 /* the context label at the left of the bar ("BUILD", "ROBOTICS", …) */
 .grc-label {
   align-self: center; font: 700 8px/1.2 var(--mono); letter-spacing: .16em;

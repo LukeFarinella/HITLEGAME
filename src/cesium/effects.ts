@@ -717,3 +717,65 @@ export class Sparks {
     this.collection.destroy();
   }
 }
+
+// ---- rounds in flight ---------------------------------------------------------------------------
+
+/** Player ordnance, and Millstone's — the same two flags the beams use. */
+const ROUND_FRIENDLY = Cesium.Color.fromCssColorString('#FFC24A');
+const ROUND_HOSTILE = Cesium.Color.fromCssColorString('#7FE3A6');
+/** Sized so a shell is visible crossing a theater without becoming a balloon up close. */
+const ROUND_PX = 7;
+/**
+ * Ceiling on rounds drawn at once. Well above what a wave of artillery puts in the air; anything
+ * past it is dropped for the frame, which is invisible in practice and bounds the primitive count.
+ */
+const ROUND_POOL = 192;
+
+/**
+ * Rounds in the air.
+ *
+ * Unlike every other effect here, these are not FIRED at this layer — the combat sim owns them,
+ * because their arrival deals damage and damage cannot live in the renderer. This just draws the
+ * list the sim hands it each frame, which is why it has a `show` rather than a `fire`: there is no
+ * per-round state on this side at all, and a round that vanishes from the list has landed.
+ */
+export class Rounds {
+  readonly collection = new Cesium.PointPrimitiveCollection();
+  private pool: Cesium.PointPrimitive[] = [];
+
+  constructor() {
+    for (let i = 0; i < ROUND_POOL; i++) {
+      this.pool.push(
+        this.collection.add({
+          position: Cesium.Cartesian3.ZERO,
+          color: ROUND_FRIENDLY,
+          pixelSize: ROUND_PX,
+          show: false,
+          // Reads through terrain, like the sparks — a shell arcing behind a ridge is still the
+          // clearest signal available that artillery is firing at you.
+          disableDepthTestDistance: 1e12,
+        }),
+      );
+    }
+  }
+
+  /** Draw exactly this list of rounds and hide the rest of the pool. Call once per frame. */
+  show(rounds: { lon: number; lat: number; alt: number; side: 0 | 1 }[]): void {
+    const n = Math.min(rounds.length, ROUND_POOL);
+    for (let i = 0; i < n; i++) {
+      const r = rounds[i];
+      const p = this.pool[i];
+      p.position = Cesium.Cartesian3.fromDegrees(r.lon, r.lat, r.alt);
+      p.color = r.side === 1 ? ROUND_HOSTILE : ROUND_FRIENDLY;
+      p.show = true;
+    }
+    for (let i = n; i < ROUND_POOL; i++) {
+      if (this.pool[i].show) this.pool[i].show = false;
+      else break; // the tail past the first hidden slot is already hidden
+    }
+  }
+
+  destroy(): void {
+    this.collection.destroy();
+  }
+}

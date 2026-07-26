@@ -1,13 +1,17 @@
 import { STRUCTURES, BUILDABLE, type StructureType } from '../game/rts/structures';
 import { RTS_UNITS, unitsFrom, type RtsUnitId } from '../game/rts/units';
 import { researchFrom, type ResearchId } from '../game/rts/research';
+import { mountsFor, MOUNT_BY_ID, type RtsLoadout, type WeaponId } from '../game/rts/weapons';
+import { BASIC_ATTACK } from '../game/rts/weapons';
 import type { QueueItem } from '../game/rts/rtsGame';
+import type { UnitKind } from '../cesium/unitModels';
 
 /**
  * The RTS command card — a StarCraft-style bottom bar whose contents depend on what's selected.
  *
  *   worker selected      → BUILD chips (place a structure)
  *   producing building   → PRODUCE chips + the live build queue for that building
+ *   armed unit selected  → LOADOUT: its hardpoints, and the weapons that fit them
  *   anything else        → empty
  *
  * It stays deliberately presentational: it reads a CONTEXT the scene hands it and calls back. The
@@ -17,7 +21,15 @@ import type { QueueItem } from '../game/rts/rtsGame';
 export type CommandContext =
   | { kind: 'none' }
   | { kind: 'build' }
-  | { kind: 'produce'; structureId: number; structureType: StructureType };
+  | { kind: 'produce'; structureId: number; structureType: StructureType }
+  | {
+      kind: 'loadout';
+      /** The unit field index of the single selected unit. */
+      unitIndex: number;
+      unitId: RtsUnitId;
+      meshKind: UnitKind;
+      loadout: RtsLoadout;
+    };
 
 export interface RtsCommandHooks {
   money(): number;
@@ -41,6 +53,10 @@ export interface RtsCommandHooks {
   researchBlocker(id: ResearchId): string | null;
   /** Research in progress at a structure, for the progress strip. */
   researchProgress(structureId: number): { id: ResearchId; pct: number } | null;
+  /** A mount was chosen for a hardpoint on the selected unit. */
+  onFit(unitIndex: number, slot: number, mount: WeaponId): void;
+  /** A reason this mount can't go in this slot (cost, fit, already there), or null. */
+  fitBlocker(unitIndex: number, slot: number, mount: WeaponId): string | null;
 }
 
 export class RtsCommandBar {
@@ -68,6 +84,10 @@ export class RtsCommandBar {
     }
     if (ctx.kind === 'build') {
       this.renderBuild();
+      return;
+    }
+    if (ctx.kind === 'loadout') {
+      this.renderLoadout(ctx);
       return;
     }
     this.renderProduce(ctx.structureId, ctx.structureType);
@@ -134,6 +154,104 @@ export class RtsCommandBar {
     const rp = this.hooks.researchProgress(structureId);
     if (rp) children.push(this.researchStrip(rp.pct));
     this.root.replaceChildren(...children);
+  }
+
+  /**
+   * Which hardpoint the next chosen mount goes into. Reset whenever the selection changes, so
+   * clicking a different unit never quietly fits a weapon to the slot you armed on the last one.
+   */
+  private armedSlot = 0;
+  private armedFor = -1;
+
+  /**
+   * Unit context: the chassis' own attack, its hardpoints, and what will fit in them.
+   *
+   * Reads as a sentence — "this is what it already does, these are its slots, these are the things
+   * that go in a slot" — because a loadout screen that opens on a wall of weapons makes the player
+   * work out what the unit ALREADY has before they can judge what to add.
+   */
+  private renderLoadout(ctx: Extract<CommandContext, { kind: 'loadout' }>): void {
+    if (this.armedFor !== ctx.unitIndex) {
+      this.armedFor = ctx.unitIndex;
+      // Open on the first empty slot: the overwhelmingly common intent is "add a weapon", not
+      // "replace one I already paid for".
+      const empty = ctx.loadout.indexOf(null);
+      this.armedSlot = empty >= 0 ? empty : 0;
+    }
+    if (this.armedSlot >= ctx.loadout.length) this.armedSlot = 0;
+
+    const money = this.hooks.money();
+    const basic = BASIC_ATTACK[ctx.meshKind];
+    const children: (HTMLElement | Node)[] = [this.label(RTS_UNITS[ctx.unitId].name)];
+
+    // The chassis' own weapon, shown but not offered — it can't be changed, and hiding it would
+    // make an unfitted unit look unarmed.
+    children.push(
+      this.readout(
+        basic.name,
+        `${basic.kind.toUpperCase()} · ${basic.rangeM} m · ${basic.dmg} dmg / ${basic.periodS}s`,
+      ),
+    );
+
+    if (!ctx.loadout.length) {
+      children.push(this.readout('NO HARDPOINTS', 'This chassis carries what it was built with.'));
+      this.root.replaceChildren(...children);
+      return;
+    }
+
+    // The slots themselves. Clicking one arms it; the mount chips below fill whichever is armed.
+    for (let i = 0; i < ctx.loadout.length; i++) {
+      const fitted = ctx.loadout[i];
+      const def = fitted ? MOUNT_BY_ID.get(fitted) : undefined;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `grc-chip cat-slot${i === this.armedSlot ? ' active' : ''}`;
+      btn.title = def ? `HARDPOINT ${i + 1} — ${def.name}. Choosing another replaces it at full price.` : `HARDPOINT ${i + 1} — empty.`;
+      btn.innerHTML =
+        `<span class="grc-key">${i + 1}</span>` +
+        `<span class="grc-name">${def ? def.name : 'EMPTY'}</span>` +
+        `<span class="grc-cost">HARDPOINT</span>`;
+      btn.addEventListener('click', () => {
+        this.armedSlot = i;
+        this.render();
+      });
+      children.push(btn);
+    }
+
+    const mounts = mountsFor(ctx.meshKind);
+    if (!mounts.length) {
+      children.push(this.readout('NOTHING FITS', 'No mount in the catalog fits this chassis.'));
+      this.root.replaceChildren(...children);
+      return;
+    }
+    for (const m of mounts) {
+      const blocked = this.hooks.fitBlocker(ctx.unitIndex, this.armedSlot, m.id);
+      // "Already fitted" and "doesn't fit" are locks; being broke just greys the price.
+      const locked = blocked && blocked !== 'INSUFFICIENT FUNDS' ? blocked : null;
+      children.push(
+        this.chip({
+          cls: `cat-mount${locked ? ' locked' : money >= m.cost ? '' : ' broke'}`,
+          hotkey: m.hotkey,
+          name: m.name,
+          cost: m.cost,
+          locked,
+          title:
+            `${m.name} — ${m.blurb} · ${m.weapon.kind.toUpperCase()} · ${m.weapon.rangeM} m · ` +
+            `${m.weapon.dmg} dmg / ${m.weapon.periodS}s`,
+          onClick: () => this.hooks.onFit(ctx.unitIndex, this.armedSlot, m.id),
+        }),
+      );
+    }
+    this.root.replaceChildren(...children);
+  }
+
+  /** A non-interactive chip — something the player is being told, not offered. */
+  private readout(name: string, detail: string): HTMLElement {
+    const el = document.createElement('div');
+    el.className = 'grc-chip grc-readout';
+    el.title = detail;
+    el.innerHTML = `<span class="grc-name">${name}</span><span class="grc-cost">${detail}</span>`;
+    return el;
   }
 
   private label(text: string): HTMLElement {

@@ -53,17 +53,18 @@ import { showStartWindow } from '../ui/start';
 import { showTitle, setTitleTerritory } from '../ui/title';
 import { RtsGame } from '../game/rts/rtsGame';
 import { RtsBuildLayer, type BuildSite } from './rtsBuild';
-import { RtsCommandBar } from '../ui/rtsCommand';
+import { RtsCommandBar, type CommandContext } from '../ui/rtsCommand';
 import { STRUCTURES, BUILDABLE, BUILD_RULES, metresBetween, type StructureType, type Structure } from '../game/rts/structures';
 import { RTS_UNITS, unitsFrom, producesUnits, type RtsUnitId } from '../game/rts/units';
 import { RESEARCH, researchFrom, type ResearchId } from '../game/rts/research';
-import { RTS_COMBAT, combatStats } from '../game/rts/combat';
+import { RTS_COMBAT, armamentOf } from '../game/rts/combat';
+import { MOUNT_BY_ID, mountsFor, type WeaponId } from '../game/rts/weapons';
 import { MillstoneDirector, MILLSTONE } from '../game/rts/millstone';
 import { RtsUnitCard, type RtsCardUnit, type RtsCardStructure } from '../ui/rtsUnitCard';
 import { showLoading, setStage, hideLoading } from '../ui/loading';
 import { setActiveSlot, migrateLegacySave } from '../game/saves';
 import { LaserBeams } from './lasers';
-import { ScanBeams, Blasts, Sparks, Impacts, Cuffs, ViolationPings } from './effects';
+import { ScanBeams, Blasts, Sparks, Impacts, Cuffs, ViolationPings, Rounds } from './effects';
 import { Reactions } from './reactions';
 import { ActionMarks, type ActionKind } from './actionMarks';
 import { RouteLayer } from './routes';
@@ -548,6 +549,8 @@ let scans: ScanBeams | undefined;
 let blasts: Blasts | undefined;
 /** Cutting sparks where an attacker is working on a site. */
 let sparks: Sparks | undefined;
+/** Artillery and missiles in the air. Positions come from the combat sim, not from this layer. */
+let rounds: Rounds | undefined;
 /**
  * Screen-space impact marks.
  *
@@ -825,6 +828,8 @@ function addUnits(center: { lon: number; lat: number }, map: TheaterMap, net: Ro
   scene.primitives.add(blasts.cores);
   sparks = new Sparks();
   scene.primitives.add(sparks.collection);
+  rounds = new Rounds();
+  scene.primitives.add(rounds.collection);
   impacts = new Impacts();
   scene.primitives.add(impacts.collection);
   dropSites = new DropSites();
@@ -1222,6 +1227,10 @@ function removeUnits() {
   if (sparks) {
     scene.primitives.remove(sparks.collection);
     sparks = undefined;
+  }
+  if (rounds) {
+    scene.primitives.remove(rounds.collection);
+    rounds = undefined;
   }
   if (impacts) {
     scene.primitives.remove(impacts.collection);
@@ -2181,10 +2190,11 @@ function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
   if (unitField) {
     for (const u of unitField.platformUnits()) {
       if (u.kind === 'skid') rtsGame.registerUnit(u.index, 'worker');
-      // Everything the player opens with is a combatant from the first frame — the dog fights,
-      // the worker just has hit points to lose.
-      const stats = RTS_COMBAT[u.kind];
-      if (stats) unitField.armRtsCombat(u.index, 0, stats);
+      // Everything the player opens with is a combatant from the first frame — and now that means
+      // ALL of them: the worker swings a bucket rather than standing there being dismantled.
+      if (RTS_COMBAT[u.kind]) {
+        unitField.armRtsCombat(u.index, 0, armamentOf(u.kind, rtsGame.loadoutOf(u.index)));
+      }
     }
   }
 
@@ -2202,7 +2212,7 @@ function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
       rtsBuild.setEnemyNexus(millstone.lon, millstone.lat);
       if (unitField) {
         for (const g of millstone.garrison()) {
-          unitField.spawnRtsEnemy(g.kind, g.lon, g.lat, combatStats(g.kind), true);
+          unitField.spawnRtsEnemy(g.kind, g.lon, g.lat, armamentOf(g.kind), true);
         }
       }
     }
@@ -2228,6 +2238,8 @@ function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
       const r = rtsGame?.researchAt(sid);
       return r ? { id: r.id, pct: Math.round((1 - r.remainingS / r.totalS) * 100) } : null;
     },
+    onFit: (index, slot, mount) => fitMountOn(index, slot, mount),
+    fitBlocker: (index, slot, mount) => rtsGame?.fitBlocker(index, slot, mount) ?? null,
   });
   rtsCmd.show();
   // The command card greys chips by affordability and shows queue progress, so it repaints on every
@@ -2263,6 +2275,10 @@ function teardownRtsBuild(): void {
     rtsBuild = null;
   }
   rtsConstruction = [];
+  // Shells outlive the frame that fired them, so a match that ends mid-barrage would otherwise
+  // rain the last volley onto whatever is standing there next.
+  unitField?.clearMunitions();
+  rounds?.show([]);
   rtsCmd?.hide();
   rtsCmd = null;
   rtsSites = [];
@@ -2275,15 +2291,57 @@ function teardownRtsBuild(): void {
 // ---- RTS selection + production ----------------------------------------------------------------
 
 /** The command card's context, from the current selection: a producing building, a worker, or nothing. */
-function rtsCommandContext(): { kind: 'none' } | { kind: 'build' } | { kind: 'produce'; structureId: number; structureType: StructureType } {
+function rtsCommandContext(): CommandContext {
   if (
     rtsSelectedStructure &&
     (producesUnits(rtsSelectedStructure.type) || researchFrom(rtsSelectedStructure.type).length > 0)
   ) {
     return { kind: 'produce', structureId: rtsSelectedStructure.id, structureType: rtsSelectedStructure.type };
   }
+  // The worker's BUILD menu wins over its loadout card: a worker's job is building, and burying
+  // that behind a weapons screen would be the wrong default for the unit you click most.
   if (selectedIsWorker()) return { kind: 'build' };
+  // One of your own units selected → its hardpoints. selectedPlatform() already refuses a
+  // multi-selection, which is the behaviour we want: fitting is a per-unit decision, and a card
+  // that quietly charged you for twelve pintle guns because you had a box-select up is not a
+  // decision you made.
+  const sel = unitField?.selectedPlatform();
+  const st = sel && rtsGame ? rtsGame.unitStateOf(sel.index) : undefined;
+  if (sel && st) {
+    return {
+      kind: 'loadout',
+      unitIndex: sel.index,
+      unitId: st.unit,
+      meshKind: RTS_UNITS[st.unit].meshKind,
+      loadout: st.loadout,
+    };
+  }
   return { kind: 'none' };
+}
+
+/**
+ * Bolt a mount into one of a unit's hardpoints and re-arm it in the field.
+ *
+ * The re-arm is what makes the fitting real: {@link armamentOf} rebuilds the whole weapon list from
+ * the chassis plus the new loadout, and `armRtsCombat` keeps the unit's current damage while it
+ * swaps the weapons in — fitting a gun is not a repair.
+ */
+function fitMountOn(index: number, slot: number, mount: WeaponId): void {
+  if (!rtsGame || !unitField) return;
+  const st = rtsGame.unitStateOf(index);
+  if (!st) return;
+  const blocked = rtsGame.fitBlocker(index, slot, mount);
+  if (blocked) {
+    sound.play('denied');
+    toast(`◈ ${blocked}`);
+    return;
+  }
+  if (!rtsGame.fitMount(index, slot, mount)) return;
+  unitField.armRtsCombat(index, 0, armamentOf(RTS_UNITS[st.unit].meshKind, st.loadout));
+  sound.play('confirm');
+  toast(`◈ ${MOUNT_BY_ID.get(mount)!.name} FITTED · ${RTS_UNITS[st.unit].name}`);
+  rtsCmd?.render();
+  updateUnitHud();
 }
 
 /** Whether the currently selected unit is a worker drone — the only unit that opens the build menu. */
@@ -2579,8 +2637,8 @@ function spawnProducedUnit(structureId: number, unit: RtsUnitId): void {
   }
   const idx = unitField.spawnRtsUnit(def.meshKind, spawnLon, spawnLat);
   // Supply was already reserved when this was queued, so don't charge it twice.
-  rtsGame.registerUnit(idx, unit, false);
-  unitField.armRtsCombat(idx, 0, combatStats(def.meshKind));
+  const state = rtsGame.registerUnit(idx, unit, false);
+  unitField.armRtsCombat(idx, 0, armamentOf(def.meshKind, state.loadout));
   const rally = rtsGame.rally.get(structureId);
   if (rally) unitField.moveUnitTo(idx, rally.lon, rally.lat);
   updateUnitHud();
@@ -2896,9 +2954,26 @@ function runMillstone(dt: number): void {
   if (!millstone || !unitField || rtsEnded) return;
   const wave = millstone.tick(dt);
   if (!wave) return;
-  for (const w of wave) unitField.spawnRtsEnemy(w.kind, w.lon, w.lat, combatStats(w.kind), w.hold);
+  let fielded = 0;
+  for (const w of wave) {
+    let lon = w.lon;
+    let lat = w.lat;
+    if (w.naval) {
+      // Same problem the player's littoral has, and the same answer: a hull spawned on land can
+      // never move, so launch it from the nearest sea. Unlike the player's, a hull with nowhere to
+      // launch is simply dropped — Millstone paid nothing for it, so there's nothing to refund and
+      // no reason to tell the player about a unit that never existed.
+      const water = waterNear(w.lon, w.lat);
+      if (!water) continue;
+      lon = water.lon;
+      lat = water.lat;
+    }
+    unitField.spawnRtsEnemy(w.kind, lon, lat, armamentOf(w.kind), w.hold);
+    fielded++;
+  }
+  if (!fielded) return;
   sound.play('alert');
-  toast(`◈ MILLSTONE WAVE ${millstone.waveN} INBOUND · ${wave.length} UNITS`);
+  toast(`◈ MILLSTONE WAVE ${millstone.waveN} INBOUND · ${fielded} UNITS`);
 }
 
 /** Every structure combat can march on or shoot at, both sides, rebuilt each tick. */
@@ -2920,15 +2995,33 @@ function runRtsCombat(dt: number): void {
   if (!rtsGame || !unitField || rtsEnded) return;
   const ev = unitField.rtsCombatTick(dt, rtsStructTargets());
 
+  // Each attack kind gets its own vocabulary, so what is happening to you reads without reading
+  // the numbers: a BEAM means damage has already landed, a round in the air means it hasn't yet,
+  // and a flurry of sparks at contact means something is being taken apart by hand.
   for (const s of ev.shots) {
-    lasers?.fire(
-      Cesium.Cartesian3.fromDegrees(s.flon, s.flat, s.falt),
-      Cesium.Cartesian3.fromDegrees(s.tlon, s.tlat, s.talt),
-      s.side === 1 ? MILLSTONE_BEAM : undefined,
-    );
+    const from = Cesium.Cartesian3.fromDegrees(s.flon, s.flat, s.falt);
+    const to = Cesium.Cartesian3.fromDegrees(s.tlon, s.tlat, s.talt);
+    const color = s.side === 1 ? MILLSTONE_BEAM : undefined;
+    if (s.kind === 'ranged') {
+      lasers?.fire(from, to, color);
+    } else if (s.kind === 'melee') {
+      // No beam: there is no shot to draw. Sparks at the point of contact instead — the same
+      // vocabulary a siege attacker cutting into an obelisk uses, because it is the same act.
+      sparks?.emit(to, 3);
+    } else {
+      // The muzzle event only. The round itself is drawn from ev.rounds until it arrives, which is
+      // the whole point of a projectile: for a second or two it is a thing in the world.
+      sparks?.emit(from, 1);
+    }
+  }
+  // The round list is authoritative and rebuilt every frame, so this is a straight redraw.
+  rounds?.show(ev.rounds);
+  for (const im of ev.impacts) {
+    blasts?.fire(im.lon, im.lat, theaterMap?.heightAt(im.lon, im.lat) ?? 0, im.radiusM);
   }
   // One report per frame, however thick the volley — per-shot playback stacks into a screech.
-  if (ev.shots.length) sound.play('laser');
+  if (ev.shots.some((s) => s.kind === 'ranged')) sound.play('laser');
+  if (ev.impacts.length) sound.play('commit');
 
   for (const k of ev.kills) {
     const h = theaterMap?.heightAt(k.lon, k.lat) ?? 0;
@@ -3446,6 +3539,8 @@ const KIND_ABBR: Record<UnitKind, string> = {
   land: 'CV', sea: 'SV', air: 'AV', foot: 'FT',
   drone: 'DISC', dog: 'K9', quad: 'KITE', spider: 'ARC', biped: 'MAR', walker: 'COL',
   naval: 'LIT', interceptor: 'RAP', skid: 'WRK',
+  drudge: 'DRD', ripper: 'RIP', flenser: 'FLN', bulwark: 'BLW', mote: 'MOT',
+  shrike: 'SHR', hulk: 'HLK', censer: 'CNS', leviathan: 'LEV',
 };
 const BAND_ABBR: Record<string, string> = { clear: 'CLR', suspect: 'SUS', threat: 'THR' };
 const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
@@ -5713,6 +5808,15 @@ window.addEventListener('keydown', (e) => {
           beginPlacement(hit);
           return;
         }
+      } else if (ctx.kind === 'loadout') {
+        // Mounts are numbered, so the key IS the catalog index. Fits into the first empty
+        // hardpoint — the same default the card opens on, so the keyboard and the mouse agree.
+        const m = mountsFor(ctx.meshKind).find((x) => x.hotkey === k);
+        if (m) {
+          const empty = ctx.loadout.indexOf(null);
+          fitMountOn(ctx.unitIndex, empty >= 0 ? empty : 0, m.id);
+          return;
+        }
       }
     }
   }
@@ -5802,6 +5906,8 @@ if (import.meta.env.DEV) {
     rtsSelectedCardStructure,
     rtsUnitAction,
     updateUnitPanel,
+    fitMountOn,
+    armamentOf,
     setMillstoneEnabled: (on: boolean) => {
       millstoneEnabled = on;
     },

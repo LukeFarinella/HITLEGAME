@@ -444,6 +444,230 @@ const INTERCEPTOR_HARDPOINT: Hardpoint = { x: 0, y: -11, z: 5 };
 /** Dorsal mount on the disc, just off the dome. */
 const DISC_HARDPOINT: Hardpoint = { x: 0, y: 0, z: 22 };
 
+// ---- Millstone chassis ---------------------------------------------------------------------------
+//
+// The rival army, and deliberately a different DESIGN LANGUAGE rather than a palette swap of the
+// player's. Gorgon is legged and aerospace: struts, tapered limbs, planforms, things that walk on
+// their toes or hold themselves in the air. Millstone is INDUSTRIAL — welded slab, track units,
+// exposed drums and cutting gear, prows built to be driven into things. Where a Gorgon platform is
+// shaped around a sensor, a Millstone one is shaped around the tool bolted to its front.
+//
+// That reads at every zoom: legs versus tracks at mesh scale, and at icon scale a Gorgon silhouette
+// has limbs radiating off a body while a Millstone one is a solid block with something ugly on the
+// nose. You should never have to check the colour to know whose army you are looking at.
+//
+// Each is sized against its Gorgon counterpart so the two rosters field at comparable scale.
+
+/**
+ * Drudge — Millstone's worker. A tracked hauler with a clamshell grab where the skid-steer has a
+ * bucket: the same job done by a machine that looks like it would rather be demolishing something.
+ * ~16 m before scale, matching the skid.
+ */
+function drudgeMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  m.box(0, -1, 4.5, 8.6, 11, 6.5); // welded body
+  m.box(0, -3.4, 10, 6.4, 5.6, 4.6); // armoured cab — a slit, not a window
+  for (const sx of [-5.6, 5.6]) m.box(sx, 0, 3, 2.6, 13, 5.4); // track units
+  m.box(0, 5.6, 7.4, 2, 8, 1.8); // grab boom, reaching forward
+  for (const sx of [-2.7, 2.7]) m.box(sx, 10.2, 5.6, 1.7, 4.2, 4.2); // clamshell jaws
+  return m.build();
+}
+
+/**
+ * Ripper — the cheap line unit, and the one that defines how Millstone fights. A low tracked wedge
+ * with a toothed cutter drum across the prow; it has no gun at all, so every kill it gets is one it
+ * drove into. ~11 m, deliberately the same read as the dog it is sent against.
+ */
+function ripperMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  m.box(0, -0.5, 2.8, 5.2, 7.6, 3.4); // low hull
+  m.box(0, -2.6, 5.6, 3.6, 3.2, 2.4); // dorsal engine block
+  for (const sx of [-3.2, 3.2]) m.box(sx, 0, 2.3, 1.6, 8.6, 3.6); // track pods
+  m.strut([-3.5, 5.5, 2.3], [3.5, 5.5, 2.3], 2); // cutter drum, spanning the nose
+  for (const tx of [-2.3, 0, 2.3]) m.box(tx, 6.8, 2.3, 0.9, 1.5, 0.9); // drum teeth
+  return m.build();
+}
+
+/**
+ * Flenser — the pursuit unit. Three wheels and two long blade arms held out ahead of it, so the
+ * silhouette is mostly reach: it is built to catch something and open it, and nothing else. Sized
+ * against the arachnid it chases.
+ */
+function flenserMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  m.box(0, 0, 3.4, 3.4, 8.2, 2.8); // spine hull
+  m.box(0, 4.4, 4.4, 2.4, 3, 2.2); // low sensor head
+  for (const sx of [-3.5, 3.5]) m.box(sx, -2.8, 2.5, 1.7, 4.8, 5); // rear drive wheels
+  m.box(0, 5.4, 2.3, 1.6, 4.4, 4.6); // single forward wheel
+  for (const side of [1, -1]) {
+    m.strut([side * 1.9, 2.6, 4.6], [side * 5.3, 6.6, 3.5], 0.9, 0.6); // arm
+    m.strut([side * 5.3, 6.6, 3.5], [side * 6.5, 10.8, 2.7], 0.6, 0.2); // blade, tapering to nothing
+  }
+  return m.build();
+}
+
+/**
+ * Bulwark — the heavy. An armoured slab on two track units with a mortar tube over the back, and a
+ * glacis prow it can still shove with. The counterpart to the marshal, and about as tall.
+ */
+function bulwarkMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  m.box(0, 0, 15, 22, 30, 15); // slab hull
+  m.box(0, -6, 26.5, 14, 14, 8); // turret block
+  m.strut([0, -4, 30], [0, 12, 45], 2.6, 2.2); // mortar tube, angled up and forward
+  for (const sx of [-12.6, 12.6]) m.box(sx, 0, 7.5, 5, 32, 13); // track units
+  m.box(0, 15.5, 13, 18, 4, 11); // glacis plate
+  m.box(0, -14, 31, 4, 5, 4); // hardpoint nub
+  return m.build();
+}
+
+/** An octagonal duct ring — the cheap way to read "ducted fan" from above. */
+function ductRing(m: MeshBuilder, cx: number, cy: number, cz: number, r: number, t: number): void {
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2;
+    m.box(cx + Math.cos(a) * r, cy + Math.sin(a) * r, cz, t, t, t * 0.8);
+  }
+}
+
+/**
+ * Mote — the light air scout. Two ducted fans on stubs off a tiny core: no wings, no planform, just
+ * enough machine to hold a gun in the air. The kite's opposite number.
+ */
+function moteMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  m.box(0, 0, 3, 3.2, 3.8, 2.6); // core
+  m.box(0, 2.8, 3.2, 1.7, 1.8, 1.5); // sensor bulb
+  for (const side of [1, -1]) {
+    m.strut([side * 1.6, 0, 3.2], [side * 4.2, 0, 3.4], 0.6);
+    ductRing(m, side * 5.6, 0, 3.4, 2.4, 1.1);
+  }
+  return m.build();
+}
+
+/**
+ * Shrike — the strike aircraft. A short delta with rocket rails slung under both wings, so unlike
+ * the interceptor's clean planform it reads as loaded: the ordnance is the silhouette. ~66 m span.
+ */
+function shrikeMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  const span = 33;
+  const nose = 26;
+  const tail = -16;
+  const th = 2.4;
+  for (const side of [1, -1]) {
+    const tip: V = [side * span, tail + 10, 0];
+    m.tri([0, nose, th], [0, tail, th], tip);
+    m.tri([0, tail, -th], [0, nose, -th], tip);
+    // Rail pylons and the rounds on them — the loaded read.
+    m.box(side * 13, -2, -th - 1.4, 1.6, 5, 2.4);
+    m.strut([side * 13, -9, -th - 2.6], [side * 13, 7, -th - 2.6], 1.1);
+    m.box(side * 20, -2, -th - 1.2, 1.4, 4.4, 2);
+    m.strut([side * 20, -8, -th - 2.2], [side * 20, 5, -th - 2.2], 0.9);
+  }
+  m.box(0, (nose + tail) / 2, 0, 4.2, nose - tail, th * 2); // spine
+  m.box(0, tail + 4, th + 1.6, 2.6, 9, 3.2); // hardpoint nub
+  return m.build();
+}
+
+/**
+ * Hulk — the naval platform. A slab-sided barge with a deck gun forward, riding low. Against the
+ * littoral's trimaran it is all displacement and no finesse: one hull, straight sides, a bow built
+ * to push through rather than cut. ~60 m before scale.
+ */
+function hulkMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  const L = 29;
+  const W = 8;
+  const D = 4;
+  m.box(0, -3, D / 2, W * 2, (L - 6) * 2, D); // barge hull
+  // Blunt raked bow: two triangles rather than a point.
+  m.tri([W, L - 9, 0], [0, L, D], [W, L - 9, D]);
+  m.tri([-W, L - 9, D], [0, L, D], [-W, L - 9, 0]);
+  m.tri([W, L - 9, D], [0, L, D], [-W, L - 9, D]);
+  m.box(0, -13, D + 3.5, 11, 14, 7); // blockhouse superstructure
+  m.box(0, 12, D + 2.4, 7, 8, 4.8); // gun mount, forward
+  m.strut([0, 14, D + 4.4], [0, 26, D + 6.6], 1.5, 1.2); // barrel
+  m.box(0, -22, D + 3, 3.4, 4.4, 2.8); // hardpoint nub, aft
+  return m.build();
+}
+
+/**
+ * Censer — the high-altitude support platform. A holed ring with emitter pods hanging off its
+ * underside, turning slowly above the fight. Where the disc observer is a sealed hull, this is a
+ * frame with its working parts exposed and swinging. ~88 m across.
+ */
+function censerMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  const N = 16;
+  const R = 44;
+  const inner = 30;
+  const th = 5;
+  for (let i = 0; i < N; i++) {
+    const a0 = (i / N) * Math.PI * 2;
+    const a1 = ((i + 1) / N) * Math.PI * 2;
+    const c0 = Math.cos(a0), s0 = Math.sin(a0);
+    const c1 = Math.cos(a1), s1 = Math.sin(a1);
+    const o0: V = [R * c0, R * s0, 0], o1: V = [R * c1, R * s1, 0];
+    const i0: V = [inner * c0, inner * s0, 0], i1: V = [inner * c1, inner * s1, 0];
+    const o0t: V = [R * c0, R * s0, th], o1t: V = [R * c1, R * s1, th];
+    const i0t: V = [inner * c0, inner * s0, th], i1t: V = [inner * c1, inner * s1, th];
+    m.quad(i0t, i1t, o1t, o0t); // top face of the ring
+    m.quad(o0, o1, i1, i0); // bottom face
+    m.quad(o0, o0t, o1t, o1); // outer rim
+    m.quad(i1, i1t, i0t, i0); // inner rim
+  }
+  m.box(0, 0, 4, 16, 16, 8); // hub, spanning the hole
+  for (let i = 0; i < 4; i++) {
+    const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
+    const x = Math.cos(a) * 37, y = Math.sin(a) * 37;
+    m.strut([x, y, 0], [x, y, -13], 1.6); // hanger
+    m.box(x, y, -16, 6, 6, 6); // emitter pod
+  }
+  return m.build();
+}
+
+/**
+ * Leviathan — the capstone, and the army's name made literal: a siege engine built around an
+ * enormous vertical grinding wheel that it drives into whatever it reaches. No legs, no elegance —
+ * four track units under a hull the size of a city block, and a wheel taller than the hull.
+ * ~170 m before scale, matching the giga walker.
+ */
+function leviathanMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  m.box(0, -10, 62, 84, 116, 44); // primary hull
+  m.box(0, -46, 100, 40, 40, 32); // command blockhouse, set well back
+  for (const sx of [-1, 1]) {
+    for (const sy of [-1, 1]) {
+      m.box(sx * 46, sy * 40, 26, 16, 74, 52); // track units, four of them
+    }
+  }
+  // The wheel: a disc standing in the y=const plane at the prow, built from rim segments.
+  const N = 20;
+  const R = 52;
+  const half = 7;
+  const cy = 62;
+  const cz = 54;
+  for (let i = 0; i < N; i++) {
+    const a0 = (i / N) * Math.PI * 2;
+    const a1 = ((i + 1) / N) * Math.PI * 2;
+    const p0: V = [Math.cos(a0) * R, cy + half, cz + Math.sin(a0) * R];
+    const p1: V = [Math.cos(a1) * R, cy + half, cz + Math.sin(a1) * R];
+    const q0: V = [Math.cos(a0) * R, cy - half, cz + Math.sin(a0) * R];
+    const q1: V = [Math.cos(a1) * R, cy - half, cz + Math.sin(a1) * R];
+    m.quad(q0, q1, p1, p0); // tread face
+    m.tri([0, cy + half, cz], p0, p1); // near hub fan
+    m.tri([0, cy - half, cz], q1, q0); // far hub fan
+    // A tooth every other segment, so the rim reads as cutting gear rather than a tyre.
+    if (i % 2 === 0) {
+      const a = (a0 + a1) / 2;
+      m.box(Math.cos(a) * (R + 5), cy, cz + Math.sin(a) * (R + 5), 6, half * 2.2, 6);
+    }
+  }
+  m.box(0, 30, 60, 30, 26, 30); // wheel mounting yoke, tying it to the hull
+  for (const y of [20, -20, -60]) m.box(0, y, 88, 10, 12, 9); // hardpoint nubs along the spine
+  return m.build();
+}
+
 // ---- RTS building meshes -----------------------------------------------------------------------
 //
 // Distinct low-poly silhouettes so the four facilities read apart at a glance, built up from z=0
@@ -517,23 +741,48 @@ export type UnitKind =
   | 'walker'
   | 'naval'
   | 'interceptor'
-  | 'skid';
+  | 'skid'
+  // Millstone's chassis. Disjoint from the player's by design — the two armies no longer share
+  // hardware, so a mesh kind identifies both the machine AND whose it is.
+  | 'drudge'
+  | 'ripper'
+  | 'flenser'
+  | 'bulwark'
+  | 'mote'
+  | 'shrike'
+  | 'hulk'
+  | 'censer'
+  | 'leviathan';
+
+/** Millstone's chassis, in roster order. The rival army's half of {@link PLATFORM_KINDS}. */
+export const MILLSTONE_KINDS: UnitKind[] = [
+  'drudge', 'ripper', 'flenser', 'bulwark', 'mote', 'shrike', 'hulk', 'censer', 'leviathan',
+];
+
+/** The player's chassis, in roster order. */
+export const GORGON_KINDS: UnitKind[] = [
+  'drone', 'dog', 'quad', 'spider', 'biped', 'walker', 'naval', 'interceptor', 'skid',
+];
 
 /** Every kind, in one place — iterate this instead of re-listing the literals. */
 export const UNIT_KINDS: UnitKind[] = [
   'land', 'sea', 'air', 'foot',
-  'drone', 'dog', 'quad', 'spider', 'biped', 'walker', 'naval', 'interceptor', 'skid',
+  ...GORGON_KINDS,
+  ...MILLSTONE_KINDS,
 ];
 
 /**
- * The player-controlled kinds. These are hero units — one of each at most, purchased, ordered
- * directly and carrying gear — as opposed to the ambient population the sim spawns in thousands.
- * (The skidsteer worker is RTS-only; it's a platform for selection/ordering but has no campaign
- * catalog entry.)
+ * Combat HARDWARE, either army's — as opposed to the ambient population the sim spawns in
+ * thousands. This is the test the whole field uses to mean "not a civilian": hardware is never
+ * assessed, marked, infected, detained or counted in the contact bands, and it renders as a
+ * platform rather than as a contact.
+ *
+ * It deliberately includes Millstone's chassis. An enemy unit is not a member of the public, and
+ * every one of those exclusions is as true of theirs as of yours. What separates the two armies is
+ * `rtsc.side`, which the ownership checks (selection, orders, sensor coverage) test instead — see
+ * `spawnRtsEnemy`, which keeps enemy units out of `platformIdx` so they are never "your platforms".
  */
-export const PLATFORM_KINDS: UnitKind[] = [
-  'drone', 'dog', 'quad', 'spider', 'biped', 'walker', 'naval', 'interceptor', 'skid',
-];
+export const PLATFORM_KINDS: UnitKind[] = [...GORGON_KINDS, ...MILLSTONE_KINDS];
 
 export const UNIT_MESHES: Record<UnitKind, ModelMesh> = {
   land: vehicleMesh(),
@@ -549,6 +798,15 @@ export const UNIT_MESHES: Record<UnitKind, ModelMesh> = {
   naval: navalMesh(),
   interceptor: interceptorMesh(),
   skid: skidMesh(),
+  drudge: drudgeMesh(),
+  ripper: ripperMesh(),
+  flenser: flenserMesh(),
+  bulwark: bulwarkMesh(),
+  mote: moteMesh(),
+  shrike: shrikeMesh(),
+  hulk: hulkMesh(),
+  censer: censerMesh(),
+  leviathan: leviathanMesh(),
 };
 
 /** Per-kind display scale so each reads at theater zoom without being absurd up close. */
@@ -573,6 +831,18 @@ export const UNIT_SCALE: Record<UnitKind, number> = {
   naval: 3, // ~180 m — reads as a ship against the 78 m ground vehicles
   interceptor: 3, // ~210 m span, between a ground vehicle and the disc
   skid: 2.4, // ~40 m — a small work vehicle, a touch bigger than the dog
+  // Millstone, each matched to the Gorgon unit it is sent against so the two rosters field at the
+  // same read. Where a pair differs it is because the machine is genuinely a different size, not
+  // because the scale is doing the work.
+  drudge: 2.4, // ~40 m, against the skid
+  ripper: 2.2, // ~25 m, against the dog
+  flenser: 4.2, // against the arachnid
+  bulwark: 3.4, // against the marshal
+  mote: 2.4, // ~30 m, against the kite
+  shrike: 3, // ~200 m span, against the interceptor
+  hulk: 3, // ~175 m, against the littoral
+  censer: 2, // ~176 m across, against the disc
+  leviathan: 3, // ~510 m, against the giga walker
 };
 
 /**
@@ -725,6 +995,142 @@ const PLATFORM_ICONS: Partial<Record<UnitKind, HTMLCanvasElement>> = {
     g.stroke();
     g.beginPath();
     for (const sx of [-9, 9]) for (const sy of [-3, 5]) { g.moveTo(sx - 2, sy - 3); g.rect(sx - 2, sy - 3, 4, 6); }
+    g.stroke();
+  }),
+
+  // ---- Millstone ------------------------------------------------------------------------------
+  // Solid blocks flanked by track bars, with the working tool on the nose. Nothing here radiates
+  // limbs, which is what separates the two armies at 24 px without reading the colour.
+
+  /** Drudge: hauler body between two tracks, clamshell jaws forward. */
+  drudge: iconCanvas((g) => {
+    g.beginPath();
+    g.rect(-6, -5, 12, 13); // body
+    g.fill();
+    g.stroke();
+    g.beginPath();
+    for (const sx of [-10, 6]) g.rect(sx, -7, 4, 16); // track bars
+    g.stroke();
+    g.beginPath();
+    for (const sx of [-6, 2]) g.rect(sx, -14, 4, 6); // jaws
+    g.stroke();
+  }),
+  /** Ripper: a wedge with a toothed drum across its nose. */
+  ripper: iconCanvas((g) => {
+    g.beginPath();
+    g.moveTo(-7, 9); g.lineTo(7, 9); g.lineTo(5, -6); g.lineTo(-5, -6); g.closePath();
+    g.fill();
+    g.stroke();
+    g.beginPath();
+    for (const sx of [-10, 6]) g.rect(sx, -5, 4, 13); // tracks
+    g.stroke();
+    g.beginPath();
+    g.rect(-8, -12, 16, 5); // drum
+    g.fill();
+    g.stroke();
+    g.beginPath();
+    for (const tx of [-5, 0, 5]) { g.moveTo(tx, -12); g.lineTo(tx, -16); } // teeth
+    g.stroke();
+  }),
+  /** Flenser: a narrow spine with two blades reaching well ahead of it. */
+  flenser: iconCanvas((g) => {
+    g.beginPath();
+    g.moveTo(-4, -10); g.lineTo(4, -10); g.lineTo(4, 8); g.lineTo(-4, 8); g.closePath();
+    g.fill();
+    g.stroke();
+    g.beginPath();
+    for (const side of [1, -1]) { g.moveTo(side * 3, -4); g.lineTo(side * 9, -11); g.lineTo(side * 11, -19); }
+    g.stroke();
+    g.beginPath();
+    for (const sx of [-8, 4]) g.rect(sx, 4, 4, 7); // rear wheels
+    g.stroke();
+  }),
+  /** Bulwark: a heavy slab with a mortar tube over the bow. */
+  bulwark: iconCanvas((g) => {
+    g.beginPath();
+    g.rect(-8, -7, 16, 16);
+    g.fill();
+    g.stroke();
+    g.beginPath();
+    for (const sx of [-13, 9]) g.rect(sx, -9, 4, 20); // track units
+    g.stroke();
+    g.beginPath();
+    g.moveTo(0, -3); g.lineTo(0, -17); // tube
+    g.stroke();
+  }),
+  /** Mote: a tiny core between two duct rings. Rings like the kite's, but only two of them. */
+  mote: iconCanvas((g) => {
+    g.beginPath();
+    g.rect(-3.5, -3.5, 7, 7);
+    g.fill();
+    g.stroke();
+    for (const side of [1, -1]) {
+      g.beginPath();
+      g.moveTo(side * 3, 0); g.lineTo(side * 8, 0);
+      g.stroke();
+      g.beginPath();
+      g.arc(side * 12, 0, 6, 0, Math.PI * 2);
+      g.stroke();
+    }
+  }),
+  /** Shrike: a delta with ordnance rails under the wings — a loaded planform. */
+  shrike: iconCanvas((g) => {
+    g.beginPath();
+    g.moveTo(0, -17); g.lineTo(15, 11); g.lineTo(0, 5); g.lineTo(-15, 11); g.closePath();
+    g.fill();
+    g.stroke();
+    g.beginPath();
+    for (const side of [1, -1]) for (const r of [6, 10]) { g.moveTo(side * r, -2); g.lineTo(side * r, 7); }
+    g.stroke();
+  }),
+  /** Hulk: a barge with a raked bow and a gun forward. */
+  hulk: iconCanvas((g) => {
+    g.beginPath();
+    g.moveTo(-7, 12); g.lineTo(7, 12); g.lineTo(7, -8); g.lineTo(0, -14); g.lineTo(-7, -8); g.closePath();
+    g.fill();
+    g.stroke();
+    g.beginPath();
+    g.rect(-4, 2, 8, 7); // blockhouse
+    g.stroke();
+    g.beginPath();
+    g.moveTo(0, -4); g.lineTo(0, -12); // barrel
+    g.stroke();
+  }),
+  /** Censer: a holed ring with four pods slung under it. */
+  censer: iconCanvas((g) => {
+    g.beginPath();
+    g.arc(0, 0, 16, 0, Math.PI * 2);
+    g.stroke();
+    g.beginPath();
+    g.arc(0, 0, 10, 0, Math.PI * 2);
+    g.stroke();
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
+      g.beginPath();
+      g.arc(Math.cos(a) * 13, Math.sin(a) * 13, 3.5, 0, Math.PI * 2);
+      g.fill();
+      g.stroke();
+    }
+  }),
+  /** Leviathan: a hull on four tracks behind an enormous grinding wheel. */
+  leviathan: iconCanvas((g) => {
+    g.beginPath();
+    g.rect(-9, -2, 18, 18);
+    g.fill();
+    g.stroke();
+    g.beginPath();
+    for (const sx of [-14, 10]) for (const sy of [-1, 8]) g.rect(sx, sy, 4, 8); // four track units
+    g.stroke();
+    g.beginPath();
+    g.arc(0, -9, 9, 0, Math.PI * 2); // the wheel
+    g.fill();
+    g.stroke();
+    g.beginPath();
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
+      g.moveTo(Math.cos(a) * 9, -9 + Math.sin(a) * 9);
+      g.lineTo(Math.cos(a) * 13, -9 + Math.sin(a) * 13);
+    }
     g.stroke();
   }),
 };
