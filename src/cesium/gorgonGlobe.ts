@@ -59,7 +59,7 @@ import { RTS_UNITS, unitsFrom, producesUnits, type RtsUnitId } from '../game/rts
 import { RESEARCH, researchFrom, type ResearchId } from '../game/rts/research';
 import { RTS_COMBAT, combatStats } from '../game/rts/combat';
 import { MillstoneDirector, MILLSTONE } from '../game/rts/millstone';
-import { RtsUnitCard, type RtsCardUnit } from '../ui/rtsUnitCard';
+import { RtsUnitCard, type RtsCardUnit, type RtsCardStructure } from '../ui/rtsUnitCard';
 import { showLoading, setStage, hideLoading } from '../ui/loading';
 import { setActiveSlot, migrateLegacySave } from '../game/saves';
 import { LaserBeams } from './lasers';
@@ -2228,6 +2228,7 @@ function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
   // Your own machines get a unit card instead of the surveillance contact dossier.
   rtsUnitCard = new RtsUnitCard({
     units: rtsSelectedCardUnits,
+    structure: rtsSelectedCardStructure,
     onPick: (index) => {
       unitField?.selectIndexPublic(index);
       rtsUnitCard?.render();
@@ -2441,6 +2442,60 @@ function rtsUnitAction(index: number): string {
     return `BUILDING ${name} · ${Math.ceil(cs.remainingS)}s`;
   }
   return unitField?.platformStatus(index)?.moving ? 'MOVING' : 'HOLDING';
+}
+
+/** Portrait glyph + accent per structure type, mirroring the build layer's map markers. */
+const STRUCT_GLYPH: Record<StructureType, string> = {
+  nexus: '◈',
+  obelisk: '▲',
+  robotics: 'R',
+  aviation: 'V',
+  tech: 'T',
+  supply: 'D',
+};
+const STRUCT_ACCENT: Record<StructureType, string> = {
+  nexus: '#E23A2E',
+  obelisk: '#E23A2E',
+  robotics: '#E7A13B',
+  aviation: '#3FA0E0',
+  tech: '#8B6FE0',
+  supply: '#3FBF6F',
+};
+
+/**
+ * The selected structure, shaped for the card.
+ *
+ * Health is the reason this exists: Millstone grinds buildings down, and without a readout your base
+ * degrades invisibly until something explodes. The command bar says what a building can MAKE; this
+ * says what shape it is in and what it is doing.
+ */
+function rtsSelectedCardStructure(): RtsCardStructure | null {
+  if (!rtsGame || !rtsSelectedStructure) return null;
+  // Read the live structure back out of the match — the selection holds a reference that a rebuild
+  // (or a destruction) could have replaced.
+  const s = rtsGame.structures.find((x) => x.id === rtsSelectedStructure!.id);
+  if (!s) return null;
+  const def = STRUCTURES[s.type];
+
+  let action = 'STANDING BY';
+  const q = rtsGame.queueAt(s.id);
+  const r = rtsGame.researchAt(s.id);
+  if (q.length) {
+    action = `PRODUCING ${RTS_UNITS[q[0].unit].name} · ${Math.ceil(q[0].remainingS)}s${q.length > 1 ? ` (+${q.length - 1})` : ''}`;
+  } else if (r) {
+    action = `RESEARCHING ${RESEARCH[r.id].name} · ${Math.ceil(r.remainingS)}s`;
+  }
+
+  return {
+    name: def.name,
+    blurb: def.blurb,
+    hp: s.hp,
+    maxHp: s.maxHp,
+    action,
+    glyph: STRUCT_GLYPH[s.type],
+    accent: STRUCT_ACCENT[s.type],
+    critical: s.type === 'nexus',
+  };
 }
 
 /** The selected units, shaped for the unit card. Only YOUR registered RTS units appear. */

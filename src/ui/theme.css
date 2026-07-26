@@ -1654,6 +1654,9 @@ body.dev-open #c2-tasking { display: none; }
   display: flex; align-items: center; justify-content: center;
 }
 .ruc-portrait img { width: 46px; height: 46px; image-rendering: auto; }
+/* A structure has no silhouette art, so its plate carries the same glyph its map marker does. */
+.ruc-glyph { font: 700 30px/1 var(--mono); color: var(--cat, var(--steel)); }
+.ruc-struct .ruc-class { font-size: 7.5px; }
 .ruc-ident { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .ruc-name { font: 700 12px/1 var(--mono); letter-spacing: .12em; color: var(--bone); }
 .ruc-class { font: 600 8px/1 var(--mono); letter-spacing: .14em; color: var(--cat, var(--steel)); margin-bottom: 2px; }

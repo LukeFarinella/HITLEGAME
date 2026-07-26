@@ -28,9 +28,26 @@ export interface RtsCardUnit {
   sensorKm: number;
 }
 
+/** The selected structure, when one is selected instead of units. */
+export interface RtsCardStructure {
+  name: string;
+  blurb: string;
+  hp: number;
+  maxHp: number;
+  /** PRODUCING WORKER · 6s, RESEARCHING AUTO-FINE · 22s, IDLE … */
+  action: string;
+  /** Glyph for the portrait plate. */
+  glyph: string;
+  accent: string;
+  /** True for the Nexus, which carries the match on its back. */
+  critical: boolean;
+}
+
 export interface RtsUnitCardHooks {
-  /** The current selection, in roster order. Empty hides the card. */
+  /** The current selection, in roster order. Empty (and no structure) hides the card. */
   units(): RtsCardUnit[];
+  /** The selected structure, if one is selected. Takes precedence over units. */
+  structure(): RtsCardStructure | null;
   /** A portrait in the multi-select grid was clicked — select just that one. */
   onPick(index: number): void;
 }
@@ -72,6 +89,19 @@ export class RtsUnitCard {
   }
 
   render(): void {
+    // A selected building takes the card: its health is the thing you need while it's being shot at.
+    const struct = this.hooks.structure();
+    if (struct) {
+      this.root.removeAttribute('hidden');
+      const sig = `struct:${struct.name}`;
+      if (sig !== this.signature) {
+        this.signature = sig;
+        this.root.replaceChildren(this.buildStructure(struct));
+      }
+      this.updateStructure(struct);
+      return;
+    }
+
     const units = this.hooks.units();
     if (!units.length) return this.hide();
     this.root.removeAttribute('hidden');
@@ -84,6 +114,41 @@ export class RtsUnitCard {
     }
     if (units.length === 1) this.updateSingle(units[0]);
     else this.updateGrid(units);
+  }
+
+  // ---- structure -------------------------------------------------------------------------------
+
+  private buildStructure(s: RtsCardStructure): HTMLElement {
+    const box = document.createElement('div');
+    box.className = 'ruc-single ruc-struct';
+    box.style.setProperty('--cat', s.accent);
+    box.innerHTML =
+      `<div class="ruc-top">` +
+      `<div class="ruc-portrait ruc-glyph">${s.glyph}</div>` +
+      `<div class="ruc-ident">` +
+      `<div class="ruc-name">${s.name}</div>` +
+      `<div class="ruc-class">${s.critical ? 'MAIN BASE · LOSING IT ENDS THE MATCH' : 'STRUCTURE'}</div>` +
+      this.bar('hp', 'HP') +
+      `</div></div>` +
+      `<p class="ruc-blurb">${s.blurb}</p>` +
+      `<div class="ruc-stats">` +
+      `<div class="ruc-stat"><span class="k">ACTION</span><span class="v act">—</span></div>` +
+      `</div>`;
+    return box;
+  }
+
+  private updateStructure(s: RtsCardStructure): void {
+    const bar = this.root.querySelector('.ruc-bar.hp');
+    const fill = bar?.querySelector('i') as HTMLElement | null;
+    const v = bar?.querySelector('.ruc-bv');
+    const frac = s.maxHp > 0 ? s.hp / s.maxHp : 0;
+    if (fill) {
+      fill.style.width = `${Math.max(0, Math.min(100, frac * 100))}%`;
+      fill.style.background = frac > 0.6 ? 'var(--ok)' : frac > 0.3 ? 'var(--warn)' : 'var(--red)';
+    }
+    if (v) v.textContent = `${Math.ceil(s.hp)} / ${s.maxHp}`;
+    const act = this.root.querySelector('.ruc-stat .act');
+    if (act) act.textContent = s.action;
   }
 
   // ---- single ----------------------------------------------------------------------------------
