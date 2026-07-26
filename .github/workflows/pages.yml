@@ -38,8 +38,17 @@ jobs:
 
       - run: npm ci
 
-      # `enablement: true` turns Pages on for the repo the first time this runs, so no dashboard
-      # visit is needed to get the first URL.
+      # NEEDS ONE MANUAL STEP FIRST: Settings -> Pages -> Source: "GitHub Actions".
+      #
+      # `enablement: true` asks this action to switch Pages on by itself, and it cannot: the default
+      # GITHUB_TOKEN is refused on the create-a-Pages-site endpoint ("Resource not accessible by
+      # integration"), no matter what `permissions:` declares. It stays set because once Pages IS on
+      # the action finds the existing site and never calls create — so this is a no-op then, not a
+      # thing to remove later.
+      #
+      # Also note Pages on a PRIVATE repo requires a paid plan (Pro/Team/Enterprise). On a free
+      # account this workflow cannot publish until the repo is public — Cloudflare Pages has no such
+      # restriction and needs no config beyond a static build, which is what dist/ now is.
       - uses: actions/configure-pages@v5
         id: pages
         with:

@@ -352,10 +352,21 @@ tools/build-globe-preview.mjs         generates the preview by inlining real coa
 
 `dist/` is a plain static bundle — no proxy, no functions, no server. Any static host works.
 
-**GitHub Pages is wired up already.** `.github/workflows/pages.yml` builds and publishes on every
-push (`actions/configure-pages` with `enablement: true`, so the first run turns Pages on by itself)
-and the site lands at `https://<owner>.github.io/HITLEGAME/`. Pages serves one deployment at a time,
-so the most recent push to any branch is what's live.
+**GitHub Pages is wired up** in `.github/workflows/pages.yml` — it builds and publishes on every
+push, and the site lands at `https://<owner>.github.io/HITLEGAME/`. Pages serves one deployment at a
+time, so the most recent push to any branch is what's live.
+
+It needs **one manual step once**: *Settings → Pages → Source: **GitHub Actions***. The workflow asks
+`configure-pages` to enable Pages itself, but the default `GITHUB_TOKEN` is refused on that endpoint
+(`Resource not accessible by integration`) regardless of declared `permissions`. Once Pages is on,
+that step finds the existing site and does nothing.
+
+Two caveats worth knowing before picking a host:
+
+- **Pages on a private repo needs a paid plan** (Pro/Team/Enterprise). On a free account the deploy
+  cannot publish until the repo is public.
+- **Cloudflare Pages has neither restriction** — private repos are fine on its free tier, and now
+  that `dist/` is purely static it needs no config beyond build `npm run build`, output `dist`.
 
 Two things a subpath deploy has to get right, both handled in the workflow:
 
