@@ -4,3 +4,6 @@ dist/
 .env
 .DS_Store
 public/regions/*.png
+
+# wrangler local state (pages dev cache)
+.wrangler/

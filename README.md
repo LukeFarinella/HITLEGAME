@@ -343,6 +343,40 @@ tools/build-globe-preview.mjs         generates the preview by inlining real coa
 `window.__gorgon` is exposed in dev only (`Cesium`, `viewer`, `enterTheater`, `exitTheater`,
 `spawnUnits`, `mode`) for inspection.
 
+## Deploying (Cloudflare Pages)
+
+The build is static except for one thing: **terrain tiles need a server-side proxy.** AWS Terrain
+Tiles answer `200` with no `Access-Control-Allow-Origin`, so a browser can fetch the bytes but not
+read the pixels — and the elevation is *encoded in the pixels*. In dev `vite.config.ts` proxies
+`/tiles/terrarium/*`; in production `functions/tiles/terrarium/[[path]].js` does the same job as a
+Pages Function. Identical URL shape both sides, so nothing in `src/` knows which is serving it.
+
+That's why a plain static host (GitHub Pages, S3) will load the game with **no terrain**. Any host
+with server-side rewrites works; this repo is set up for Pages.
+
+One-time setup:
+
+1. Cloudflare dashboard → **Workers & Pages → Create → Pages → Connect to Git**, pick this repo.
+2. Build command `npm run build`, output directory `dist`. (`wrangler.toml` also declares the
+   output dir, so this should be pre-filled.)
+3. Optional: add `VITE_CESIUM_ION_TOKEN` under Settings → Environment variables for the Ion
+   basemap. Without it the globe uses the stylized fallback — theater terrain works regardless,
+   since that comes through the Function.
+
+After that every push builds: `main` gets the production URL, every other branch its own preview
+URL. To test the Function locally without deploying:
+
+```
+npm run build
+npx wrangler pages dev          # serves dist/ + functions/ together
+```
+
+**Playtesting the RTS opponent.** Millstone is off by default. The toggle lives in the dev panel
+(gear icon, top right) which *does* ship in production — but the title screen covers the gear, so
+the order is: start a match → gear → tick **RTS: Millstone attacks** → `Esc` → start another match.
+The flag applies to the next match, because an enemy base can't be conjured into a theater that was
+built without one.
+
 ## Data & attribution
 
 | Layer | Source | License |

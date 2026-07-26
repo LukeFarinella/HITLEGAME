@@ -1,0 +1,15 @@
+# Cloudflare Pages deployment.
+#
+# Exists so the build settings live in the repo rather than only in the dashboard: point Pages at
+# this repo once and every push builds and gets a URL, with no per-branch configuration.
+#
+# The one thing NOT declared here is the build command, which Pages reads from its own project
+# settings — use `npm run build` (tsc + vite build), output `dist`.
+#
+# Optional environment variable, set in the Pages project rather than committed:
+#   VITE_CESIUM_ION_TOKEN   Cesium Ion key. Without it the globe falls back to the stylized
+#                           basemap; theater TERRAIN still works either way, because that comes
+#                           from the terrarium tiles proxied by functions/tiles/terrarium.
+name = "hitlegame"
+compatibility_date = "2026-07-26"
+pages_build_output_dir = "dist"
