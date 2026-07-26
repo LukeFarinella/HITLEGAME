@@ -30,7 +30,17 @@ export interface CombatStats {
 export const RTS_COMBAT: Partial<Record<PlatformId, CombatStats>> = {
   skid: { hp: 80, rangeM: 0, dmg: 0, periodS: 1 },
   dog: { hp: 140, rangeM: 650, dmg: 12, periodS: 0.8 },
+  // The pursuit walker trades the dog's cost for reach and staying power; the marshal is the heavy
+  // end of the ground line, where you stop massing bodies and start massing armour.
+  spider: { hp: 220, rangeM: 800, dmg: 18, periodS: 0.7 },
+  biped: { hp: 320, rangeM: 950, dmg: 26, periodS: 0.9 },
+  // The kite is eyes with a sidearm — it exists to see, and dies to anything that shoots back.
+  quad: { hp: 90, rangeM: 700, dmg: 8, periodS: 1.0 },
   interceptor: { hp: 160, rangeM: 1500, dmg: 30, periodS: 1.5 },
+  // Capstones. The littoral outranges the ground line from water it can't be answered on; the disc
+  // sees and strikes from altitude; the walker is the thing you build when you intend to end it.
+  naval: { hp: 260, rangeM: 1200, dmg: 22, periodS: 1.1 },
+  drone: { hp: 400, rangeM: 1700, dmg: 20, periodS: 1.2 },
   walker: { hp: 1200, rangeM: 1900, dmg: 60, periodS: 1.4 },
 };
 

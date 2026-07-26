@@ -490,6 +490,20 @@ export function aviationMesh(): ModelMesh {
   return m.build();
 }
 
+/**
+ * Special facility: a heavy assembly bay — a broad windowless block with a gantry crane spanning it
+ * and two buttress towers. Reads as the biggest, most industrial thing in the base, which is what
+ * builds the walker.
+ */
+export function specialMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  m.box(0, 0, 15, 66, 52, 30); // assembly hall
+  m.box(0, 0, 33, 70, 12, 6); // gantry beam spanning the roof
+  for (const sx of [-30, 30]) m.box(sx, 0, 36, 8, 10, 18); // gantry towers
+  m.box(0, -30, 10, 40, 8, 20); // loading dock face
+  return m.build();
+}
+
 export type UnitKind =
   | 'land'
   | 'sea'

@@ -22,7 +22,16 @@ import type { StructureType } from './structures';
  * Shield and energy have no combat model yet and are owned here.
  */
 export type UnitCategory = 'worker' | 'infantry' | 'aerial' | 'special';
-export type RtsUnitId = 'worker' | 'quadruped' | 'interceptor' | 'giga';
+export type RtsUnitId =
+  | 'worker'
+  | 'quadruped'
+  | 'arachnid'
+  | 'marshal'
+  | 'kite'
+  | 'interceptor'
+  | 'giga'
+  | 'disc'
+  | 'littoral';
 
 export interface RtsUnitDef {
   id: RtsUnitId;
@@ -66,6 +75,7 @@ export const RTS_UNITS: Record<RtsUnitId, RtsUnitDef> = {
     producedBy: 'nexus',
     hotkey: 'W',
   },
+  // ---- robotics: the ground line ---------------------------------------------------------------
   quadruped: {
     id: 'quadruped',
     name: 'QUADRUPED',
@@ -79,6 +89,52 @@ export const RTS_UNITS: Record<RtsUnitId, RtsUnitDef> = {
     supply: 2,
     producedBy: 'robotics',
     hotkey: 'Q',
+  },
+  arachnid: {
+    id: 'arachnid',
+    name: 'ARACHNID',
+    category: 'infantry',
+    blurb: 'Six-legged pursuit walker. Outruns anything on the ground and goes where roads do not.',
+    meshKind: 'spider',
+    maxShield: 60,
+    maxEnergy: 0,
+    cost: 140,
+    buildTimeS: 18,
+    supply: 3,
+    producedBy: 'robotics',
+    requiresStructure: 'tech',
+    hotkey: 'A',
+  },
+  marshal: {
+    id: 'marshal',
+    name: 'MARSHAL',
+    category: 'infantry',
+    blurb: 'Digitigrade biped, twice the mass of a ground vehicle. Fast enough to chase, armed to matter.',
+    meshKind: 'biped',
+    maxShield: 120,
+    maxEnergy: 0,
+    cost: 200,
+    buildTimeS: 24,
+    supply: 4,
+    producedBy: 'robotics',
+    requiresStructure: 'tech',
+    hotkey: 'M',
+  },
+
+  // ---- aviation: the air wing ------------------------------------------------------------------
+  kite: {
+    id: 'kite',
+    name: 'KITE',
+    category: 'aerial',
+    blurb: 'Light quadcopter. Cheap eyes that cross rivers, rail and rooftops instead of driving round them.',
+    meshKind: 'quad',
+    maxShield: 20,
+    maxEnergy: 0,
+    cost: 90,
+    buildTimeS: 14,
+    supply: 2,
+    producedBy: 'aviation',
+    hotkey: 'K',
   },
   interceptor: {
     id: 'interceptor',
@@ -94,6 +150,8 @@ export const RTS_UNITS: Record<RtsUnitId, RtsUnitDef> = {
     producedBy: 'aviation',
     hotkey: 'C',
   },
+
+  // ---- special: the capstone platforms ---------------------------------------------------------
   giga: {
     id: 'giga',
     name: 'GIGA WALKER',
@@ -105,9 +163,36 @@ export const RTS_UNITS: Record<RtsUnitId, RtsUnitDef> = {
     cost: 400,
     buildTimeS: 45,
     supply: 8,
-    producedBy: 'robotics',
-    requiresStructure: 'aviation', // the special unit sits at the top of the tech chain
+    producedBy: 'special',
     hotkey: 'G',
+  },
+  disc: {
+    id: 'disc',
+    name: 'DISC OBSERVER',
+    category: 'special',
+    blurb: 'High-altitude disc. The fastest thing on the board and it sees further than anything you own.',
+    meshKind: 'drone',
+    maxShield: 200,
+    maxEnergy: 200,
+    cost: 350,
+    buildTimeS: 40,
+    supply: 6,
+    producedBy: 'special',
+    hotkey: 'O',
+  },
+  littoral: {
+    id: 'littoral',
+    name: 'LITTORAL',
+    category: 'special',
+    blurb: 'Trimaran hull for the coast and the crossings. Holds water the ground platforms cannot follow onto.',
+    meshKind: 'naval',
+    maxShield: 100,
+    maxEnergy: 0,
+    cost: 220,
+    buildTimeS: 26,
+    supply: 4,
+    producedBy: 'special',
+    hotkey: 'L',
   },
 };
 

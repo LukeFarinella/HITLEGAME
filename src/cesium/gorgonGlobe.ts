@@ -2461,6 +2461,7 @@ const STRUCT_GLYPH: Record<StructureType, string> = {
   aviation: 'V',
   tech: 'T',
   supply: 'D',
+  special: 'S',
 };
 const STRUCT_ACCENT: Record<StructureType, string> = {
   nexus: '#E23A2E',
@@ -2469,6 +2470,7 @@ const STRUCT_ACCENT: Record<StructureType, string> = {
   aviation: '#3FA0E0',
   tech: '#8B6FE0',
   supply: '#3FBF6F',
+  special: '#E0553F',
 };
 
 /**
@@ -2534,6 +2536,24 @@ function rtsSelectedCardUnits(): RtsCardUnit[] {
   return out;
 }
 
+/**
+ * The nearest navigable water to a point, or null if there is none in reach.
+ *
+ * Rings outward on the theater's shoreline distance field, the same way ferry ports are found — a
+ * hull needs to start far enough off the beach that its own movement test (shore < −60 m) passes.
+ */
+function waterNear(lon: number, lat: number, maxM = 30_000): { lon: number; lat: number } | null {
+  if (!theaterMap) return null;
+  for (let r = 800; r <= maxM; r += 800) {
+    for (let k = 0; k < 24; k++) {
+      const a = (k / 24) * Math.PI * 2;
+      const p = destDeg(lat, lon, r, a);
+      if (theaterMap.shoreDistance(p.lon, p.lat) < -180) return { lon: p.lon, lat: p.lat };
+    }
+  }
+  return null;
+}
+
 /** Roll a finished unit out of its building and send it to the rally point (or just clear of the building). */
 function spawnProducedUnit(structureId: number, unit: RtsUnitId): void {
   if (!rtsGame || !unitField) return;
@@ -2541,8 +2561,23 @@ function spawnProducedUnit(structureId: number, unit: RtsUnitId): void {
   if (!s) return;
   const def = RTS_UNITS[unit];
   const mLon = 111_320 * Math.cos((s.lat * Math.PI) / 180);
-  const spawnLon = s.lon + (STRUCTURES[s.type].footprintM + 60) / mLon;
-  const idx = unitField.spawnRtsUnit(def.meshKind, spawnLon, s.lat);
+  let spawnLon = s.lon + (STRUCTURES[s.type].footprintM + 60) / mLon;
+  let spawnLat = s.lat;
+  // A hull rolled out onto the factory forecourt is a hull that can never move: naval orders refuse
+  // any point that isn't water. Launch it from the nearest sea instead.
+  if (def.meshKind === 'naval') {
+    const water = waterNear(s.lon, s.lat);
+    if (!water) {
+      sound.play('denied');
+      toast('◈ NO NAVIGABLE WATER IN RANGE · HULL NOT LAUNCHED');
+      // The supply was reserved at queue time; hand it back rather than leaking a phantom unit.
+      rtsGame.refundQueued(unit);
+      return;
+    }
+    spawnLon = water.lon;
+    spawnLat = water.lat;
+  }
+  const idx = unitField.spawnRtsUnit(def.meshKind, spawnLon, spawnLat);
   // Supply was already reserved when this was queued, so don't charge it twice.
   rtsGame.registerUnit(idx, unit, false);
   unitField.armRtsCombat(idx, 0, combatStats(def.meshKind));
@@ -5724,6 +5759,10 @@ if (import.meta.env.DEV) {
     get rtsBuild() {
       return rtsBuild;
     },
+    get theaterMap() {
+      return theaterMap;
+    },
+    waterNear,
     buildObeliskAt,
     beginPlacement,
     validateFacility,

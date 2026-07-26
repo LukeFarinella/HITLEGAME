@@ -1,7 +1,7 @@
 import * as Cesium from 'cesium';
 import type { RoadNet } from './roads';
 import { InstancedModelBatch } from './instancedModels';
-import { dataCenterMesh, roboticsMesh, techMesh, aviationMesh } from './unitModels';
+import { dataCenterMesh, roboticsMesh, techMesh, aviationMesh, specialMesh } from './unitModels';
 import {
   STRUCTURES,
   BUILD_RULES,
@@ -43,6 +43,7 @@ const FACILITY_COLOR: Record<StructureType, string> = {
   aviation: '#3FA0E0',
   tech: '#8B6FE0',
   supply: '#3FBF6F',
+  special: '#E0553F',
 };
 
 /** A short glyph per facility, drawn into the billboard so a base reads at a glance. */
@@ -53,20 +54,22 @@ const FACILITY_GLYPH: Record<StructureType, string> = {
   aviation: 'V',
   tech: 'T',
   supply: 'D',
+  special: 'S',
 };
 
 /** The facilities that render as a 3D building. Obelisks/the Nexus render as obelisk geometry. */
-type FacilityType = 'supply' | 'robotics' | 'tech' | 'aviation';
-const FACILITY_TYPES: FacilityType[] = ['supply', 'robotics', 'tech', 'aviation'];
+type FacilityType = 'supply' | 'robotics' | 'tech' | 'aviation' | 'special';
+const FACILITY_TYPES: FacilityType[] = ['supply', 'robotics', 'tech', 'aviation', 'special'];
 /** Built once at module load — one shared mesh per facility type. */
 const FACILITY_MESH: Record<FacilityType, ReturnType<typeof dataCenterMesh>> = {
   supply: dataCenterMesh(),
   robotics: roboticsMesh(),
   tech: techMesh(),
   aviation: aviationMesh(),
+  special: specialMesh(),
 };
 /** Per-type mesh scale so each building reads at theater zoom. */
-const FACILITY_SCALE: Record<FacilityType, number> = { supply: 2.4, robotics: 2.4, tech: 2.6, aviation: 2.4 };
+const FACILITY_SCALE: Record<FacilityType, number> = { supply: 2.4, robotics: 2.4, tech: 2.6, aviation: 2.4, special: 2.5 };
 const isFacilityType = (t: StructureType): t is FacilityType => (FACILITY_TYPES as StructureType[]).includes(t);
 
 /**
@@ -214,6 +217,7 @@ export class RtsBuildLayer {
     robotics: [],
     tech: [],
     aviation: [],
+    special: [],
   };
   /** Ring + icon per structure id, so a destroyed structure can take its chrome down with it. */
   private structureVisuals = new Map<number, { ring: Cesium.Polyline; icon: Cesium.Billboard }>();
@@ -236,6 +240,7 @@ export class RtsBuildLayer {
       robotics: new InstancedModelBatch(FACILITY_MESH.robotics, 24, bounds, false),
       tech: new InstancedModelBatch(FACILITY_MESH.tech, 24, bounds, false),
       aviation: new InstancedModelBatch(FACILITY_MESH.aviation, 24, bounds, false),
+      special: new InstancedModelBatch(FACILITY_MESH.special, 24, bounds, false),
     };
     this.meshBatches = FACILITY_TYPES.map((t) => this.facilityBatch[t]);
   }

@@ -13,10 +13,10 @@
  *               a factory into the wilderness.
  */
 
-export type StructureType = 'nexus' | 'obelisk' | 'robotics' | 'aviation' | 'tech' | 'supply';
+export type StructureType = 'nexus' | 'obelisk' | 'robotics' | 'aviation' | 'tech' | 'supply' | 'special';
 
 /** Placeable structure types, in command-bar order. The Nexus is never built — you start with it. */
-export const BUILDABLE: StructureType[] = ['obelisk', 'supply', 'robotics', 'aviation', 'tech'];
+export const BUILDABLE: StructureType[] = ['obelisk', 'supply', 'robotics', 'tech', 'aviation', 'special'];
 
 export interface StructureDef {
   type: StructureType;
@@ -115,6 +115,18 @@ export const STRUCTURES: Record<StructureType, StructureDef> = {
     supplyProvided: 10,
     buildTimeS: 14,
     requires: { obelisks: 3 },
+  },
+  special: {
+    type: 'special',
+    name: 'SPECIAL FACILITY',
+    blurb: 'Builds the heavy and exotic platforms — the siege walker, the disc, the littoral hull.',
+    cost: 700,
+    maxHp: 1100,
+    placement: 'free',
+    hotkey: 'S',
+    footprintM: 320,
+    buildTimeS: 34,
+    requires: { structure: 'aviation' },
   },
 };
 

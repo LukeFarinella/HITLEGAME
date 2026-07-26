@@ -262,6 +262,17 @@ export class RtsGame {
     return s;
   }
 
+  /**
+   * Hand back what a queued unit reserved when it can't actually be fielded — the littoral hull with
+   * no water to launch onto. Money AND supply, because nothing was ever built.
+   */
+  refundQueued(unit: RtsUnitId): void {
+    const def = RTS_UNITS[unit];
+    this._money += def.cost;
+    this._supplyUsed = Math.max(0, this._supplyUsed - def.supply);
+    this.changed();
+  }
+
   unitStateOf(index: number): RtsUnitState | undefined {
     return this.unitStates.get(index);
   }
