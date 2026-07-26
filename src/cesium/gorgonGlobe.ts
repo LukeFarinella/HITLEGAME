@@ -2130,7 +2130,9 @@ function updateRtsHud(): void {
         : `MILLSTONE ${pct}% · NEXT WAVE ${Math.ceil(millstone.nextWaveS)}S`,
     );
   } else {
-    setText('grts-threat', '');
+    // Say so rather than showing an empty line: a blank threat readout reads as broken, and "no
+    // opposition" is a deliberate state while the build order is being tuned.
+    setText('grts-threat', millstoneEnabled ? '' : 'PEACEFUL · NO OPPOSITION');
   }
 }
 
@@ -2188,13 +2190,20 @@ function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
 
   // Millstone stands its base up across the map: a Nexus on a surveyed site at raiding distance,
   // a garrison around it, and the wave clock starts running.
+  //
+  // HELD OFF BY DEFAULT while the economy and tech tree are being tuned — an attacker arriving at
+  // 150 s makes it impossible to judge whether the BUILD ORDER feels good, which is the question on
+  // the table. The whole enemy is intact behind this flag; flip it to bring the fight back.
   rtsEnded = false;
-  millstone = pickMillstoneBase();
-  if (millstone) {
-    rtsBuild.setEnemyNexus(millstone.lon, millstone.lat);
-    if (unitField) {
-      for (const g of millstone.garrison()) {
-        unitField.spawnRtsEnemy(g.kind, g.lon, g.lat, combatStats(g.kind), true);
+  millstone = null;
+  if (millstoneEnabled) {
+    millstone = pickMillstoneBase();
+    if (millstone) {
+      rtsBuild.setEnemyNexus(millstone.lon, millstone.lat);
+      if (unitField) {
+        for (const g of millstone.garrison()) {
+          unitField.spawnRtsEnemy(g.kind, g.lon, g.lat, combatStats(g.kind), true);
+        }
       }
     }
   }
@@ -4272,6 +4281,16 @@ let rtsPlacing: StructureType | null = null;
 let rtsSelectedStructure: Structure | null = null;
 /** The RTS unit card — portrait/HP/shield/energy for your own machines. Null outside a match. */
 let rtsUnitCard: RtsUnitCard | null = null;
+
+/**
+ * Whether Millstone fights this match.
+ *
+ * Off while the economy and tech tree are being tuned: waves landing at 150 s make it impossible to
+ * judge whether the build order itself feels good. Nothing about the enemy is deleted — the base
+ * simply isn't seeded and the wave clock never runs. Toggle in the dev panel (RTS ▸ MILLSTONE) or
+ * via `__gorgon.setMillstoneEnabled(true)`; it takes effect on the NEXT match.
+ */
+let millstoneEnabled = false;
 /** Screen-space radius for clicking a structure. */
 const STRUCTURE_PICK_PX = 30;
 
@@ -5344,6 +5363,17 @@ bindInterfaceSounds();
     });
   }
 
+  // Millstone on/off. Applies to the NEXT match — an enemy base can't be conjured into a theater
+  // that was built without one, and a half-seeded opponent is worse than none.
+  const mill = el('dev-millstone') as HTMLInputElement | null;
+  if (mill) {
+    mill.checked = millstoneEnabled;
+    mill.addEventListener('change', () => {
+      millstoneEnabled = mill.checked;
+      toast(mill.checked ? '◈ MILLSTONE ENABLED · STARTS NEXT MATCH' : '◈ MILLSTONE DISABLED · NEXT MATCH');
+    });
+  }
+
   el('dev-regen')?.addEventListener('click', regenerateBuildings);
 
   // ---- sandbox ----
@@ -5730,8 +5760,15 @@ if (import.meta.env.DEV) {
       return rtsGame?.unitStates;
     },
     rtsSelectedCardUnits,
+    rtsSelectedCardStructure,
     rtsUnitAction,
     updateUnitPanel,
+    setMillstoneEnabled: (on: boolean) => {
+      millstoneEnabled = on;
+    },
+    get millstoneEnabled() {
+      return millstoneEnabled;
+    },
     spawnUnits,
     clearUnits,
     devSettings,
