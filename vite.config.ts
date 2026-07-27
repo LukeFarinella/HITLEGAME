@@ -15,14 +15,17 @@ export default defineConfig({
     host: true,
     // allow access via a Cloudflare quick tunnel (random *.trycloudflare.com host)
     allowedHosts: ['.trycloudflare.com'],
-    /**
-     * No terrain proxy any more.
-     *
-     * This used to proxy `/tiles/terrarium/*` to the AWS bucket, because the bucket served no CORS
-     * header and the app reads elevation back out of tile pixels. AWS has since enabled CORS on
-     * `elevation-tiles-prod` (measured: `Access-Control-Allow-Origin: *`), so tiles are fetched
-     * directly — see `terrariumTileUrl` in src/cesium/TerrariumTerrainProvider.ts. That is what
-     * makes this a plain static bundle, hostable anywhere with no server-side component.
-     */
+    // AWS Terrain Tiles (terrarium: topo + ETOPO/GEBCO bathymetry), proxied server-side so the
+    // browser can decode the elevation pixels. The bucket now sends CORS headers and a BUILT bundle
+    // reads it directly (see `terrariumTileUrl`) — but local dev keeps going through here, because
+    // this is the path that has always worked and the dev loop shouldn't depend on someone else's
+    // CORS policy staying put.
+    proxy: {
+      '/tiles/terrarium': {
+        target: 'https://elevation-tiles-prod.s3.amazonaws.com',
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/tiles/, ''),
+      },
+    },
   },
 });

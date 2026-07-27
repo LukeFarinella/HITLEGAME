@@ -69,11 +69,26 @@ const maskCtx = maskCanvas.getContext('2d', { willReadFrequently: true })!;
 
 /**
  * One terrarium tile's URL. The single place either consumer builds one — this provider for
- * Cesium's terrain, and theaterMap's stitcher for the baked elevation grid — so switching source
- * (or reinstating a proxy) is a one-line change rather than a hunt.
+ * Cesium's terrain, and theaterMap's stitcher for the baked elevation grid.
+ *
+ * DEV GOES THROUGH THE VITE PROXY, deliberately. `npm run dev` has always fetched tiles this way
+ * and it works; there is no reason for the local loop to depend on a cross-origin fetch, and every
+ * reason not to gamble the one setup people actually run on a third party's CORS policy.
+ *
+ * A BUILT bundle has no proxy to go through, so it reads S3 directly. That is only possible because
+ * AWS enabled CORS on the bucket (measured: `Access-Control-Allow-Origin: *`,
+ * `Access-Control-Allow-Methods: GET`) — it used to send nothing, which is why the proxy exists at
+ * all. Both readers use fetch/fetchImage with `preferImageBitmap`, so the header is sufficient and
+ * nothing is canvas-tainted.
+ *
+ * The split means the hosted path isn't exercised by local dev. That is the accepted cost of not
+ * touching a working local setup: if a deployed build ever shows flat terrain, the symptom is every
+ * tile failing at the fetch rather than the decode, and this is the one place to look.
  */
-export const terrariumTileUrl = (z: number, x: number, y: number) =>
-  `https://elevation-tiles-prod.s3.amazonaws.com/terrarium/${z}/${x}/${y}.png`;
+export const terrariumTileUrl = import.meta.env.DEV
+  ? (z: number, x: number, y: number) => `/tiles/terrarium/${z}/${x}/${y}.png`
+  : (z: number, x: number, y: number) =>
+      `https://elevation-tiles-prod.s3.amazonaws.com/terrarium/${z}/${x}/${y}.png`;
 
 const tileUrl = terrariumTileUrl;
 
