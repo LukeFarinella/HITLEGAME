@@ -59,6 +59,7 @@ import { RTS_UNITS, unitsFrom, producesUnits, type RtsUnitId } from '../game/rts
 import { RESEARCH, researchFrom, type ResearchId } from '../game/rts/research';
 import { RTS_COMBAT, armamentOf } from '../game/rts/combat';
 import { MOUNT_BY_ID, mountsFor, type WeaponId } from '../game/rts/weapons';
+import { MILLSTONE_BY_KIND, MILLSTONE_UNIT_LIST } from '../game/rts/millstoneUnits';
 import { MillstoneDirector, MILLSTONE } from '../game/rts/millstone';
 import { RtsUnitCard, type RtsCardUnit, type RtsCardStructure } from '../ui/rtsUnitCard';
 import { showLoading, setStage, hideLoading } from '../ui/loading';
@@ -2317,6 +2318,44 @@ function rtsCommandContext(): CommandContext {
     };
   }
   return { kind: 'none' };
+}
+
+/**
+ * Which Millstone chassis shift + right-click drops, or '' when the gesture is off.
+ * Written by the dev panel's picker; read by the RIGHT_UP handler.
+ */
+let devSpawnKind: UnitKind | '' = '';
+
+/**
+ * Drop one Millstone unit on the ground, armed exactly as a wave unit would be.
+ *
+ * It marches rather than holding: the point of dropping a leviathan next to your base is to find
+ * out what it does to you, and a unit that stands still answers a different question. Everything
+ * else about it — hull, weapons, factory-fitted mounts — comes from {@link armamentOf}, so what you
+ * spawn is what wave 6 sends.
+ */
+function spawnMillstoneAt(kind: UnitKind, lon: number, lat: number): void {
+  if (!rtsGame || !unitField || rtsEnded) {
+    sound.play('denied');
+    toast('◈ START A SKIRMISH FIRST');
+    return;
+  }
+  const def = MILLSTONE_BY_KIND.get(kind);
+  // A hull spawned on land can never move, so send it to water the way a wave does — and say so
+  // rather than dropping it silently, since here the click WAS the instruction.
+  if (kind === 'hulk') {
+    const water = waterNear(lon, lat);
+    if (!water) {
+      sound.play('denied');
+      toast('◈ NO NAVIGABLE WATER IN RANGE · HULL NOT LAUNCHED');
+      return;
+    }
+    lon = water.lon;
+    lat = water.lat;
+  }
+  unitField.spawnRtsEnemy(kind, lon, lat, armamentOf(kind), false);
+  sound.play('alert');
+  toast(`◈ ${def?.name ?? kind.toUpperCase()} FIELDED`);
 }
 
 /**
@@ -5063,7 +5102,7 @@ function groundAt(p: Cesium.Cartesian2): { lon: number; lat: number } | undefine
   return { lon: Cesium.Math.toDegrees(c.longitude), lat: Cesium.Math.toDegrees(c.latitude) };
 }
 
-handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
+const onRightDown = (m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
   // Right-click cancels a placement in progress, the way an RTS drops the build cursor.
   if (rtsPlacing) {
     cancelPlacement();
@@ -5071,7 +5110,8 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
     return;
   }
   rightDownAt = mode === 'theater' ? Cesium.Cartesian2.clone(m.position) : null;
-}, Cesium.ScreenSpaceEventType.RIGHT_DOWN);
+};
+handler.setInputAction(onRightDown, Cesium.ScreenSpaceEventType.RIGHT_DOWN);
 
 /**
  * The two things a right-click on a contact can still offer.
@@ -5225,11 +5265,23 @@ function openContactMenu(
   return true;
 }
 
-handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
+const onRightUp = (m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
   const down = rightDownAt;
   rightDownAt = null;
   if (!down || mode !== 'theater' || !unitField) return;
   if (Cesium.Cartesian2.distance(down, m.position) > ORDER_SLOP_PX) return; // that was a tilt drag
+
+  // Dev spawn: shift + right-click drops one Millstone unit on the ground you clicked.
+  //
+  // Gated behind the dev panel's picker rather than always live, because shift + right-click
+  // already means "queue this leg behind the current order" — arming the picker is what says you
+  // want the gesture to mean something else for a while. Off by default, so ordinary play is
+  // untouched.
+  if (shiftHeld && devSpawnKind) {
+    const g = groundAt(m.position);
+    if (g) spawnMillstoneAt(devSpawnKind, g.lon, g.lat);
+    return;
+  }
 
   // RTS: with a producing building selected, a right-click on the ground sets its RALLY POINT — where
   // its units head as they roll out — rather than moving anything.
@@ -5281,7 +5333,22 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
   // Nothing selected: the only thing a ground right-click can mean is dropping a site, once that's
   // been commissioned. Deselect (left-click empty ground) and right-click to place one.
   if (progression.has('airdrop')) openGroundMenu(m.position.x, m.position.y, g.lon, g.lat, append);
-}, Cesium.ScreenSpaceEventType.RIGHT_UP);
+};
+
+/**
+ * Right-click is registered TWICE: once unmodified, once for SHIFT.
+ *
+ * Cesium's ScreenSpaceEventHandler keys actions by (type, modifier) and does NOT fall back to the
+ * unmodified handler when a modifier is held — a shift + right-click looks up the (RIGHT_UP, SHIFT)
+ * slot, finds nothing, and the event is dropped on the floor. Which is why shift-queued move legs
+ * silently never worked: `append = shiftHeld` below was reachable only when shift was NOT held.
+ *
+ * Both slots therefore get the same callback, and the modifier is still read from `shiftHeld`
+ * rather than from the event, because that is the one thing Cesium's PositionedEvent does not carry.
+ */
+handler.setInputAction(onRightUp, Cesium.ScreenSpaceEventType.RIGHT_UP);
+handler.setInputAction(onRightUp, Cesium.ScreenSpaceEventType.RIGHT_UP, Cesium.KeyboardEventModifier.SHIFT);
+handler.setInputAction(onRightDown, Cesium.ScreenSpaceEventType.RIGHT_DOWN, Cesium.KeyboardEventModifier.SHIFT);
 
 /**
  * Shift state, tracked globally.
@@ -5495,6 +5562,26 @@ bindInterfaceSounds();
 
   // Millstone on/off. Applies to the NEXT match — an enemy base can't be conjured into a theater
   // that was built without one, and a half-seeded opponent is worse than none.
+  // The spawn picker's options ARE the roster — listed from MILLSTONE_UNIT_LIST rather than written
+  // out, so a new chassis appears here the moment it exists.
+  const spawn = el('dev-spawn') as HTMLSelectElement | null;
+  if (spawn) {
+    for (const u of MILLSTONE_UNIT_LIST) {
+      const o = document.createElement('option');
+      o.value = u.meshKind;
+      o.textContent = `${u.name} — answers ${u.counterpart}`;
+      spawn.appendChild(o);
+    }
+    spawn.addEventListener('change', () => {
+      devSpawnKind = (spawn.value || '') as UnitKind | '';
+      toast(
+        devSpawnKind
+          ? `◈ SHIFT + RIGHT-CLICK FIELDS ${MILLSTONE_BY_KIND.get(devSpawnKind)?.name ?? ''}`
+          : '◈ SPAWN OFF · SHIFT QUEUES MOVE LEGS AGAIN',
+      );
+    });
+  }
+
   const mill = el('dev-millstone') as HTMLInputElement | null;
   if (mill) {
     mill.checked = millstoneEnabled;
@@ -5908,6 +5995,11 @@ if (import.meta.env.DEV) {
     updateUnitPanel,
     fitMountOn,
     armamentOf,
+    spawnMillstoneAt,
+    groundAt,
+    get devSpawnKind() {
+      return devSpawnKind;
+    },
     setMillstoneEnabled: (on: boolean) => {
       millstoneEnabled = on;
     },
