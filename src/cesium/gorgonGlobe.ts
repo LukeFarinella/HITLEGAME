@@ -1459,6 +1459,113 @@ function openGroundMenu(screenX: number, screenY: number, lon: number, lat: numb
   window.setTimeout(() => window.addEventListener('pointerdown', dismiss, true), 0);
 }
 
+/** Close the Millstone spawn menu, if one is up. */
+function closeMillstoneMenu() {
+  document.getElementById('g-millstone-menu')?.remove();
+}
+
+/**
+ * DEV ONLY — the Millstone spawn menu.
+ *
+ * Shift + right-click on theater ground lists Millstone's entire roster and drops whichever chassis
+ * you pick on that spot, armed exactly as a wave would send it. It exists to answer "what does a
+ * leviathan actually do to this line" without playing to wave six to find out, which is why it is
+ * marked DEV ONLY in the header rather than dressed up as a game feature.
+ *
+ * The roster is read from MILLSTONE_UNIT_LIST rather than written out, so a new chassis appears here
+ * the moment it exists.
+ *
+ * Shift already meant "queue this leg behind the current order", and that gesture is not thrown away
+ * to make room: with a unit selected, QUEUE WAYPOINT is the first item in the menu. It costs one
+ * click where it used to cost none, and nothing that worked before has become unreachable.
+ */
+function openMillstoneSpawnMenu(screenX: number, screenY: number, lon: number, lat: number) {
+  closeMillstoneMenu();
+
+  /**
+   * Close for good: drop the menu AND stop listening.
+   *
+   * The click-away listener must ignore pointerdowns that land inside the menu, and this is not a
+   * nicety — a capture-phase `pointerdown` that removes the box detaches the button before the
+   * browser can deliver its `click`, so the item handler never runs and every pick reads as a dead
+   * click. Measured in Chromium against this menu, not assumed.
+   */
+  function done() {
+    closeMillstoneMenu();
+    window.removeEventListener('pointerdown', dismiss, true);
+  }
+  function dismiss(e: PointerEvent) {
+    if (!box.contains(e.target as Node)) done();
+  }
+
+  const box = document.createElement('div');
+  box.id = 'g-millstone-menu';
+  box.className = 'g-context g-spawn';
+  box.innerHTML =
+    `<div class="gc-head">DEV ONLY · FIELD MILLSTONE UNIT` +
+    `<span class="gc-sub">${lat.toFixed(4)}, ${lon.toFixed(4)}</span></div>`;
+
+  // The shift gesture's original meaning, kept reachable — for the whole selection, not just a
+  // single machine, since shift + right-click is a move order like any other.
+  const ordering = unitField?.selectedPlatformCount() ?? 0;
+  if (ordering) {
+    const queue = document.createElement('button');
+    queue.type = 'button';
+    queue.className = 'gc-item';
+    queue.innerHTML = `<span class="gc-label">QUEUE WAYPOINT${ordering > 1 ? ` · ${ordering} UNITS` : ''}</span>`;
+    queue.addEventListener('click', () => {
+      done();
+      if (unitField?.orderSelection(lon, lat, true)) {
+        cancelConstructionsFor(unitField.selectedPlatforms());
+        sound.play('move');
+        updateUnitPanel();
+      } else {
+        sound.play('denied');
+        toast('◈ NO ROUTE TO THAT GROUND');
+      }
+    });
+    box.append(queue);
+  }
+
+  // Millstone's units are RTS-match units: there is no enemy army outside a skirmish for them to
+  // belong to. Say that on the items rather than letting nine live-looking buttons each fail.
+  const inMatch = !!rtsGame && !rtsEnded;
+
+  for (const u of MILLSTONE_UNIT_LIST) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'gc-item lethal';
+    b.disabled = !inMatch;
+    b.innerHTML =
+      `<span class="gc-label">${u.name} · ANSWERS ${u.counterpart}</span>` +
+      (inMatch ? '' : `<span class="gc-why">NO ACTIVE SKIRMISH</span>`);
+    b.title = u.blurb;
+    if (inMatch) {
+      b.addEventListener('click', () => {
+        done();
+        spawnMillstoneAt(u.meshKind, lon, lat);
+      });
+    }
+    box.append(b);
+  }
+
+  // Ten items is tall enough to run off the bottom of the window from a click low on the map, so
+  // this one menu is placed against the viewport instead of blindly at the cursor.
+  box.style.left = `${screenX}px`;
+  box.style.top = `${screenY}px`;
+  document.body.append(box);
+  const r = box.getBoundingClientRect();
+  const pad = 8;
+  if (r.bottom > window.innerHeight - pad) {
+    box.style.top = `${Math.max(pad, window.innerHeight - pad - r.height)}px`;
+  }
+  if (r.right > window.innerWidth - pad) {
+    box.style.left = `${Math.max(pad, window.innerWidth - pad - r.width)}px`;
+  }
+
+  window.setTimeout(() => window.addEventListener('pointerdown', dismiss, true), 0);
+}
+
 /**
  * Throw a restraint round at a point, from whatever plausibly threw it.
  *
@@ -2321,12 +2428,6 @@ function rtsCommandContext(): CommandContext {
 }
 
 /**
- * Which Millstone chassis shift + right-click drops, or '' when the gesture is off.
- * Written by the dev panel's picker; read by the RIGHT_UP handler.
- */
-let devSpawnKind: UnitKind | '' = '';
-
-/**
  * Drop one Millstone unit on the ground, armed exactly as a wave unit would be.
  *
  * It marches rather than holding: the point of dropping a leviathan next to your base is to find
@@ -2547,7 +2648,10 @@ function rtsUnitAction(index: number): string {
     if (!onSite) return `MOVING TO ${name} SITE`;
     return `BUILDING ${name} · ${Math.ceil(cs.remainingS)}s`;
   }
-  return unitField?.platformStatus(index)?.moving ? 'MOVING' : 'HOLDING';
+  if (!unitField?.platformStatus(index)?.moving) return 'HOLDING';
+  // An attack-moving unit still reads as "moving" while it is stopped mid-route shooting something,
+  // which is exactly right: the order is still running.
+  return unitField.attackMovingOf(index) ? 'ATTACK MOVE' : 'MOVING';
 }
 
 /** Portrait glyph + accent per structure type, mirroring the build layer's map markers. */
@@ -2876,6 +2980,9 @@ function tryPlaceAt(screen: Cesium.Cartesian2): void {
     toast('◈ INSUFFICIENT FUNDS');
     return;
   }
+  // A worker can only build one thing at a time: pointing it at a new site cancels the old one,
+  // refund and all, instead of orphaning a site whose builder has walked away.
+  cancelConstructionsFor([worker.index]);
   // Reserve an obelisk site immediately so a second worker can't be sent to the same one.
   if (r.siteIndex !== undefined) {
     rtsBuiltSites.add(r.siteIndex);
@@ -2908,6 +3015,14 @@ function rtsConstructionTick(dt: number): void {
   if (!rtsGame || !unitField || !rtsConstruction.length) return;
   const still: ConstructionSite[] = [];
   for (const cs of rtsConstruction) {
+    // A destroyed builder finishes nothing. Without this the site — and its ring — outlive the match
+    // that started it, and worse, a worker killed standing on its own footprint kept the clock
+    // running, because "is the builder here" was a position test that a corpse passes. No refund:
+    // losing the worker mid-build is a loss, not a change of mind.
+    if (!unitField.isAlive(cs.workerIndex)) {
+      teardownConstruction(cs, false, 'LOST · BUILDER DESTROYED');
+      continue;
+    }
     const st = unitField.platformStatus(cs.workerIndex);
     const onSite = !!st && metresBetween(st.lon, st.lat, cs.lon, cs.lat) <= BUILD_CONTACT_M;
     if (onSite) cs.remainingS -= dt;
@@ -2915,6 +3030,43 @@ function rtsConstructionTick(dt: number): void {
     else still.push(cs);
   }
   rtsConstruction = still;
+}
+
+/**
+ * Tear down an unfinished construction site: ring off the map, obelisk reservation released, and the
+ * money back if this was the operator's choice rather than a loss.
+ *
+ * Does NOT remove the site from `rtsConstruction` — the caller owns that list and is mid-iteration
+ * over it often enough that quietly splicing underneath it would be a bug waiting to happen.
+ */
+function teardownConstruction(cs: ConstructionSite, refund: boolean, why: string): void {
+  rtsBuild?.clearConstruction(cs.id);
+  // The reservation that stopped a second worker being sent to the same obelisk site goes back.
+  if (cs.siteIndex !== undefined) {
+    rtsBuiltSites.delete(cs.siteIndex);
+    rtsBuild?.setSites(rtsSites, rtsBuiltSites);
+  }
+  const def = STRUCTURES[cs.type];
+  if (refund) rtsGame?.award(def.cost);
+  sound.play('denied');
+  toast(`◈ ${def.name} ${why}${refund ? ` · +${def.cost}` : ''}`);
+  updateRtsHud();
+}
+
+/**
+ * Re-tasking a builder cancels what it was building, completely.
+ *
+ * A construction site is nothing but a clock and a ring until its worker stands on it, so a worker
+ * sent somewhere else leaves behind a building that can never finish and a ring that never goes
+ * away. Ordering the worker elsewhere IS the cancel — there is no separate "abandon" button to find,
+ * and the cost comes back because nothing was built.
+ */
+function cancelConstructionsFor(workers: Iterable<number>): void {
+  const set = new Set(workers);
+  const hit = rtsConstruction.filter((c) => set.has(c.workerIndex));
+  if (!hit.length) return;
+  rtsConstruction = rtsConstruction.filter((c) => !set.has(c.workerIndex));
+  for (const cs of hit) teardownConstruction(cs, true, 'CANCELLED · BUILDER RE-TASKED');
 }
 
 /** Turn a finished construction site into a real structure. */
@@ -5247,6 +5399,8 @@ function openContactMenu(
         }
         if (!kind) return;
         if (unitField.orderSelected(contact.lon, contact.lat, append, opt.action, contact.index)) {
+          // Sent after a contact instead of standing on a footprint: same re-tasking, same cancel.
+          cancelConstructionsFor(unitField.selectedPlatforms());
           sound.play(opt.action === 'strike' ? 'orderLethal' : 'order');
           updateUnitPanel();
         }
@@ -5271,16 +5425,21 @@ const onRightUp = (m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
   if (!down || mode !== 'theater' || !unitField) return;
   if (Cesium.Cartesian2.distance(down, m.position) > ORDER_SLOP_PX) return; // that was a tilt drag
 
-  // Dev spawn: shift + right-click drops one Millstone unit on the ground you clicked.
+  // DEV ONLY — shift + right-click on the map opens Millstone's roster and fields the chassis you
+  // pick on the ground you clicked. It used to require arming a chassis in the dev panel first,
+  // which meant the gesture did nothing at all unless you already knew the picker existed; the menu
+  // is the discoverable version, and it carries the shift-queue order as its first item so the
+  // gesture's original meaning is still one click away.
   //
-  // Gated behind the dev panel's picker rather than always live, because shift + right-click
-  // already means "queue this leg behind the current order" — arming the picker is what says you
-  // want the gesture to mean something else for a while. Off by default, so ordinary play is
-  // untouched.
-  if (shiftHeld && devSpawnKind) {
+  // A click that hits no ground (the sky, off the horizon) falls through to ordinary handling.
+  if (shiftHeld) {
     const g = groundAt(m.position);
-    if (g) spawnMillstoneAt(devSpawnKind, g.lon, g.lat);
-    return;
+    if (g) {
+      closeContactMenu();
+      closeGroundMenu();
+      openMillstoneSpawnMenu(m.position.x, m.position.y, g.lon, g.lat);
+      return;
+    }
   }
 
   // RTS: with a producing building selected, a right-click on the ground sets its RALLY POINT — where
@@ -5296,9 +5455,34 @@ const onRightUp = (m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
   }
 
   const sel = unitField.selectedPlatform();
+  // What the right-click can actually move. NOT `sel`, which is deliberately null for a multi-select
+  // (fitting and contact orders are single-unit decisions) — a marquee of six machines has to answer
+  // a move order, and reading the count separately is what lets it.
+  const ordering = unitField.selectedPlatformCount();
 
   // Shift queues the leg behind whatever is already commanded instead of replacing it.
   const append = shiftHeld;
+
+  // ATTACK MOVE: A + right-click. Goes in before the contact menu on purpose — an A-click is aimed
+  // at GROUND, and in a city the pick lands on a passer-by more often than not, so letting the
+  // contact menu take it would make the gesture unusable exactly where a fight happens.
+  if (aHeld && ordering) {
+    const g = groundAt(m.position);
+    if (!g) return;
+    closeContactMenu();
+    closeGroundMenu();
+    closeMillstoneMenu();
+    if (unitField.orderSelection(g.lon, g.lat, append, null, undefined, true)) {
+      cancelConstructionsFor(unitField.selectedPlatforms());
+      sound.play('orderLethal');
+      toast(ordering > 1 ? `◈ ATTACK MOVE · ${ordering} UNITS` : '◈ ATTACK MOVE');
+      updateUnitPanel();
+    } else {
+      sound.play('denied');
+      toast('◈ NO ROUTE TO THAT GROUND');
+    }
+    return;
+  }
 
   // Right-clicking a CONTACT that offers a real action — an attacker the garrison can take, or an
   // area strike — opens its menu. But a pick in a crowded city lands on an ordinary civilian far
@@ -5310,6 +5494,7 @@ const onRightUp = (m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
 
   closeContactMenu();
   closeGroundMenu();
+  closeMillstoneMenu();
   const g = groundAt(m.position);
   if (!g) return;
 
@@ -5317,8 +5502,16 @@ const onRightUp = (m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
   // way — the way an RTS does it. The airdrop question moves OFF the right-click while a unit is held
   // (it used to pop a MOVE/AIRDROP chooser on every single click, which is the friction that made
   // repositioning feel broken); it's still one right-click away with nothing selected, below.
-  if (sel) {
+  //
+  // One unit or twenty: `orderSelection` spreads a group into a formation around the point, so the
+  // whole marquee moves off one click.
+  if (ordering) {
     if (unitField.orderSelection(g.lon, g.lat, append)) {
+      // Sending a builder somewhere else abandons its site — say so and give the money back, rather
+      // than leaving a ring on the map over a building nobody is ever coming back to. Queuing a leg
+      // counts too: a worker that drives on the moment it arrives never stands still long enough to
+      // build anything.
+      cancelConstructionsFor(unitField.selectedPlatforms());
       sound.play('move');
       updateUnitPanel();
     } else {
@@ -5357,14 +5550,29 @@ handler.setInputAction(onRightDown, Cesium.ScreenSpaceEventType.RIGHT_DOWN, Cesi
  * has to be read from the keyboard rather than from the pick event.
  */
 let shiftHeld = false;
+/**
+ * A-held, for the attack move.
+ *
+ * Held rather than a sticky "attack cursor" mode, because holding is the gesture an RTS player
+ * already has in their hands and a mode you can forget you are in is how a repositioning click
+ * becomes an advance into a gun line. Tracked here for the same reason as shift: Cesium's pick
+ * events don't carry the keyboard.
+ *
+ * It does not collide with A = build ARACHNID: that hotkey only fires with a PRODUCING STRUCTURE
+ * selected, and an attack move only fires with UNITS selected.
+ */
+let aHeld = false;
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Shift') shiftHeld = true;
+  if (e.key === 'a' || e.key === 'A') aHeld = true;
 });
 window.addEventListener('keyup', (e) => {
   if (e.key === 'Shift') shiftHeld = false;
+  if (e.key === 'a' || e.key === 'A') aHeld = false;
 });
 window.addEventListener('blur', () => {
   shiftHeld = false;
+  aHeld = false;
 });
 
 // In a campaign this is "back to the world map"; in an RTS match there is no world map, so it ends
@@ -5562,26 +5770,10 @@ bindInterfaceSounds();
 
   // Millstone on/off. Applies to the NEXT match — an enemy base can't be conjured into a theater
   // that was built without one, and a half-seeded opponent is worse than none.
-  // The spawn picker's options ARE the roster — listed from MILLSTONE_UNIT_LIST rather than written
-  // out, so a new chassis appears here the moment it exists.
-  const spawn = el('dev-spawn') as HTMLSelectElement | null;
-  if (spawn) {
-    for (const u of MILLSTONE_UNIT_LIST) {
-      const o = document.createElement('option');
-      o.value = u.meshKind;
-      o.textContent = `${u.name} — answers ${u.counterpart}`;
-      spawn.appendChild(o);
-    }
-    spawn.addEventListener('change', () => {
-      devSpawnKind = (spawn.value || '') as UnitKind | '';
-      toast(
-        devSpawnKind
-          ? `◈ SHIFT + RIGHT-CLICK FIELDS ${MILLSTONE_BY_KIND.get(devSpawnKind)?.name ?? ''}`
-          : '◈ SPAWN OFF · SHIFT QUEUES MOVE LEGS AGAIN',
-      );
-    });
-  }
-
+  //
+  // The spawn picker that used to live here is gone: shift + right-click on the map now opens the
+  // roster where the unit is going, which is both fewer steps and findable without reading this
+  // panel first.
   const mill = el('dev-millstone') as HTMLInputElement | null;
   if (mill) {
     mill.checked = millstoneEnabled;
@@ -5997,9 +6189,7 @@ if (import.meta.env.DEV) {
     armamentOf,
     spawnMillstoneAt,
     groundAt,
-    get devSpawnKind() {
-      return devSpawnKind;
-    },
+    openMillstoneSpawnMenu,
     setMillstoneEnabled: (on: boolean) => {
       millstoneEnabled = on;
     },

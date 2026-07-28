@@ -213,7 +213,9 @@ export const PLATFORMS: PlatformDef[] = [
     hardpoints: 1,
     sensorM: BASE_SENSOR_M,
     speed: 3720,
-    altM: 2400,
+    // Half what it used to fly at (was 2400): at that height a diving interceptor read as a dot
+    // over the city rather than a machine in it, and the dive itself was mostly off-screen.
+    altM: 1200,
   },
   {
     id: 'walker',

@@ -657,6 +657,16 @@ interface Unit {
     meleeOnly: boolean;
     /** Garrison flag: stand the ground instead of marching on the enemy (Millstone's Nexus guard). */
     hold?: boolean;
+    /**
+     * ATTACK MOVE (A + right-click): advance along the route, but stop the moment something
+     * shootable is inside this unit's own reach and stay stopped until it is dead or gone.
+     *
+     * Deliberately implemented as a brake on movement rather than as its own targeting: every
+     * combatant already fires at whatever is in range each tick, so "stop when in range" IS
+     * "engage" — and leaving the route untouched means the drive resumes on real road geometry
+     * afterwards instead of being re-planned from wherever the fight ended.
+     */
+    attackMove?: boolean;
   };
 }
 
@@ -1398,6 +1408,9 @@ export class UnitField {
       reachM: arms.weapons.reduce((m, w) => Math.max(m, w.rangeM), 0),
       meleeOnly: arms.weapons.length > 0 && arms.weapons.every((w) => w.kind === 'melee'),
       hold: prev?.hold,
+      // A refit in the field is a weapon swap, not a new order: whatever it was told to do, it is
+      // still doing.
+      attackMove: prev?.attackMove,
     };
     this.rtsCombatants.add(index);
   }
@@ -1439,6 +1452,31 @@ export class UnitField {
   rtsHpOf(index: number): { hp: number; maxHp: number } | null {
     const c = this.units[index]?.rtsc;
     return c ? { hp: Math.max(0, Math.ceil(c.hp)), maxHp: c.maxHp } : null;
+  }
+
+  /**
+   * The nearest live enemy inside this unit's own longest weapon range, or -1.
+   *
+   * Range, not an aggro radius: it is exactly the distance at which the unit's guns start working,
+   * so an attack-moving column halts where it can shoot rather than where it can see. A melee
+   * chassis therefore keeps closing until it is on top of something, which is the correct behaviour
+   * for a machine whose only weapon is a drum.
+   */
+  private nearestHostileInReach(u: Unit): number {
+    const c = u.rtsc;
+    if (!c) return -1;
+    let best = -1;
+    let bd = c.reachM;
+    for (const j of this.rtsCombatants) {
+      const v = this.units[j];
+      if (!v || v.dead || !v.rtsc || v.rtsc.side === c.side) continue;
+      const d = this.distM(u, v.lon, v.lat);
+      if (d <= bd) {
+        bd = d;
+        best = j;
+      }
+    }
+    return best;
   }
 
   /** Ground distance from a unit to a point, metres. */
@@ -1835,6 +1873,18 @@ export class UnitField {
       }
       return; // holding station (or a fresh patrol leg just set below will move next tick)
     }
+
+    // ATTACK MOVE: stop while anything hostile is inside this unit's own reach. The fire pass is
+    // independent of movement, so a halted unit is a shooting unit; the route is left intact and the
+    // advance picks up again the moment nothing is in range.
+    const engaging = u.rtsc?.attackMove ? this.nearestHostileInReach(u) : -1;
+    if (engaging >= 0) {
+      const v = this.units[engaging];
+      const mLon = mPerLat * Math.cos(u.lat * DEG);
+      u.heading = Math.atan2((v.lon - u.lon) * mLon, (v.lat - u.lat) * mPerLat);
+      return;
+    }
+
     // The fleet range/speed upgrade lifts movement as well as sensor reach — one dial, both effects.
     let budget = SPEED[u.kind] * progression.classMult(u.kind as PlatformId) * dt;
     // Bounded so one long frame can't walk a platform through the whole route in a single step.
@@ -2568,18 +2618,40 @@ export class UnitField {
     append = false,
     action: RouteAction = null,
     target?: number,
+    attackMove = false,
   ): number {
-    const platforms = [...this.selection].filter((i) => PLATFORM_KINDS.includes(this.units[i].kind));
+    const platforms = this.selectedPlatforms();
     if (platforms.length <= 1) {
-      return platforms.length && this.orderPlatformAt(platforms[0], lon, lat, append, action, target) ? 1 : 0;
+      return platforms.length && this.orderPlatformAt(platforms[0], lon, lat, append, action, target, attackMove)
+        ? 1
+        : 0;
     }
     const mLon = mPerLat * Math.cos(lat * DEG);
     let moved = 0;
     platforms.forEach((idx, k) => {
       const off = formationOffset(k, platforms.length);
-      if (this.orderPlatformAt(idx, lon + off.dx / mLon, lat + off.dy / mPerLat, append, action, target)) moved++;
+      if (
+        this.orderPlatformAt(idx, lon + off.dx / mLon, lat + off.dy / mPerLat, append, action, target, attackMove)
+      )
+        moved++;
     });
     return moved;
+  }
+
+  /**
+   * The selected units that are YOUR platforms — the ones a right-click can actually move.
+   *
+   * The selection can hold ordinary contacts too (anyone in the city is clickable), so "is something
+   * selected" is not the same question as "is there anything here to order", and the right-click
+   * path needs the second one.
+   */
+  selectedPlatforms(): number[] {
+    return [...this.selection].filter((i) => PLATFORM_KINDS.includes(this.units[i].kind));
+  }
+
+  /** How many of the current selection are orderable platforms. */
+  selectedPlatformCount(): number {
+    return this.selectedPlatforms().length;
   }
 
   /**
@@ -2598,6 +2670,7 @@ export class UnitField {
     append: boolean,
     action: RouteAction,
     target?: number,
+    attackMove = false,
   ): boolean {
     const kind = this.units[index].kind as PlatformId;
     if (kind === 'naval' && this.shoreAt(lon, lat) > -60) return false;
@@ -2608,6 +2681,10 @@ export class UnitField {
     // silently walked through the intervening blocks — which is the constraint being real.
     const drive = this.roadRouteFor(kind, u, lon, lat);
     if (drive === null) return false;
+
+    // Every accepted order re-states the stance, so an ordinary move ENDS an attack move rather than
+    // leaving the unit quietly still braking for contacts on a route the operator has replaced.
+    if (u.rtsc) u.rtsc.attackMove = attackMove;
 
     if (!append || u.tlon === undefined) {
       const [first, ...rest] = drive ?? [{ lon, lat }];
@@ -2634,6 +2711,11 @@ export class UnitField {
       u.routeTarget = target;
     }
     return true;
+  }
+
+  /** Whether this unit is advancing under an ATTACK MOVE order — the unit card says which it is. */
+  attackMovingOf(index: number): boolean {
+    return !!this.units[index]?.rtsc?.attackMove;
   }
 
   /** Whether a specific unit index is in the current selection — the roster reads this to light chips. */
