@@ -1499,17 +1499,18 @@ function closeMillstoneMenu() {
 /**
  * DEV ONLY — the Millstone spawn menu.
  *
- * Shift + right-click on theater ground lists Millstone's entire roster and drops whichever chassis
- * you pick on that spot, armed exactly as a wave would send it. It exists to answer "what does a
+ * Press 8 over theater ground to list BOTH rosters and drop whichever chassis you pick on that spot,
+ * armed exactly as a wave — or your own factory — would send it. It exists to answer "what does a
  * leviathan actually do to this line" without playing to wave six to find out, which is why it is
  * marked DEV ONLY in the header rather than dressed up as a game feature.
  *
  * The roster is read from MILLSTONE_UNIT_LIST rather than written out, so a new chassis appears here
  * the moment it exists.
  *
- * Shift already meant "queue this leg behind the current order", and that gesture is not thrown away
- * to make room: with a unit selected, QUEUE WAYPOINT is the first item in the menu. It costs one
- * click where it used to cost none, and nothing that worked before has become unreachable.
+ * Opened with the 8 key, at whatever the cursor is over. It used to be shift + right-click, which
+ * had to go: Firefox forces its own context menu on shift + right-click whatever the page asks for,
+ * so the gesture was fighting the browser and losing. A key has no such owner — and it hands shift
+ * back its original meaning, which is queueing a waypoint behind the current order.
  */
 function openMillstoneSpawnMenu(screenX: number, screenY: number, lon: number, lat: number) {
   closeMillstoneMenu();
@@ -1536,28 +1537,6 @@ function openMillstoneSpawnMenu(screenX: number, screenY: number, lon: number, l
   box.innerHTML =
     `<div class="gc-head">DEV ONLY · FIELD A UNIT` +
     `<span class="gc-sub">${lat.toFixed(4)}, ${lon.toFixed(4)}</span></div>`;
-
-  // The shift gesture's original meaning, kept reachable — for the whole selection, not just a
-  // single machine, since shift + right-click is a move order like any other.
-  const ordering = unitField?.selectedPlatformCount() ?? 0;
-  if (ordering) {
-    const queue = document.createElement('button');
-    queue.type = 'button';
-    queue.className = 'gc-item';
-    queue.innerHTML = `<span class="gc-label">QUEUE WAYPOINT${ordering > 1 ? ` · ${ordering} UNITS` : ''}</span>`;
-    queue.addEventListener('click', () => {
-      done();
-      if (unitField?.orderSelection(lon, lat, true)) {
-        cancelConstructionsFor(unitField.selectedPlatforms());
-        sound.play('move');
-        updateUnitPanel();
-      } else {
-        sound.play('denied');
-        toast('◈ NO ROUTE TO THAT GROUND');
-      }
-    });
-    box.append(queue);
-  }
 
   // Both rosters are RTS-match units: outside a skirmish there is no army for either of them to
   // belong to. Say that on the items rather than letting twenty live-looking buttons each fail.
@@ -5102,9 +5081,8 @@ let rtsObjClock = 0;
 /**
  * Whether I is being held — the INSPECT modifier.
  *
- * A held modifier rather than a mode, for the same reason shift+right-click spawns a Millstone unit:
- * inspecting is something you do to one person on the way past, not a state you enter and have to
- * remember to leave.
+ * A held modifier rather than a mode: inspecting is something you do to one person on the way past,
+ * not a state you enter and have to remember to leave.
  */
 let inspectHeld = false;
 /** The theater's surveyed obelisk sites — where obelisks may be built. */
@@ -5675,6 +5653,7 @@ const fmt = (rad: number, pos: string, neg: string) => {
 };
 
 handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.MotionEvent) => {
+  lastMouse = Cesium.Cartesian2.clone(m.endPosition, lastMouse ?? undefined);
   // RTS placement: the ghost tracks the cursor and recolours on legality. Owns the pointer entirely.
   if (rtsPlacing) {
     updatePlacementGhost(m.endPosition);
@@ -5969,23 +5948,6 @@ const onRightUp = (m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
   if (!down || mode !== 'theater' || !unitField) return;
   if (Cesium.Cartesian2.distance(down, m.position) > ORDER_SLOP_PX) return; // that was a tilt drag
 
-  // DEV ONLY — shift + right-click on the map opens Millstone's roster and fields the chassis you
-  // pick on the ground you clicked. It used to require arming a chassis in the dev panel first,
-  // which meant the gesture did nothing at all unless you already knew the picker existed; the menu
-  // is the discoverable version, and it carries the shift-queue order as its first item so the
-  // gesture's original meaning is still one click away.
-  //
-  // A click that hits no ground (the sky, off the horizon) falls through to ordinary handling.
-  if (shiftHeld) {
-    const g = groundAt(m.position);
-    if (g) {
-      closeContactMenu();
-      closeGroundMenu();
-      openMillstoneSpawnMenu(m.position.x, m.position.y, g.lon, g.lat);
-      return;
-    }
-  }
-
   // RTS: with a producing building selected, a right-click on the ground sets its RALLY POINT — where
   // its units head as they roll out — rather than moving anything.
   if (rtsGame && rtsSelectedStructure && producesUnits(rtsSelectedStructure.type)) {
@@ -6094,6 +6056,13 @@ handler.setInputAction(onRightDown, Cesium.ScreenSpaceEventType.RIGHT_DOWN, Cesi
  * has to be read from the keyboard rather than from the pick event.
  */
 let shiftHeld = false;
+/**
+ * Last known cursor position in window coordinates.
+ *
+ * The spawn menu is opened by a KEY now, and a key carries no position — so it uses wherever the
+ * pointer happens to be, which is the same "spawn it there" the old right-click gesture had.
+ */
+let lastMouse: Cesium.Cartesian2 | null = null;
 /**
  * A-held, for the attack move.
  *
@@ -6315,7 +6284,7 @@ bindInterfaceSounds();
   // Millstone on/off. Applies to the NEXT match — an enemy base can't be conjured into a theater
   // that was built without one, and a half-seeded opponent is worse than none.
   //
-  // The spawn picker that used to live here is gone: shift + right-click on the map now opens the
+  // The spawn picker that used to live here is gone: pressing 8 over the map now opens the
   // roster where the unit is going, which is both fewer steps and findable without reading this
   // panel first.
   const mill = el('dev-millstone') as HTMLInputElement | null;
@@ -6614,12 +6583,34 @@ window.addEventListener('keydown', (e) => {
   // INSPECT is a held modifier and must be tracked before the hotkey table gets the key, or the RTS
   // branch's per-context lookup would swallow the I in some contexts and not others.
   if (rtsGame && (e.key === 'i' || e.key === 'I')) inspectHeld = true;
+
+  // DEV ONLY — 8 opens the unit spawn menu on the ground under the cursor. Ahead of the RTS hotkey
+  // table because no command card claims a digit outside the acquisitions research row, and this
+  // should work from every context rather than only some of them.
+  if (e.key === '8' && mode === 'theater' && !e.repeat) {
+    const at = lastMouse;
+    const g = at ? groundAt(at) : undefined;
+    if (g) {
+      closeContactMenu();
+      closeGroundMenu();
+      openMillstoneSpawnMenu(at!.x, at!.y, g.lon, g.lat);
+    } else {
+      sound.play('denied');
+      toast('◈ POINT AT GROUND FIRST');
+    }
+    return;
+  }
   // RTS build hotkeys + placement cancel take the key before anything else in a match.
   if (rtsGame) {
     if (e.key === 'Escape') {
-      closeInspectCard();
-      // Back out of an armed cursor first. Escape only ends the match when there is nothing else to
-      // escape from — otherwise aiming a strike and changing your mind would quit the game.
+      // Escape backs out of the INNERMOST thing and stops there. An open sheet is the innermost:
+      // closing the inspect card should not also quit the match, which is exactly what it did when
+      // these were three statements in a row rather than a ladder.
+      if (document.getElementById('g-inspect') || document.getElementById('g-millstone-menu')) {
+        closeInspectCard();
+        closeMillstoneMenu();
+        return;
+      }
       if (rtsPlacing) cancelPlacement();
       else if (rtsAiming) cancelAiming();
       else endRtsMatch();
