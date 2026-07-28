@@ -314,6 +314,8 @@ const STRUCT_MUZZLE_M = 170;
 const ASSIST_CALL_M = 1500;
 /** How close to the distress point a hostile must be to count as the thing causing it. */
 const ASSIST_ENGAGE_M = 900;
+/** Seconds a unit remembers who hit it. Long enough to answer, short enough not to chase a ghost. */
+const THREAT_TTL_S = 6;
 /** Seconds a distress point stays live after the last hit there. */
 const DISTRESS_TTL_S = 5;
 /** Calls closer together than this are the same fight, not two. */
@@ -734,6 +736,15 @@ interface Unit {
     assist?: boolean;
     /** Where it stood when it left to assist, so it can go back. Cleared when it gets there. */
     post?: { lon: number; lat: number };
+    /**
+     * Who last hit this unit, and how long ago.
+     *
+     * The whole of "fight back" hangs off this. Without it a unit can only answer what happens to
+     * stand inside its own weapon range, which means anything out-ranging it — a bulwark shelling
+     * from 1250 m at a quadruped that reaches 650 — kills it while it stands there with nothing to
+     * shoot at. Ages out, so a unit does not remember a grudge forever.
+     */
+    threat?: { index: number; ageS: number };
     /** Garrison flag: stand the ground instead of marching on the enemy (Millstone's Nexus guard). */
     hold?: boolean;
     /**
@@ -890,6 +901,8 @@ interface Munition {
   flightS: number;
   dmg: number;
   splashM: number;
+  /** Unit index that fired it, or -1 for anything with no unit behind it. Splash victims blame this. */
+  by: number;
   look: MunitionLook;
   /**
    * Recent positions, oldest first — what the trail is drawn from.
@@ -1628,11 +1641,18 @@ export class UnitField {
    * Land damage on one combatant, killing it and recording the kill if that takes it to zero.
    * Every path that hurts a unit goes through here so "died" is decided in exactly one place.
    */
-  private damageUnit(j: number, dmg: number, ev: RtsCombatEvents): void {
+  private damageUnit(j: number, dmg: number, ev: RtsCombatEvents, by = -1): void {
     const v = this.units[j];
     if (!v || v.dead || !v.rtsc) return;
     // Anything of the player's taking a hit is a call for help, wherever it came from.
     if (v.rtsc.side === 0) this.raiseDistress(v.lon, v.lat);
+    // Remember who did it. `by` is -1 for anything with no unit behind it — a structure's battery,
+    // an orbital strike — and those deliberately raise no grudge: there is nothing to walk at that
+    // the default behaviour would not already be walking at.
+    if (by >= 0 && by !== j) {
+      const a = this.units[by];
+      if (a && !a.dead && a.rtsc && a.rtsc.side !== v.rtsc.side) v.rtsc.threat = { index: by, ageS: 0 };
+    }
     v.rtsc.hp -= dmg;
     if (v.rtsc.hp > 0) return;
     v.dead = true;
@@ -1688,7 +1708,7 @@ export class UnitField {
       for (const j of live) {
         const v = this.units[j];
         if (!v || v.dead || !v.rtsc) continue;
-        if (this.distLL(m.tlon, m.tlat, v.lon, v.lat) <= r) this.damageUnit(j, m.dmg, ev);
+        if (this.distLL(m.tlon, m.tlat, v.lon, v.lat) <= r) this.damageUnit(j, m.dmg, ev, m.by);
       }
       for (const s of structs) {
         if (s.side === m.side) continue; // a shell does not raze the base that fired it
@@ -1751,9 +1771,19 @@ export class UnitField {
       if (u.dead) continue; // killed earlier this same tick
       const c = u.rtsc!;
 
+      // A grudge is short. Long enough to turn on whoever hit you and deal with them, not long
+      // enough to still be walking at a ghost half a minute later.
+      if (c.threat) {
+        c.threat.ageS += dt;
+        const a = this.units[c.threat.index];
+        if (c.threat.ageS > THREAT_TTL_S || !a || a.dead || !a.rtsc) c.threat = undefined;
+      }
+
       // ---- movement ----------------------------------------------------------------------------
-      let handled = false;
-      if (c.side === 1 && !c.hold) {
+      // RETALIATION first, on both sides: whoever hit you is the thing you deal with, wherever they
+      // are standing. Everything below is what a unit does when nobody is shooting it.
+      let handled = this.retaliate(u, c);
+      if (!handled && c.side === 1 && !c.hold) {
         // Something to fight, close by, beats a building further off. Without this a melee army
         // walks straight past the army shooting it in order to chew on a supply depot.
         let tlon: number | undefined;
@@ -1795,7 +1825,7 @@ export class UnitField {
           }
         }
         handled = true;
-      } else if (c.side === 0 && !c.hold) {
+      } else if (!handled && c.side === 0 && !c.hold) {
         handled = this.autoAssist(u, c, list);
       }
 
@@ -1823,17 +1853,33 @@ export class UnitField {
         if (slot.cd > 0) continue;
         const w = slot.w;
 
-        // Prefer the nearest opposing unit in THIS weapon's range — the thing shooting back.
+        // Whoever is shooting AT this unit outranks whoever happens to be nearest — being hit is
+        // the strongest possible information about what matters, and a unit that answers a passing
+        // scout while something else takes it apart is not fighting back in any sense worth the name.
         let tj = -1;
         let bd = w.rangeM;
-        for (const j of list) {
-          if (j === i) continue;
-          const v = this.units[j];
-          if (v.dead || !v.rtsc || v.rtsc.side === c.side) continue;
-          const d = this.distM(u, v.lon, v.lat);
-          if (d <= bd) {
-            bd = d;
-            tj = j;
+        const grudge = c.threat?.index ?? -1;
+        if (grudge >= 0) {
+          const a = this.units[grudge];
+          if (a && !a.dead && a.rtsc && a.rtsc.side !== c.side) {
+            const d = this.distM(u, a.lon, a.lat);
+            if (d <= bd) {
+              bd = d;
+              tj = grudge;
+            }
+          }
+        }
+        // Otherwise the nearest opposing unit in THIS weapon's range.
+        if (tj < 0) {
+          for (const j of list) {
+            if (j === i) continue;
+            const v = this.units[j];
+            if (v.dead || !v.rtsc || v.rtsc.side === c.side) continue;
+            const d = this.distM(u, v.lon, v.lat);
+            if (d <= bd) {
+              bd = d;
+              tj = j;
+            }
           }
         }
         if (tj >= 0) {
@@ -1842,8 +1888,8 @@ export class UnitField {
           // deliberately NOT reset: the weapon is held, ready, for a shot that isn't suicide.
           if (w.splashM && this.friendlyWithin(c.side, v.lon, v.lat, w.splashM, list)) continue;
           slot.cd = w.periodS;
-          this.fireAt(u, c.side, falt, w, v.lon, v.lat, this.combatAltOf(v), ev);
-          if (w.kind !== 'projectile') this.damageUnit(tj, w.dmg, ev);
+          this.fireAt(i, u, c.side, falt, w, v.lon, v.lat, this.combatAltOf(v), ev);
+          if (w.kind !== 'projectile') this.damageUnit(tj, w.dmg, ev, i);
           continue;
         }
 
@@ -1862,7 +1908,7 @@ export class UnitField {
         if (ts) {
           slot.cd = w.periodS;
           const talt = this.heightAt(ts.lon, ts.lat) + 60;
-          this.fireAt(u, c.side, falt, w, ts.lon, ts.lat, talt, ev);
+          this.fireAt(i, u, c.side, falt, w, ts.lon, ts.lat, talt, ev);
           // A projectile books its damage on arrival, not on firing.
           if (w.kind !== 'projectile') {
             ev.hits.push({ id: ts.id, dmg: w.dmg, lon: ts.lon, lat: ts.lat });
@@ -1874,6 +1920,48 @@ export class UnitField {
 
     this.structFire(dt, structs, list, ev);
     return ev;
+  }
+
+  /**
+   * Answer whoever is shooting at this unit, at any range.
+   *
+   * The rule the game was missing: a unit out-ranged by its attacker had no behaviour at all. A
+   * quadruped reaches 650 m and a bulwark shells it from 1250; a censer sits at 1600 and nothing on
+   * the ground could ever touch it. Standing still and dying is not a tactic, and it is not one the
+   * player or Millstone chose — it was the absence of any code for the situation.
+   *
+   * So: if the thing that hit you is outside your reach, walk at it. There is deliberately NO
+   * distance cap, because none is needed — your attacker is by definition inside its OWN weapon
+   * range of you, and the longest gun in the game reaches 1900 m. "Any distance" is already bounded
+   * by the fact that something had to be able to hit you to start this.
+   *
+   * What it will not do is override the operator. A unit under orders keeps them and fights from
+   * where it was sent — the shooting half of fighting back is unconditional, the WALKING half is
+   * not, because a line that abandons its position every time a scout plinks it is not a line. Same
+   * for `hold`, and same for workers, who shoot back at whatever reaches them but never chase.
+   *
+   * Reuses the assist post so a unit that steps out to deal with a shooter walks back afterwards.
+   */
+  private retaliate(u: Unit, c: NonNullable<Unit['rtsc']>): boolean {
+    const t = c.threat;
+    if (!t || c.hold || NO_ASSIST.has(u.kind)) return false;
+    const a = this.units[t.index];
+    if (!a || a.dead || !a.rtsc || a.rtsc.side === c.side) return false;
+    // An operator order outranks the field here exactly as it does for an assist.
+    if (u.tlon !== undefined && !c.assist) return false;
+
+    const d = this.distM(u, a.lon, a.lat);
+    // Already able to answer it — the fire stage is doing the work, so hold position and shoot.
+    if (d <= c.reachM) {
+      if (c.assist && u.tlon !== undefined) this.halt(u);
+      return true;
+    }
+    if (!c.assist) {
+      c.assist = true;
+      c.post = { lon: u.lon, lat: u.lat };
+    }
+    this.assistDriveTo(u, a.lon, a.lat);
+    return true;
   }
 
   /** Record that something friendly was hit here — a call for help. Nearby calls merge into one. */
@@ -2035,6 +2123,7 @@ export class UnitField {
    * the air. Hitscan damage is the caller's to apply — it knows whether it hit a unit or a wall.
    */
   private fireAt(
+    from: number,
     u: Unit,
     side: 0 | 1,
     falt: number,
@@ -2061,6 +2150,7 @@ export class UnitField {
       flightS: Math.max(0.15, d / speed),
       dmg: w.dmg,
       splashM: w.splashM ?? 0,
+      by: from,
       // Speed decides the look, which is the honest tell: anything doing 1000 m/s or better is
       // rocket-propelled and reads as one, and everything slower is a shell out of a tube. It keeps
       // the weapon table free of a presentation field nobody would remember to set.
@@ -2097,6 +2187,7 @@ export class UnitField {
       flightS: Math.max(0.5, o.dropFromM / o.speedMps),
       dmg: o.dmg,
       splashM: o.splashM,
+      by: -1,
       look: 'orbital',
       trail: [],
       trailClock: 0,
