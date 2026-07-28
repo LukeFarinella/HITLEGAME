@@ -1106,12 +1106,16 @@ body:has(#globe-ui) #hint { display: none; }
 .gc-item:hover:not(:disabled) { background: rgba(232, 112, 30, .14); color: var(--bone); }
 .gc-item.lethal { color: var(--red); }
 .gc-item.lethal:hover:not(:disabled) { background: rgba(226, 58, 46, .16); }
+/* your own units in the spawn menu — the company's amber, never the enemy's red */
+.gc-item.own { color: var(--warn); }
+.gc-item.own:hover:not(:disabled) { background: rgba(242, 193, 59, .14); }
+.gc-item.own .gc-why { color: var(--steel); }
 .gc-item:disabled { cursor: not-allowed; color: var(--gunmetal); }
 .gc-why { color: var(--warn); font-size: 8.5px; letter-spacing: .06em; }
 .gc-item:disabled .gc-why { color: var(--ash); }
 
-/* The dev-only Millstone spawn menu is the whole roster, so it is the one context menu tall enough
-   to need a scroller of its own rather than running off the bottom of the window. */
+/* The dev-only spawn menu carries BOTH rosters, so it is the one context menu tall enough to need a
+   scroller of its own rather than running off the bottom of the window. */
 .g-context.g-spawn { min-width: 246px; max-height: 62vh; overflow-y: auto; }
 .g-context.g-spawn .gc-head {
   position: sticky; top: 0; z-index: 1;
@@ -1119,6 +1123,17 @@ body:has(#globe-ui) #hint { display: none; }
   background: rgba(11, 12, 14, .97); color: var(--warn);
 }
 .gc-sub { color: var(--ash); font-size: 8.5px; letter-spacing: .06em; }
+/* Army headings inside the spawn menu. Sticky under the header so you always know which roster you
+   are scrolling through — twenty items of two colours would otherwise be one long ambiguous list. */
+.gc-side {
+  position: sticky; top: 34px; z-index: 1;
+  padding: 6px 11px 4px; margin-top: 2px;
+  background: rgba(11, 12, 14, .97);
+  border-top: 1px solid rgba(120, 130, 140, .18);
+  font: 700 8px/1 var(--mono); letter-spacing: .2em;
+}
+.gc-side.own { color: var(--warn); }
+.gc-side.foe { color: var(--red); }
 
 /* ---------- capture plate on the unit card ----------
    The face is the first thing on the card, because it is the thing the rest of the card is about. */

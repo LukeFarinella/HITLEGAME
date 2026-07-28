@@ -58,7 +58,7 @@ import {
   STRUCTURES, BUILDABLE, BUILD_RULES, ABILITY_BY_ID, NEXUS_LASER, ORBITAL, abilitiesFrom, metresBetween,
   type AbilityId, type StructureType, type Structure,
 } from '../game/rts/structures';
-import { RTS_UNITS, unitsFrom, producesUnits, type RtsUnitId } from '../game/rts/units';
+import { RTS_UNITS, RTS_UNIT_LIST, unitsFrom, producesUnits, type RtsUnitId } from '../game/rts/units';
 import { RESEARCH, researchFrom, type ResearchId } from '../game/rts/research';
 import { RTS_COMBAT, armamentOf } from '../game/rts/combat';
 import { MILLSTONE_BY_KIND, MILLSTONE_UNIT_LIST } from '../game/rts/millstoneUnits';
@@ -1534,7 +1534,7 @@ function openMillstoneSpawnMenu(screenX: number, screenY: number, lon: number, l
   box.id = 'g-millstone-menu';
   box.className = 'g-context g-spawn';
   box.innerHTML =
-    `<div class="gc-head">DEV ONLY · FIELD MILLSTONE UNIT` +
+    `<div class="gc-head">DEV ONLY · FIELD A UNIT` +
     `<span class="gc-sub">${lat.toFixed(4)}, ${lon.toFixed(4)}</span></div>`;
 
   // The shift gesture's original meaning, kept reachable — for the whole selection, not just a
@@ -1559,10 +1559,40 @@ function openMillstoneSpawnMenu(screenX: number, screenY: number, lon: number, l
     box.append(queue);
   }
 
-  // Millstone's units are RTS-match units: there is no enemy army outside a skirmish for them to
-  // belong to. Say that on the items rather than letting nine live-looking buttons each fail.
+  // Both rosters are RTS-match units: outside a skirmish there is no army for either of them to
+  // belong to. Say that on the items rather than letting twenty live-looking buttons each fail.
   const inMatch = !!rtsGame && !rtsEnded;
 
+  /** A section header, so the two armies never read as one list. */
+  const heading = (text: string, cls: string) => {
+    const h = document.createElement('div');
+    h.className = `gc-side ${cls}`;
+    h.textContent = text;
+    box.append(h);
+  };
+
+  // YOURS first. It is the one you reach for while playtesting your own build; Millstone is the one
+  // you reach for to find out what happens to it.
+  heading('◈ GORGON · YOURS', 'own');
+  for (const u of RTS_UNIT_LIST) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'gc-item own';
+    b.disabled = !inMatch;
+    b.innerHTML =
+      `<span class="gc-label">${u.name} · ${u.category.toUpperCase()}</span>` +
+      (inMatch ? `<span class="gc-why">${u.supply} SUPPLY</span>` : `<span class="gc-why">NO ACTIVE SKIRMISH</span>`);
+    b.title = u.blurb;
+    if (inMatch) {
+      b.addEventListener('click', () => {
+        done();
+        spawnGorgonAt(u.id, lon, lat);
+      });
+    }
+    box.append(b);
+  }
+
+  heading('◈ MILLSTONE · HOSTILE', 'foe');
   for (const u of MILLSTONE_UNIT_LIST) {
     const b = document.createElement('button');
     b.type = 'button';
@@ -1581,8 +1611,8 @@ function openMillstoneSpawnMenu(screenX: number, screenY: number, lon: number, l
     box.append(b);
   }
 
-  // Ten items is tall enough to run off the bottom of the window from a click low on the map, so
-  // this one menu is placed against the viewport instead of blindly at the cursor.
+  // Twenty-odd items across two armies is taller than any window, so this one menu scrolls (see
+  // .g-spawn in theme.css) and is placed against the viewport instead of blindly at the cursor.
   box.style.left = `${screenX}px`;
   box.style.top = `${screenY}px`;
   document.body.append(box);
@@ -2536,6 +2566,48 @@ function openInspect(screenX: number, screenY: number, index: number): void {
 /** The company's authority level, 0–5. */
 function rtsAuthority(): AuthorityLevel {
   return Math.min(5, Math.max(0, Math.round(rtsGame?.economy.authority ?? 0))) as AuthorityLevel;
+}
+
+/**
+ * DEV ONLY — drop one of YOUR OWN units on a spot, free.
+ *
+ * Deliberately identical to a unit rolling off a production line in every respect that matters: it
+ * is registered in the roster (so it costs supply, carries a unit card and can be selected), and it
+ * is armed from {@link armamentOf} with the company's current research, so what you drop is what
+ * your factory would ship right now rather than a stripped copy of it. The only thing skipped is the
+ * money and the queue — which is the entire point of a spawn menu.
+ *
+ * Water chassis get the same treatment the harbor gives them: a hull dropped on a forecourt can
+ * never move, so it launches from the nearest sea or says why not.
+ */
+function spawnGorgonAt(unit: RtsUnitId, lon: number, lat: number): void {
+  if (!rtsGame || !unitField || rtsEnded) {
+    sound.play('denied');
+    toast('◈ START A SKIRMISH FIRST');
+    return;
+  }
+  const def = RTS_UNITS[unit];
+  let spawnLon = lon;
+  let spawnLat = lat;
+  if (WATER_KINDS.has(def.meshKind)) {
+    const water = waterNear(lon, lat);
+    if (!water) {
+      sound.play('denied');
+      toast('◈ NO NAVIGABLE WATER IN RANGE · HULL NOT LAUNCHED');
+      return;
+    }
+    spawnLon = water.lon;
+    spawnLat = water.lat;
+  }
+  const idx = unitField.spawnRtsUnit(def.meshKind, spawnLon, spawnLat);
+  // Charges supply — a free unit that was also free of supply would quietly break the one economy
+  // the spawn menu is most often used to test against.
+  rtsGame.registerUnit(idx, unit, true);
+  unitField.armRtsCombat(idx, 0, armamentOf(def.meshKind, rtsGame.researched));
+  sound.play('confirm');
+  toast(`◈ ${def.name} FIELDED`);
+  updateUnitHud();
+  updateRtsHud();
 }
 
 /** Whether the currently selected unit is a worker drone — the only unit that opens the build menu. */
@@ -6689,8 +6761,9 @@ if (import.meta.env.DEV) {
     updateUnitPanel,
     armamentOf,
     spawnMillstoneAt,
-    groundAt,
+    spawnGorgonAt,
     openMillstoneSpawnMenu,
+    groundAt,
     setMillstoneEnabled: (on: boolean) => {
       millstoneEnabled = on;
     },
