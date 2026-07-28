@@ -779,3 +779,86 @@ export class Rounds {
     this.collection.destroy();
   }
 }
+
+/**
+ * Camera flashes — the obelisk that just caught something lighting up.
+ *
+ * The violation system used to be silent at the source: an accusation appeared over a contact
+ * somewhere in the city and nothing whatever happened at the installation that made it. That put the
+ * machinery out of sight, which is precisely the wrong place for it in this game. Now the obelisk
+ * fires, and the flash is the only pure white thing on screen — the network taking a picture of
+ * somebody.
+ *
+ * Two-stage, because that is what a flashbulb does: a hard bloom in a couple of frames, then a
+ * squared decay rather than a linear fade, which would read as a glowing orb instead of a flash.
+ */
+const FLASH_POOL = 12;
+const FLASH_COLOR = Cesium.Color.fromCssColorString('#FFFFFF');
+/** Seconds of rise, then of decay. */
+const FLASH_RISE = 0.045;
+const FLASH_FALL = 0.42;
+const FLASH_PX = 78;
+
+interface Flash {
+  point: Cesium.PointPrimitive;
+  age: number;
+  live: boolean;
+}
+
+export class CameraFlashes {
+  readonly collection = new Cesium.PointPrimitiveCollection();
+  private pool: Flash[] = [];
+  private cursor = 0;
+
+  constructor() {
+    for (let i = 0; i < FLASH_POOL; i++) {
+      this.pool.push({
+        point: this.collection.add({
+          position: Cesium.Cartesian3.ZERO,
+          color: FLASH_COLOR.withAlpha(0),
+          pixelSize: 1,
+          show: false,
+          // Through terrain: a flash you could only see with line of sight to the mast would be
+          // invisible exactly when you are looking at the thing it is telling you about.
+          disableDepthTestDistance: 1e12,
+        }),
+        age: 0,
+        live: false,
+      });
+    }
+  }
+
+  /** Pop a flash at a point. Oldest slot is recycled, so a burst of events never runs out. */
+  fire(lon: number, lat: number, height: number): void {
+    const f = this.pool[this.cursor];
+    this.cursor = (this.cursor + 1) % FLASH_POOL;
+    f.point.position = Cesium.Cartesian3.fromDegrees(lon, lat, height);
+    f.age = 0;
+    f.live = true;
+    f.point.show = true;
+  }
+
+  update(dt: number): void {
+    for (const f of this.pool) {
+      if (!f.live) continue;
+      f.age += dt;
+      if (f.age >= FLASH_RISE + FLASH_FALL) {
+        f.live = false;
+        f.point.show = false;
+        continue;
+      }
+      if (f.age < FLASH_RISE) {
+        f.point.pixelSize = FLASH_PX * (f.age / FLASH_RISE);
+        f.point.color = FLASH_COLOR.withAlpha(1);
+      } else {
+        const t = (f.age - FLASH_RISE) / FLASH_FALL;
+        f.point.pixelSize = FLASH_PX * (1 - t * 0.55);
+        f.point.color = FLASH_COLOR.withAlpha(Math.pow(1 - t, 2));
+      }
+    }
+  }
+
+  destroy(): void {
+    this.collection.destroy();
+  }
+}

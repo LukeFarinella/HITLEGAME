@@ -188,8 +188,18 @@ export const BUILD_RULES = {
   OBELISK_REACH_M: 14_000,
   /** How close the cursor must be to a surveyed site for the obelisk ghost to snap onto it. */
   OBELISK_SNAP_M: 2500,
-  /** A facility must sit within this of the Nexus or another facility — the base's build radius. */
-  FACILITY_REACH_M: 7000,
+  /**
+   * How far an obelisk's POWER reaches, in metres. A facility must stand inside this of a live
+   * obelisk (the Nexus counts) or it cannot be built.
+   *
+   * This replaced the old "near the Nexus or another facility" rule, and the swap is the whole
+   * economy in one number. Before, a base grew as an undifferentiated sprawl and an obelisk was
+   * something you built for income somewhere else. Now the obelisk is the thing your base hangs off:
+   * taking ground is what lets you build on it, an obelisk that falls takes its whole cluster's power
+   * with it, and a forward obelisk is a forward base rather than a distant meter. The radius is
+   * deliberately generous — this is meant to make expansion meaningful, not to make placement fiddly.
+   */
+  POWER_RADIUS_M: 2500,
   /** A facility must sit within this of a road. */
   ROAD_DIST_M: 450,
   /**
@@ -201,7 +211,14 @@ export const BUILD_RULES = {
    * something.
    */
   SHORE_DIST_M: 700,
-  /** No structure may be built closer than this to another — basic spacing so bases don't stack. */
+  /**
+   * No FACILITY may be built closer than this to another facility — basic spacing so buildings don't
+   * stack into one unreadable pile.
+   *
+   * Obelisks are exempt on both sides of the test: you may build a facility right up against one, and
+   * on top of a surveyed site if you like. An obelisk is the power source its cluster gathers around,
+   * so making it repel the things it powers was exactly backwards.
+   */
   MIN_SPACING_M: 260,
 };
 

@@ -130,6 +130,25 @@ class RoadGrid {
   }
 }
 
+// ---- power tethers ------------------------------------------------------------------------------
+//
+// The visible form of the build rule: every building is drawn wired back to the obelisk that powers
+// it. Red because it is the same red the obelisks themselves carry, and thin because there is one per
+// building and a base of nine should still read as a base rather than a cat's cradle.
+
+const POWER_COLOR = Cesium.Color.fromCssColorString('#E23A2E').withAlpha(0.85);
+/** Metres up the obelisk the cable leaves from. */
+const POWER_MAST_M = 150;
+/** Metres above ground the cable lands on the building. */
+const POWER_EAVE_M = 55;
+/** How far the cable dips between its ends. */
+const POWER_SAG_M = 28;
+const POWER_SEGMENTS = 14;
+/** Base 16-bit dash pattern: short marks, long gaps — a pulse travelling, not a dashed border. */
+const POWER_DASH = 0b1100010001000100;
+/** Seconds between one-bit rotations of the pattern. */
+const POWER_STEP_S = 0.055;
+
 /** A ring of world positions around a ground point, for footprints and the ghost. */
 function ringPositions(
   lon: number,
@@ -213,6 +232,12 @@ export class RtsBuildLayer {
   /** In-progress construction sites — an amber ring while a worker builds. */
   readonly construction = new Cesium.PolylineCollection();
   private constructionLines = new Map<number, Cesium.Polyline>();
+  /** Power tethers: a thin crawling red line from each obelisk to every building it powers. */
+  readonly power = new Cesium.PolylineCollection();
+  private powerLines: Cesium.Polyline[] = [];
+  private powerMaterials: Cesium.Material[] = [];
+  private dashPhase = 0;
+  private dashClock = 0;
 
   private roadGrid: RoadGrid;
   private ghostLine: Cesium.Polyline | undefined;
@@ -411,6 +436,68 @@ export class RtsBuildLayer {
       this.construction.remove(line);
       this.constructionLines.delete(id);
     }
+  }
+
+  /**
+   * Redraw the power tethers — one line per powered building, back to the obelisk feeding it.
+   *
+   * Called only when the base actually changes shape, not per frame: the crawl is done by animating
+   * the dash pattern in {@link update}, so the geometry is static between builds.
+   */
+  setPower(links: { flon: number; flat: number; tlon: number; tlat: number }[]): void {
+    this.power.removeAll();
+    this.powerLines = [];
+    this.powerMaterials = [];
+    for (const l of links) {
+      // Off the obelisk's mast and down onto the building's roofline, with a sag in the middle, so it
+      // reads as a cable strung between two things rather than a line drawn on the map.
+      const fh = this.heightAt(l.flon, l.flat) + POWER_MAST_M;
+      const th = this.heightAt(l.tlon, l.tlat) + POWER_EAVE_M;
+      const positions: Cesium.Cartesian3[] = [];
+      for (let i = 0; i <= POWER_SEGMENTS; i++) {
+        const k = i / POWER_SEGMENTS;
+        const lon = l.flon + (l.tlon - l.flon) * k;
+        const lat = l.flat + (l.tlat - l.flat) * k;
+        const sag = Math.sin(Math.PI * k) * POWER_SAG_M;
+        positions.push(Cesium.Cartesian3.fromDegrees(lon, lat, fh + (th - fh) * k - sag));
+      }
+      const material = Cesium.Material.fromType('PolylineDash', {
+        color: POWER_COLOR,
+        gapColor: Cesium.Color.TRANSPARENT,
+        dashLength: 18,
+        dashPattern: POWER_DASH,
+      });
+      this.powerLines.push(this.power.add({ positions, width: 1.6, material }));
+      this.powerMaterials.push(material);
+    }
+    this.dashPhase = 0;
+  }
+
+  /** Drop every tether — a match ending, or a base with nothing powered. */
+  clearPower(): void {
+    this.power.removeAll();
+    this.powerLines = [];
+    this.powerMaterials = [];
+  }
+
+  /**
+   * Animate the tethers: rotate the dash bit-pattern so the dashes crawl from the obelisk toward the
+   * building — power flowing outward, which is the direction the rule actually runs.
+   *
+   * Stepped on a clock rather than per frame. A 16-bit pattern rotated once a frame at 60 fps cycles
+   * nearly four times a second, which reads as a strobe; {@link POWER_STEP_S} slows it to a crawl.
+   */
+  update(dt: number): void {
+    if (!this.powerMaterials.length) return;
+    this.dashClock += dt;
+    if (this.dashClock < POWER_STEP_S) return;
+    this.dashClock = 0;
+    this.dashPhase = (this.dashPhase + 1) & 15;
+    // Rotate right: with Cesium's dash pattern read from the low bit up, that walks the gaps forward
+    // along the line rather than backward.
+    const p = POWER_DASH;
+    const pattern = ((p >>> this.dashPhase) | (p << (16 - this.dashPhase))) & 0xffff;
+    for (const m of this.powerMaterials) (m.uniforms as { dashPattern: number }).dashPattern = pattern;
   }
 
   /** Whether a point is close enough to a road for a facility. */

@@ -164,6 +164,16 @@ const CUES: Record<string, Cue> = {
     k.noise({ dur: 0.16, gain: 0.03, filter: 'bandpass', freq: 3400, to: 700, q: 3, bus: 'grit' });
   },
 
+  // An obelisk taking a picture of somebody. A shutter, then the capacitor recharging: a hard
+  // high-passed snap, a short square click on top of it, and a thin whine sweeping up underneath for
+  // half a second. Quiet on purpose — this fires every few seconds in a developed network, so it has
+  // to be legible without ever becoming the thing you are listening to.
+  camera: (k) => {
+    k.noise({ dur: 0.025, gain: 0.055, filter: 'highpass', freq: 4200 });
+    k.tone({ freq: 2600, to: 1500, dur: 0.045, gain: 0.045, type: 'square' });
+    k.tone({ freq: 140, to: 5400, dur: 0.5, gain: 0.012, type: 'sine', at: 0.04 });
+  },
+
   // --- siege -------------------------------------------------------------------------------
   // Something walking at the net: two slow detuned pulses with a tremolo shimmer and reverb. Eerie,
   // meant to be noticed rather than to startle.

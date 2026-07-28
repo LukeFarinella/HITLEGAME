@@ -68,7 +68,7 @@ import { RtsUnitCard, type RtsCardUnit, type RtsCardStructure } from '../ui/rtsU
 import { showLoading, setStage, hideLoading } from '../ui/loading';
 import { setActiveSlot, migrateLegacySave } from '../game/saves';
 import { LaserBeams } from './lasers';
-import { ScanBeams, Blasts, Sparks, Impacts, Cuffs, ViolationPings, Rounds } from './effects';
+import { ScanBeams, Blasts, Sparks, Impacts, Cuffs, ViolationPings, Rounds, CameraFlashes } from './effects';
 import { Reactions } from './reactions';
 import { ActionMarks, type ActionKind } from './actionMarks';
 import { RouteLayer } from './routes';
@@ -555,6 +555,8 @@ let blasts: Blasts | undefined;
 let sparks: Sparks | undefined;
 /** Artillery and missiles in the air. Positions come from the combat sim, not from this layer. */
 let rounds: Rounds | undefined;
+/** Obelisk camera flashes — fires where a violation was recorded. RTS mode only. */
+let flashes: CameraFlashes | undefined;
 /**
  * Screen-space impact marks.
  *
@@ -834,6 +836,8 @@ function addUnits(center: { lon: number; lat: number }, map: TheaterMap, net: Ro
   scene.primitives.add(sparks.collection);
   rounds = new Rounds();
   scene.primitives.add(rounds.collection);
+  flashes = new CameraFlashes();
+  scene.primitives.add(flashes.collection);
   impacts = new Impacts();
   scene.primitives.add(impacts.collection);
   dropSites = new DropSites();
@@ -1236,6 +1240,10 @@ function removeUnits() {
     scene.primitives.remove(rounds.collection);
     rounds = undefined;
   }
+  if (flashes) {
+    scene.primitives.remove(flashes.collection);
+    flashes = undefined;
+  }
   if (impacts) {
     scene.primitives.remove(impacts.collection);
     impacts = undefined;
@@ -1295,6 +1303,9 @@ scene.preUpdate.addEventListener(() => {
       rtsConstructionTick(dt);
       rtsGame.tickResearch(dt);
       rtsGame.tickAbilities(dt);
+      // Tethers are static geometry between builds; only the dash crawl runs every frame.
+      if (rtsPowerSig !== rtsGame.structures.length) refreshPowerLines();
+      rtsBuild?.update(dt);
       runMillstone(dt);
       runRtsCombat(dt);
       rtsGame.tickUnits(dt); // shield/energy regen
@@ -1351,6 +1362,7 @@ scene.preUpdate.addEventListener(() => {
   pulse?.update(dt);
   blasts?.update(dt);
   sparks?.update(dt);
+  flashes?.update(dt);
   cuffs?.update(dt);
   impacts?.update(dt);
   dropSites?.update(dt);
@@ -2276,19 +2288,13 @@ function countLiveObelisks(): number {
 //
 // The base-building loop. Obelisks ride the existing obelisk/sensor rebuild (a built one is a real
 // network site with coverage); facilities are a separate marker layer with their own placement
-// rules — near a road, within reach of the Nexus or another facility. Everything routes through the
+// rules — near a road, and inside the power radius of an obelisk. Everything routes through the
 // rtsGame money and the rtsBuild render layer.
-
-/**
- * Whether a structure is a FACILITY — a building, as opposed to a network site.
- *
- * Derived from the catalog rather than listed: the two site-placed types are the Nexus and the
- * obelisk, so everything else is a facility by definition. This used to be a hand-written
- * `['robotics', 'aviation', 'tech']`, which silently omitted the data center and the special
- * facility — meaning a base whose nearest building was one of those did not count as an anchor, and
- * you could not build outward from it. The harbor would have been the third omission.
- */
-const isFacility = (t: StructureType): boolean => STRUCTURES[t].placement !== 'site';
+//
+// Note what is NOT here any more: a facility used to have to sit within reach of the Nexus or of
+// another facility, and a `isFacility` helper existed to answer "does this count as an anchor". The
+// obelisk power rule replaced that outright — buildings anchor to obelisks now, and to nothing else,
+// so the anchor concept and its helper are gone rather than left lying around half-used.
 
 /** Stand up the build layer + command bar for a fresh match. Called once, from buildTheater. */
 function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
@@ -2304,6 +2310,7 @@ function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
   scene.primitives.add(rtsBuild.ghost);
   scene.primitives.add(rtsBuild.rallyDots);
   scene.primitives.add(rtsBuild.construction);
+  scene.primitives.add(rtsBuild.power);
   for (const b of rtsBuild.meshBatches) scene.primitives.add(b); // 3D building models
   rtsSitesAllOpen = false;
   rtsConstruction = [];
@@ -2401,6 +2408,7 @@ function teardownRtsBuild(): void {
     scene.primitives.remove(rtsBuild.ghost);
     scene.primitives.remove(rtsBuild.rallyDots);
     scene.primitives.remove(rtsBuild.construction);
+    scene.primitives.remove(rtsBuild.power);
     for (const b of rtsBuild.meshBatches) scene.primitives.remove(b);
     rtsBuild = null;
   }
@@ -2413,6 +2421,8 @@ function teardownRtsBuild(): void {
   rtsCmd = null;
   rtsSites = [];
   rtsBuiltSites.clear();
+  rtsPowerSig = -1;
+  rtsSeenViolations.clear();
   millstone = null;
   rtsEnded = false;
   document.getElementById('c2-rts-end')?.remove();
@@ -2588,12 +2598,48 @@ function startResearchAt(id: ResearchId): void {
 // Tech facility) collects them for you — passive income, no alerts to answer. Reuses the campaign's
 // violation director wholesale; only the resolution is RTS-specific.
 
+/**
+ * Fire the camera flash at an installation, with its shutter.
+ *
+ * `siteLon/siteLat` on a violation is the obelisk that recorded it, so this lands on the mast rather
+ * than on the contact — the point being that you can see WHERE you are being watched from.
+ */
+function flashAtSite(lon: number, lat: number): void {
+  flashes?.fire(lon, lat, (theaterMap?.heightAt(lon, lat) ?? 0) + FLASH_MAST_M);
+  sound.play('camera');
+}
+
+/**
+ * Violations open this frame, keyed by contact index.
+ *
+ * Kept so a NEWLY recorded accusation can be told from one that has merely been sitting there for
+ * three seconds — the flash is an event, not a state. Diffed here rather than reported out of
+ * `stepViolations` deliberately: the campaign shares that method and this is an RTS-only flourish,
+ * so the whole feature stays on this side of the fence. The open set is capped at a handful, so the
+ * diff is a few comparisons a frame.
+ */
+const rtsSeenViolations = new Set<number>();
+
 function runRtsViolations(dt: number): void {
   if (!unitField || !sensorField || !rtsGame) return;
   unitField.stepViolations(dt, sensorField.obeliskCount, (lon, lat) => sensorField?.servicingSite(lon, lat) ?? null);
+
+  // Anything accused that wasn't accused last frame is a fresh recording: the obelisk that made it
+  // takes its picture. Capped at a couple per frame so a burst can't strobe the screen.
+  const open = unitField.liveViolations();
+  let fired = 0;
+  const stillOpen = new Set<number>();
+  for (const v of open) {
+    stillOpen.add(v.index);
+    if (rtsSeenViolations.has(v.index)) continue;
+    if (fired++ < 2) flashAtSite(v.live.siteLon, v.live.siteLat);
+  }
+  rtsSeenViolations.clear();
+  for (const i of stillOpen) rtsSeenViolations.add(i);
+
   if (rtsGame.hasResearch('auto-fine')) {
     // Sweep every open fineable violation into money — the whole point of the upgrade.
-    for (const v of unitField.liveViolations()) {
+    for (const v of open) {
       if (v.live.def.fine > 0) {
         rtsGame.award(v.live.def.fine);
         unitField.clearLive(v.index);
@@ -2602,6 +2648,32 @@ function runRtsViolations(dt: number): void {
   }
   updatePings(dt); // draw the alert markers over whatever is still open
 }
+
+/** How far up an obelisk the camera sits — where the flash goes off. */
+const FLASH_MAST_M = 170;
+
+/**
+ * Redraw the power tethers from the current base.
+ *
+ * One line per building, back to the obelisk feeding it. Buildings out of any obelisk's range draw
+ * nothing, which is the honest picture: an obelisk that falls leaves its cluster visibly unwired
+ * (they keep working — losing power retroactively would delete a base you already paid for — but you
+ * can see at a glance that nothing more can be built there until you put an obelisk back).
+ */
+function refreshPowerLines(): void {
+  if (!rtsGame || !rtsBuild) return;
+  const links: { flon: number; flat: number; tlon: number; tlat: number }[] = [];
+  for (const s of rtsGame.structures) {
+    if (isObelisk(s.type)) continue;
+    const src = poweringObelisk(s.lon, s.lat);
+    if (src) links.push({ flon: src.lon, flat: src.lat, tlon: s.lon, tlat: s.lat });
+  }
+  rtsBuild.setPower(links);
+  rtsPowerSig = rtsGame.structures.length;
+}
+
+/** Structure count the tethers were last drawn for — a cheap "did the base change shape" test. */
+let rtsPowerSig = -1;
 
 /** The decide-fate popup for a caught violator: fine it for money, or let it go. */
 function openViolationMenu(screenX: number, screenY: number, index: number): void {
@@ -2624,15 +2696,24 @@ function openViolationMenu(screenX: number, screenY: number, index: number): voi
   fineBtn.innerHTML =
     `<span class="gc-label">FINE</span>` +
     (fine > 0 ? `<span class="gc-why" style="color:var(--warn)">+${fine}</span>` : `<span class="gc-why">NO FINE VALUE</span>`);
+  // Close for good: drop the menu AND stop listening, so picking an item doesn't leave a live
+  // click-away handler behind for the next one to trip over.
+  const done = () => {
+    closeContactMenu();
+    window.removeEventListener('pointerdown', dismiss, true);
+  };
   if (fine > 0) {
     fineBtn.addEventListener('click', () => {
-      closeContactMenu();
+      done();
       if (!unitField || !rtsGame) return;
       rtsGame.award(fine);
       unitField.clearLive(index);
       sound.play('purchase');
       reactAt(live.siteLon, live.siteLat, 'approve');
-      toast(`◈ FINED · +${fine}`);
+      // The flash again, at the moment of collection: the obelisk that caught it is also the thing
+      // that gets paid, and that pairing is the entire economy of this mode in one gesture.
+      flashAtSite(live.siteLon, live.siteLat);
+      toast(`◈ FINED · ${live.def.label} · +${fine}`);
       updateRtsHud();
     });
   }
@@ -2643,17 +2724,20 @@ function openViolationMenu(screenX: number, screenY: number, index: number): voi
   release.className = 'gc-item';
   release.innerHTML = `<span class="gc-label">RELEASE</span>`;
   release.addEventListener('click', () => {
-    closeContactMenu();
+    done();
     unitField?.clearLive(index);
     sound.play('click');
   });
   box.append(release);
 
   document.body.append(box);
-  const dismiss = () => {
-    closeContactMenu();
-    window.removeEventListener('pointerdown', dismiss, true);
-  };
+  // The click-away listener MUST ignore pointerdowns inside the menu. A capture-phase `pointerdown`
+  // that removes the box detaches the button before the browser can deliver its `click`, so the
+  // handler never runs — which is exactly why FINE appeared to do nothing and no money ever arrived.
+  // Same defect, same fix as the Millstone spawn menu; see the note there.
+  function dismiss(e: PointerEvent) {
+    if (!box.contains(e.target as Node)) done();
+  }
   window.setTimeout(() => window.addEventListener('pointerdown', dismiss, true), 0);
 }
 
@@ -3042,16 +3126,36 @@ function validateObelisk(site: BuildSite): string | null {
   return near ? null : 'OUT OF REACH OF YOUR NETWORK';
 }
 
+/** Whether a structure is an obelisk — the Nexus is one. Power comes from these and only these. */
+const isObelisk = (t: StructureType): boolean => t === 'obelisk' || t === 'nexus';
+
+/**
+ * The obelisk powering a point, or null. Nearest wins, so a building in two obelisks' range draws its
+ * tether from the closer one — which is also the one that looks right on screen.
+ */
+function poweringObelisk(lon: number, lat: number): Structure | null {
+  if (!rtsGame) return null;
+  let best: Structure | null = null;
+  let bd = BUILD_RULES.POWER_RADIUS_M;
+  for (const s of rtsGame.structures) {
+    if (!isObelisk(s.type)) continue;
+    const d = metresBetween(lon, lat, s.lon, s.lat);
+    if (d <= bd) {
+      bd = d;
+      best = s;
+    }
+  }
+  return best;
+}
+
 /** Why a facility can't stand here, or null. */
 function validateFacility(lon: number, lat: number, type: StructureType = 'robotics'): string | null {
   if (!rtsGame || !rtsBuild) return 'NO MATCH';
   if (theaterMap && theaterMap.heightAt(lon, lat) < 1) return 'AT SEA';
-  // Anchored to the base first — it's the primary RTS placement concept, so a far click should read
-  // "get closer to your base" rather than incidentally "not near a road".
-  const anchored = rtsGame.structures.some(
-    (s) => (s.type === 'nexus' || isFacility(s.type)) && metresBetween(lon, lat, s.lon, s.lat) <= BUILD_RULES.FACILITY_REACH_M,
-  );
-  if (!anchored) return 'OUT OF BASE RANGE';
+  // Power first — it's now the primary placement concept, so a far click should read "you need an
+  // obelisk out here" rather than incidentally "not near a road". A building draws from an obelisk;
+  // nothing else in your base grants the right to build.
+  if (!poweringObelisk(lon, lat)) return 'NO OBELISK POWER';
 
   if (STRUCTURES[type].placement === 'shore') {
     // A quay is defined by the water it reaches, so it answers to the coastline instead of the road
@@ -3064,8 +3168,12 @@ function validateFacility(lon: number, lat: number, type: StructureType = 'robot
     return 'NOT NEAR A ROAD';
   }
 
-  const tooClose = rtsGame.structures.some((s) => metresBetween(lon, lat, s.lon, s.lat) < BUILD_RULES.MIN_SPACING_M);
-  if (tooClose) return 'TOO CLOSE TO A STRUCTURE';
+  // Spacing applies between FACILITIES only. An obelisk is what its cluster gathers around, so
+  // building right against one — or straight on top of a surveyed site — is allowed and intended.
+  const tooClose = rtsGame.structures.some(
+    (s) => !isObelisk(s.type) && metresBetween(lon, lat, s.lon, s.lat) < BUILD_RULES.MIN_SPACING_M,
+  );
+  if (tooClose) return 'TOO CLOSE TO A BUILDING';
   return null;
 }
 
@@ -3208,6 +3316,7 @@ function finishConstruction(cs: ConstructionSite): void {
   }
   sound.play('success');
   toast(`◈ ${STRUCTURES[cs.type].name} COMPLETE`);
+  refreshPowerLines();
   rtsCmd?.render();
   updateRtsHud();
 }
@@ -3399,6 +3508,7 @@ function destroyPlayerStructure(s: Structure): void {
     rtsBuild?.removeFacility(s);
   }
   toast(`◈ ${STRUCTURES[s.type].name} DESTROYED`);
+  refreshPowerLines();
   rtsCmd?.render();
   updateRtsHud();
 }
@@ -6321,6 +6431,8 @@ if (import.meta.env.DEV) {
     showRtsEnd,
     RTS_COMBAT,
     startResearchAt,
+    refreshPowerLines,
+    flashAtSite,
     beginAbility,
     fireAbilityAt,
     cancelAiming,
