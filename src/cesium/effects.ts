@@ -723,6 +723,43 @@ export class Sparks {
 /** Player ordnance, and Millstone's — the same two flags the beams use. */
 const ROUND_FRIENDLY = Cesium.Color.fromCssColorString('#FFC24A');
 const ROUND_HOSTILE = Cesium.Color.fromCssColorString('#7FE3A6');
+/** The orbital round is nobody's colour but its own — it is not a weapon anything on the map fired. */
+const ROUND_ORBITAL = Cesium.Color.fromCssColorString('#FFFFFF');
+
+/**
+ * How each kind of round is drawn.
+ *
+ * The three read differently at a glance, which is the whole job: a MISSILE is a small bright head
+ * on a long thin line and it is fast; a SHELL is a fat dull head on a short fat smear and it arcs;
+ * the ORBITAL round is enormous, white, and drags a trail kilometres long because it is falling at
+ * 12 km/s from the edge of the atmosphere. Knowing which one is coming at you, from a glance at the
+ * sky, is the difference between reacting and being surprised.
+ */
+const LOOKS: Record<'missile' | 'shell' | 'orbital', {
+  /** Head size at launch, and how much it grows by impact. */
+  px: number;
+  grow: number;
+  width: number;
+  trailAlpha: number;
+}> = {
+  missile: { px: 5, grow: 3, width: 2, trailAlpha: 0.75 },
+  shell: { px: 8, grow: 4, width: 3.4, trailAlpha: 0.4 },
+  orbital: { px: 16, grow: 22, width: 5.5, trailAlpha: 0.9 },
+};
+
+/** Trail sample count — must match TRAIL_LEN in cesium/units.ts, which produces them. */
+const TRAIL_LEN = 10;
+
+/** One round in the air, as the combat pass reports it. */
+interface RoundView {
+  lon: number;
+  lat: number;
+  alt: number;
+  side: 0 | 1;
+  look: 'missile' | 'shell' | 'orbital';
+  t: number;
+  trail: { lon: number; lat: number; alt: number }[];
+}
 /** Sized so a shell is visible crossing a theater without becoming a balloon up close. */
 const ROUND_PX = 7;
 /**
@@ -741,11 +778,13 @@ const ROUND_POOL = 192;
  */
 export class Rounds {
   readonly collection = new Cesium.PointPrimitiveCollection();
-  private pool: Cesium.PointPrimitive[] = [];
+  readonly trails = new Cesium.PolylineCollection();
+  private heads: Cesium.PointPrimitive[] = [];
+  private tails: { line: Cesium.Polyline; positions: Cesium.Cartesian3[]; material: Cesium.Material }[] = [];
 
   constructor() {
     for (let i = 0; i < ROUND_POOL; i++) {
-      this.pool.push(
+      this.heads.push(
         this.collection.add({
           position: Cesium.Cartesian3.ZERO,
           color: ROUND_FRIENDLY,
@@ -756,27 +795,62 @@ export class Rounds {
           disableDepthTestDistance: 1e12,
         }),
       );
+      // Fixed-length position arrays, padded by repeating the head when a trail is short. A varying
+      // length would force Cesium to rebuild the polyline's buffer every frame, for every round in
+      // the air, which is the one thing this pass cannot afford.
+      const positions: Cesium.Cartesian3[] = [];
+      for (let k = 0; k <= TRAIL_LEN; k++) positions.push(new Cesium.Cartesian3());
+      const material = Cesium.Material.fromType('Color', { color: ROUND_FRIENDLY.withAlpha(0) });
+      this.tails.push({ line: this.trails.add({ positions, width: 2, material, show: false }), positions, material });
     }
   }
 
   /** Draw exactly this list of rounds and hide the rest of the pool. Call once per frame. */
-  show(rounds: { lon: number; lat: number; alt: number; side: 0 | 1 }[]): void {
+  show(rounds: RoundView[]): void {
     const n = Math.min(rounds.length, ROUND_POOL);
     for (let i = 0; i < n; i++) {
       const r = rounds[i];
-      const p = this.pool[i];
-      p.position = Cesium.Cartesian3.fromDegrees(r.lon, r.lat, r.alt);
-      p.color = r.side === 1 ? ROUND_HOSTILE : ROUND_FRIENDLY;
-      p.show = true;
+      const look = LOOKS[r.look];
+      const base = r.look === 'orbital' ? ROUND_ORBITAL : r.side === 1 ? ROUND_HOSTILE : ROUND_FRIENDLY;
+
+      // The head swells and brightens toward impact. A round that looked the same the whole way
+      // down gives the player no sense of when it is going to land, and for the orbital strike —
+      // ten seconds of fall — knowing that is the entire tell.
+      const head = this.heads[i];
+      head.position = Cesium.Cartesian3.fromDegrees(r.lon, r.lat, r.alt);
+      head.pixelSize = look.px + look.grow * r.t;
+      head.color = base;
+      head.show = true;
+
+      const tail = this.tails[i];
+      const pts = r.trail;
+      if (pts.length < 2) {
+        tail.line.show = false;
+        continue;
+      }
+      // Oldest sample first, head last. Short trails pad from the oldest end so the line never
+      // appears to grow out of the target.
+      const pad = TRAIL_LEN + 1 - (pts.length + 1);
+      for (let k = 0; k <= TRAIL_LEN; k++) {
+        const src = k < pad ? pts[0] : k - pad < pts.length ? pts[k - pad] : null;
+        if (src) Cesium.Cartesian3.fromDegrees(src.lon, src.lat, src.alt, undefined, tail.positions[k]);
+        else Cesium.Cartesian3.fromDegrees(r.lon, r.lat, r.alt, undefined, tail.positions[k]);
+      }
+      tail.line.positions = tail.positions;
+      tail.line.width = look.width;
+      (tail.material.uniforms as { color: Cesium.Color }).color = base.withAlpha(look.trailAlpha);
+      tail.line.show = true;
     }
     for (let i = n; i < ROUND_POOL; i++) {
-      if (this.pool[i].show) this.pool[i].show = false;
-      else break; // the tail past the first hidden slot is already hidden
+      if (!this.heads[i].show && !this.tails[i].line.show) break; // the tail past here is already hidden
+      this.heads[i].show = false;
+      this.tails[i].line.show = false;
     }
   }
 
   destroy(): void {
     this.collection.destroy();
+    this.trails.destroy();
   }
 }
 

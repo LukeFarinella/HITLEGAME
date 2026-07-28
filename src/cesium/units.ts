@@ -288,6 +288,13 @@ const MILLSTONE_AGGRO_M = 2500;
  * decision. Anything further is the operator's call.
  */
 const MELEE_LUNGE_MULT = 2.5;
+/** At or above this muzzle velocity a round is drawn as a MISSILE rather than as a shell. */
+const MISSILE_SPEED_MPS = 1000;
+/** Seconds between trail samples. Sampling on a clock keeps a trail a fixed length in metres. */
+const TRAIL_SAMPLE_S = 0.05;
+/** How many samples a trail keeps. 10 at 0.05s is half a second of flight behind the round. */
+const TRAIL_LEN = 10;
+
 /** Metres up a structure its weapon fires from — the beam leaves the mast, not the pavement. */
 const STRUCT_MUZZLE_M = 170;
 
@@ -830,7 +837,17 @@ export interface RtsCombatEvents {
   /** Damage dealt to structures, keyed by the id the scene passed in. */
   hits: { id: number; dmg: number; lon: number; lat: number }[];
   /** Every round currently in the air, rebuilt each frame — the renderer just draws this list. */
-  rounds: { lon: number; lat: number; alt: number; side: 0 | 1 }[];
+  rounds: {
+    lon: number;
+    lat: number;
+    alt: number;
+    side: 0 | 1;
+    look: MunitionLook;
+    /** 0–1 through its flight. The renderer brightens and swells a round as it arrives. */
+    t: number;
+    /** Its recent path, oldest first. Handed over by reference — the renderer must not keep it. */
+    trail: TrailPoint[];
+  }[];
   /** Where rounds landed this frame, and how wide. Drives the blast. */
   impacts: { lon: number; lat: number; alt: number; radiusM: number; side: 0 | 1 }[];
 }
@@ -843,6 +860,23 @@ export interface RtsCombatEvents {
  * when the trigger went, never at where it is now — which is what makes leading a fast unit fail and
  * makes artillery a weapon for hitting slow things and ground.
  */
+/**
+ * How a round should LOOK, decided at the muzzle and carried with it.
+ *
+ * The renderer gets a look rather than a weapon, so effects.ts needs no knowledge of the weapon
+ * table and a new weapon is still one entry in weapons.ts. Three, because three is what the game
+ * actually has: something small and fast that leaves a line behind it, something heavy and slow that
+ * arcs, and the thing that falls out of the sky.
+ */
+export type MunitionLook = 'missile' | 'shell' | 'orbital';
+
+/** A sampled point on a round's path — one bead of its trail. */
+interface TrailPoint {
+  lon: number;
+  lat: number;
+  alt: number;
+}
+
 interface Munition {
   side: 0 | 1;
   flon: number;
@@ -856,6 +890,15 @@ interface Munition {
   flightS: number;
   dmg: number;
   splashM: number;
+  look: MunitionLook;
+  /**
+   * Recent positions, oldest first — what the trail is drawn from.
+   *
+   * Sampled on a clock rather than per frame, so a trail is a fixed length in METRES rather than in
+   * frames: at 60 fps a missile would otherwise leave a stub and at 10 fps a streak across the map.
+   */
+  trail: TrailPoint[];
+  trailClock: number;
 }
 
 /** What the panel renders for the current selection (one unit, or a summary of many). */
@@ -1620,14 +1663,20 @@ export class UnitField {
       m.t += dt;
       if (m.t < m.flightS) {
         const k = m.t / m.flightS;
-        ev.rounds.push({
-          lon: m.flon + (m.tlon - m.flon) * k,
-          lat: m.flat + (m.tlat - m.flat) * k,
-          // Lofted, so a shell arcs over the ground between the gun and the target instead of
-          // sliding along it. The lift is proportional to the flight, so a long shot arcs high.
-          alt: m.falt + (m.talt - m.falt) * k + Math.sin(Math.PI * k) * m.flightS * 60,
-          side: m.side,
-        });
+        const lon = m.flon + (m.tlon - m.flon) * k;
+        const lat = m.flat + (m.tlat - m.flat) * k;
+        // Lofted, so a shell arcs over the ground between the gun and the target instead of
+        // sliding along it. The lift is proportional to the flight, so a long shot arcs high.
+        const alt = m.falt + (m.talt - m.falt) * k + Math.sin(Math.PI * k) * m.flightS * 60;
+
+        m.trailClock += dt;
+        if (m.trailClock >= TRAIL_SAMPLE_S) {
+          m.trailClock = 0;
+          m.trail.push({ lon, lat, alt });
+          if (m.trail.length > TRAIL_LEN) m.trail.shift();
+        }
+
+        ev.rounds.push({ lon, lat, alt, side: m.side, look: m.look, t: k, trail: m.trail });
         still.push(m);
         continue;
       }
@@ -2003,14 +2052,21 @@ export class UnitField {
     });
     if (w.kind !== 'projectile') return;
     const d = this.distLL(u.lon, u.lat, tlon, tlat);
+    const speed = w.speedMps ?? 800;
     this.munitions.push({
       side,
       flon: u.lon, flat: u.lat, falt,
       tlon, tlat, talt,
       t: 0,
-      flightS: Math.max(0.15, d / (w.speedMps ?? 800)),
+      flightS: Math.max(0.15, d / speed),
       dmg: w.dmg,
       splashM: w.splashM ?? 0,
+      // Speed decides the look, which is the honest tell: anything doing 1000 m/s or better is
+      // rocket-propelled and reads as one, and everything slower is a shell out of a tube. It keeps
+      // the weapon table free of a presentation field nobody would remember to set.
+      look: speed >= MISSILE_SPEED_MPS ? 'missile' : 'shell',
+      trail: [],
+      trailClock: 0,
     });
   }
 
@@ -2041,6 +2097,9 @@ export class UnitField {
       flightS: Math.max(0.5, o.dropFromM / o.speedMps),
       dmg: o.dmg,
       splashM: o.splashM,
+      look: 'orbital',
+      trail: [],
+      trailClock: 0,
     });
   }
 

@@ -840,6 +840,7 @@ function addUnits(center: { lon: number; lat: number }, map: TheaterMap, net: Ro
   sparks = new Sparks();
   scene.primitives.add(sparks.collection);
   rounds = new Rounds();
+  scene.primitives.add(rounds.trails); // trails under the heads, so a head is never hidden by its own smoke
   scene.primitives.add(rounds.collection);
   flashes = new CameraFlashes();
   scene.primitives.add(flashes.collection);
@@ -1243,6 +1244,7 @@ function removeUnits() {
   }
   if (rounds) {
     scene.primitives.remove(rounds.collection);
+    scene.primitives.remove(rounds.trails);
     rounds = undefined;
   }
   if (flashes) {
@@ -6653,6 +6655,9 @@ if (import.meta.env.DEV) {
     RTS_COMBAT,
     startResearchAt,
     refreshPowerLines,
+    get rounds() {
+      return rounds;
+    },
     openInspect,
     inspectContact,
     fineBlockedBy,

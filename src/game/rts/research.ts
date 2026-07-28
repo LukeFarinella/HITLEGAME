@@ -55,6 +55,7 @@ export type ResearchId =
   | 'rotor-trim'
   | 'picket-radar'
   | 'serrated-arms'
+  | 'light-rack'
   // ---- tier 2, at the skyhook
   | 'service-lance'
   | 'deck-mortar'
@@ -344,6 +345,20 @@ export const RESEARCH: Record<ResearchId, ResearchDef> = {
     applies: ['usv'],
     rangeMult: 1.5,
     dmgMult: 1.2,
+  },
+  'light-rack': {
+    id: 'light-rack',
+    name: 'LIGHT RACK',
+    blurb: 'Two small rockets under every kite. Turns the cheap scout into something that can actually hurt what it found.',
+    cost: 240,
+    timeS: 24,
+    producedBy: 'tech',
+    hotkey: 'L',
+    applies: ['quad'],
+    // Deliberately a SMALLER weapon than the interceptor's rack — shorter, weaker, tighter burst.
+    // The kite is a tier-1 unit out of robotics and should not be carrying a skyhook-tier missile;
+    // what this buys is a scout with teeth, not a second strike aircraft.
+    adds: { name: 'LIGHT RACK', kind: 'projectile', rangeM: 900, dmg: 18, periodS: 2.0, speedMps: 1200, splashM: 45 },
   },
   'serrated-arms': {
     id: 'serrated-arms',
