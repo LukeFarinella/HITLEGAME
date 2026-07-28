@@ -67,6 +67,7 @@ import { unrestLabel } from '../game/rts/unrest';
 import { newlyDone, type MatchFacts, type ObjectiveId } from '../game/rts/objectives';
 import { inspectContact, fineBlockedBy, AUTHORITY_TIERS, type AuthorityLevel } from '../game/rts/inspect';
 import { showInspectCard, closeInspectCard } from '../ui/rtsInspect';
+import { mandateState } from '../game/rts/mandate';
 import { RtsObjectivePanel } from '../ui/rtsObjectives';
 import { RtsUnitCard, type RtsCardUnit, type RtsCardStructure } from '../ui/rtsUnitCard';
 import { showLoading, setStage, hideLoading } from '../ui/loading';
@@ -2955,6 +2956,9 @@ function rtsSelectedCardStructure(): RtsCardStructure | null {
     hp: s.hp,
     maxHp: s.maxHp,
     action,
+    // The company's own standing rides on the Nexus card, because the Nexus is the company's seat.
+    // Every other building is a building.
+    mandate: s.type === 'nexus' ? mandateState(rtsGame.unrest, rtsAuthority()) : undefined,
     glyph: STRUCT_GLYPH[s.type],
     accent: STRUCT_ACCENT[s.type],
     critical: s.type === 'nexus',

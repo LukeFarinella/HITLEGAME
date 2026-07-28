@@ -28,6 +28,24 @@ export interface RtsCardUnit {
   sensorKm: number;
 }
 
+/**
+ * The company's standing, shown on the NEXUS card and nowhere else.
+ *
+ * The Nexus is the company's seat, so it is where the company's own state belongs — how far its
+ * authority reaches, and whether it is still operating with the public's consent. See
+ * {@link ../game/rts/mandate}.
+ */
+export interface RtsCardMandate {
+  authority: number;
+  authorityName: string;
+  nextName: string | null;
+  tolerance: number;
+  threshold: number;
+  margin: number;
+  override: boolean;
+  label: string;
+}
+
 /** The selected structure, when one is selected instead of units. */
 export interface RtsCardStructure {
   name: string;
@@ -41,6 +59,8 @@ export interface RtsCardStructure {
   accent: string;
   /** True for the Nexus, which carries the match on its back. */
   critical: boolean;
+  /** Present on the Nexus only — the company's authority and mandate. */
+  mandate?: RtsCardMandate;
 }
 
 export interface RtsUnitCardHooks {
@@ -131,10 +151,30 @@ export class RtsUnitCard {
       this.bar('hp', 'HP') +
       `</div></div>` +
       `<p class="ruc-blurb">${s.blurb}</p>` +
+      (s.mandate ? this.mandateBlock() : '') +
       `<div class="ruc-stats">` +
       `<div class="ruc-stat"><span class="k">ACTION</span><span class="v act">—</span></div>` +
       `</div>`;
     return box;
+  }
+
+  /**
+   * The mandate block: the authority rung, and a bar of public tolerance with the override threshold
+   * marked on it.
+   *
+   * One bar with a line on it rather than two numbers, because the only thing worth reading here is
+   * the RELATION between them — how much room is left before the company is operating on something
+   * other than agreement.
+   */
+  private mandateBlock(): string {
+    return (
+      `<div class="ruc-mandate">` +
+      `<div class="ruc-mrow"><span class="k">AUTHORITY</span><span class="v mauth">—</span></div>` +
+      `<div class="ruc-mrow"><span class="k">MANDATE</span><span class="v mstate">—</span></div>` +
+      `<div class="ruc-mbar"><i class="mfill"></i><b class="mthresh"></b></div>` +
+      `<div class="ruc-mfoot"><span class="mtol">—</span><span class="mnext">—</span></div>` +
+      `</div>`
+    );
   }
 
   private updateStructure(s: RtsCardStructure): void {
@@ -149,6 +189,37 @@ export class RtsUnitCard {
     if (v) v.textContent = `${Math.ceil(s.hp)} / ${s.maxHp}`;
     const act = this.root.querySelector('.ruc-stat .act');
     if (act) act.textContent = s.action;
+    if (s.mandate) this.updateMandate(s.mandate);
+  }
+
+  private updateMandate(m: RtsCardMandate): void {
+    const q = (sel: string) => this.root.querySelector(sel) as HTMLElement | null;
+    const auth = q('.mauth');
+    if (auth) {
+      auth.textContent = m.authority > 0 ? `${m.authority} · ${m.authorityName}` : 'NONE';
+      auth.style.color = m.authority > 0 ? '#6FA8C7' : 'var(--steel)';
+    }
+    const state = q('.mstate');
+    if (state) {
+      state.textContent = m.label;
+      state.style.color = m.override ? 'var(--red)' : m.label === 'NARROW' ? 'var(--warn)' : 'var(--ok)';
+    }
+    const fill = q('.mfill');
+    if (fill) {
+      fill.style.width = `${Math.round(m.tolerance * 100)}%`;
+      fill.style.background = m.override ? 'var(--red)' : m.label === 'NARROW' ? 'var(--warn)' : 'var(--ok)';
+    }
+    // The threshold is a line ON the track, not a second fill: it is a place, not a quantity.
+    const th = q('.mthresh');
+    if (th) th.style.left = `${Math.round(m.threshold * 100)}%`;
+    const tol = q('.mtol');
+    if (tol) {
+      tol.textContent = `TOLERANCE ${Math.round(m.tolerance * 100)}% · THRESHOLD ${Math.round(m.threshold * 100)}%`;
+    }
+    const next = q('.mnext');
+    if (next) {
+      next.textContent = m.nextName ? `${m.nextName} LOWERS IT` : 'MAXIMUM AUTHORITY';
+    }
   }
 
   // ---- single ----------------------------------------------------------------------------------

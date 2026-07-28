@@ -2141,3 +2141,23 @@ body.dev-open #c2-tasking { display: none; }
 }
 .gi-lock { font: 700 8px/1 var(--mono); letter-spacing: .14em; color: var(--warn); }
 .gi-grants { font: 500 8px/1.45 var(--mono); letter-spacing: .04em; color: var(--steel); }
+
+/* ---- mandate block on the Nexus card ---------------------------------------------------------
+   Public tolerance as a fill, the override threshold as a line ON the track — the threshold is a
+   place, not a quantity, and drawing it as a second bar would read as a competing amount. */
+.ruc-mandate { margin: 7px 0 2px; padding: 7px 0 0; border-top: 1px solid rgba(120, 130, 140, .18); }
+.ruc-mrow { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding: 1.5px 0; }
+.ruc-mrow .k { font: 600 7.5px/1.3 var(--mono); letter-spacing: .16em; color: var(--steel); }
+.ruc-mrow .v { font: 700 8px/1.3 var(--mono); letter-spacing: .1em; color: var(--bone); }
+.ruc-mbar {
+  position: relative; height: 7px; margin: 5px 0 4px;
+  background: rgba(120, 130, 140, .16); border: 1px solid rgba(120, 130, 140, .22);
+}
+.ruc-mbar .mfill { display: block; height: 100%; background: var(--ok); transition: width .2s linear; }
+.ruc-mbar .mthresh {
+  position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--bone);
+  box-shadow: 0 0 4px rgba(0, 0, 0, .8);
+}
+.ruc-mfoot { display: flex; justify-content: space-between; gap: 8px; }
+.ruc-mfoot span { font: 500 7px/1.3 var(--mono); letter-spacing: .08em; color: var(--steel); }
+.ruc-mfoot .mnext { color: #6FA8C7; text-align: right; }
