@@ -3,12 +3,14 @@ import type { Weapon } from './weapons';
 import type { StructureType } from './structures';
 
 /**
- * Research — everything a laboratory works on over time. Two kinds live here, deliberately in one
+ * Research — everything a laboratory works on over time. Three kinds live here, deliberately in one
  * list and one pipeline:
  *
- *   DOCTRINE   a standing company-wide capability with no chassis attached (AUTO-FINE).
- *   UPGRADE    a permanent improvement to a machine — heavier barrels on the quadrupeds, a lance on
+ *   UPGRADE    a permanent improvement to a MACHINE — heavier barrels on the quadrupeds, a lance on
  *              the marshals — applying to every one you own and every one you build afterwards.
+ *   PROGRAMME  a permanent improvement to the COMPANY — funding, authority, a wider obelisk network.
+ *              Carries {@link ResearchEffects} instead of chassis multipliers.
+ *   DOCTRINE   a standing capability that is neither, i.e. a rule change (AUTO-FINE).
  *
  * This replaced per-unit HARDPOINT FITTING, and the replacement is the point. Fitting asked the
  * player to open a card on each individual machine and choose a pod for a slot, which buried the
@@ -17,9 +19,14 @@ import type { StructureType } from './structures';
  * the same decision made once, in the building whose whole job is making it, and it is legible on
  * that building's command card instead of three clicks into a selected unit.
  *
- * Two labs, so the tree has a shape:
- *   TECH FACILITY  tier 1 — cheap, early, the things that keep the opening line alive.
- *   SKYHOOK        tier 2 — expensive, late, the things that turn a late army into a different army.
+ * Three laboratories, and which one owns a project is the design statement:
+ *   TECH FACILITY  tier 1 machines — cheap, early, the things that keep the opening line alive.
+ *   SKYHOOK        tier 2 machines — expensive, late, turning a late army into a different army.
+ *   ACQUISITIONS   the COMPANY rather than the army — the obelisk network, the money, and what the
+ *                  company is permitted to do. It answers a different question from the other two,
+ *                  which is why it competes with tech for the same rung off robotics rather than
+ *                  sitting behind it: an early acquisitions is a bet on the economy, an early tech
+ *                  is a bet on the fight, and you cannot rush both.
  *
  * How an upgrade APPLIES is data, not code: multipliers land on every weapon the chassis carries,
  * `hpMult` on its hull, and `adds` bolts a whole extra weapon on. {@link ./combat armamentOf} reads
@@ -27,7 +34,16 @@ import type { StructureType } from './structures';
  */
 
 export type ResearchId =
+  // ---- acquisitions: the company
   | 'auto-fine'
+  | 'hardened-masts'
+  | 'wide-aperture'
+  | 'full-survey'
+  | 'authority-i'
+  | 'authority-ii'
+  | 'funding-i'
+  | 'funding-ii'
+  | 'funding-iii'
   | 'flak-doctrine'
   // ---- tier 1, at the tech facility
   | 'armoured-cab'
@@ -43,6 +59,35 @@ export type ResearchId =
   | 'phased-emitter'
   | 'siege-rounds'
   | 'plate-hull';
+
+/**
+ * What a COMPANY programme changes.
+ *
+ * Every field is folded across completed research by the match (see {@link ../rts/rtsGame RtsGame}
+ * `economy`) and read at the point it matters, so adding a programme is one entry in this file and
+ * nothing else. Multipliers compound; additive terms sum. Nothing here touches a chassis — that is
+ * what the multiplier fields on {@link ResearchDef} are for.
+ */
+export interface ResearchEffects {
+  /** Added to the per-obelisk income rate, money per second. */
+  incomePerObelisk?: number;
+  /** Multiplier on the banked ceiling. */
+  capMult?: number;
+  /** Multiplier on every fine collected. AUTHORITY is what buys this. */
+  fineMult?: number;
+  /** Multiplier on how fast public unrest accrues. Below 1 means the public minds less. */
+  unrestMult?: number;
+  /** Metres added to how far an obelisk's power reaches, i.e. how far from one you may build. */
+  powerRadiusM?: number;
+  /** Metres added to how far a new obelisk may be planted from your existing network. */
+  obeliskReachM?: number;
+  /** Multiplier on obelisk and Nexus hit points. */
+  obeliskHpMult?: number;
+  /** Throws every surveyed site in the theater open as a build site, immediately. */
+  opensAllSites?: boolean;
+  /** Obelisks collect their own fines, with no alert to answer. */
+  autoFine?: boolean;
+}
 
 export interface ResearchDef {
   id: ResearchId;
@@ -73,19 +118,121 @@ export interface ResearchDef {
   hpMult?: number;
   /** A whole extra weapon, welded on army-wide. */
   adds?: Weapon;
+  /** What this changes about the COMPANY. Programmes carry this instead of chassis multipliers. */
+  effects?: ResearchEffects;
+  /**
+   * Another project that must be complete first — how a tiered programme (FUNDING I → II → III) is
+   * expressed without a second mechanism. Absent on everything that stands alone.
+   */
+  requires?: ResearchId;
 }
 
 export const RESEARCH: Record<ResearchId, ResearchDef> = {
-  // ---- doctrine: no chassis, changes a rule ----------------------------------------------------
+  // ---- ACQUISITIONS · the obelisk network ------------------------------------------------------
   'auto-fine': {
     id: 'auto-fine',
     name: 'AUTO-FINE',
     blurb: 'Obelisks fine traffic violations on their own — passive income, no alerts to answer.',
     cost: 300,
     timeS: 30,
-    producedBy: 'tech',
+    producedBy: 'acquisitions',
     hotkey: 'F',
+    effects: { autoFine: true },
   },
+  'hardened-masts': {
+    id: 'hardened-masts',
+    name: 'HARDENED MASTS',
+    blurb: 'Armour and redundancy up every mast, the Nexus included. Half again the hit points on the thing whose loss ends the match.',
+    cost: 280,
+    timeS: 26,
+    producedBy: 'acquisitions',
+    hotkey: 'M',
+    effects: { obeliskHpMult: 1.5 },
+  },
+  'wide-aperture': {
+    id: 'wide-aperture',
+    name: 'WIDE APERTURE',
+    blurb: 'Obelisks throw power further. Another 1200 m of ground around each one you may build on.',
+    cost: 320,
+    timeS: 28,
+    producedBy: 'acquisitions',
+    hotkey: 'W',
+    effects: { powerRadiusM: 1200 },
+  },
+
+  // ---- ACQUISITIONS · taking ground -------------------------------------------------------------
+  'full-survey': {
+    id: 'full-survey',
+    name: 'FULL SURVEY',
+    blurb: 'Buy the whole survey at once: every site in the theater opens as a build slot, and obelisks may be planted twice as far out.',
+    cost: 450,
+    timeS: 36,
+    producedBy: 'acquisitions',
+    hotkey: 'E',
+    effects: { opensAllSites: true, obeliskReachM: 10_000 },
+  },
+
+  // ---- ACQUISITIONS · authority -----------------------------------------------------------------
+  // What the company is PERMITTED to do. Each tier is worth more money per fine and costs less
+  // public patience — the two halves of the same argument, which is that a programme nobody has
+  // agreed to is expensive and one everybody has stopped objecting to is not.
+  'authority-i': {
+    id: 'authority-i',
+    name: 'CIVIL AUTHORITY',
+    blurb: 'Municipal enforcement powers. Fines pay 35% more, and the public minds the data centers rather less.',
+    cost: 300,
+    timeS: 28,
+    producedBy: 'acquisitions',
+    hotkey: 'A',
+    effects: { fineMult: 1.35, unrestMult: 0.85 },
+  },
+  'authority-ii': {
+    id: 'authority-ii',
+    name: 'EMERGENCY POWERS',
+    blurb: 'Standing emergency authority. Half again on top of civil, and the objections mostly stop.',
+    cost: 550,
+    timeS: 40,
+    producedBy: 'acquisitions',
+    hotkey: 'P',
+    requires: 'authority-i',
+    effects: { fineMult: 1.5, unrestMult: 0.7 },
+  },
+
+  // ---- ACQUISITIONS · funding -------------------------------------------------------------------
+  // Straight economy, tiered so the late one is a real commitment rather than a rounding error.
+  'funding-i': {
+    id: 'funding-i',
+    name: 'SERIES A',
+    blurb: 'First outside money. +4 per obelisk per second, and a quarter more room in the bank.',
+    cost: 300,
+    timeS: 26,
+    producedBy: 'acquisitions',
+    hotkey: '1',
+    effects: { incomePerObelisk: 4, capMult: 1.25 },
+  },
+  'funding-ii': {
+    id: 'funding-ii',
+    name: 'SERIES B',
+    blurb: 'The round that hires. +6 more per obelisk per second, and a third more bank on top.',
+    cost: 500,
+    timeS: 34,
+    producedBy: 'acquisitions',
+    hotkey: '2',
+    requires: 'funding-i',
+    effects: { incomePerObelisk: 6, capMult: 1.3 },
+  },
+  'funding-iii': {
+    id: 'funding-iii',
+    name: 'SERIES C',
+    blurb: 'The round that buys governments. +8 more per obelisk per second, and 40% more bank again.',
+    cost: 800,
+    timeS: 44,
+    producedBy: 'acquisitions',
+    hotkey: '3',
+    requires: 'funding-ii',
+    effects: { incomePerObelisk: 8, capMult: 1.4 },
+  },
+
   'flak-doctrine': {
     id: 'flak-doctrine',
     name: 'FLAK DOCTRINE',

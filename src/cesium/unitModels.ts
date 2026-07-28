@@ -728,6 +728,29 @@ export function techMesh(): ModelMesh {
   return m.build();
 }
 
+/**
+ * Acquisitions: a corporate headquarters, and the only building in the base that looks like one.
+ *
+ * A wide plinth, a colonnade across the front, and a slab tower set back behind it — the vocabulary
+ * of a bank rather than of a factory, because what this building does is not manufacture anything.
+ * It buys ground, raises money and widens what the company is permitted to do, and it should read as
+ * the place those decisions are taken.
+ */
+export function acquisitionsMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  m.box(0, 0, 3, 62, 46, 6); // plinth
+  m.box(0, -4, 14, 48, 30, 16); // main block
+  // Colonnade: six columns along the front edge, under a shallow entablature.
+  for (let i = 0; i < 6; i++) {
+    m.box(-25 + i * 10, 16, 13, 3.5, 3.5, 20);
+  }
+  m.box(0, 16, 25, 58, 6, 4); // entablature over the columns
+  m.box(-2, -10, 34, 26, 20, 24); // set-back tower
+  m.box(-2, -10, 48, 18, 14, 6); // tower cap
+  m.box(-2, -10, 54, 2.5, 2.5, 12); // flagpole
+  return m.build();
+}
+
 /** Aviation hangar: a broad arched shed with a control tower off one corner. */
 export function aviationMesh(): ModelMesh {
   const m = new MeshBuilder();

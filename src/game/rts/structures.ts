@@ -24,6 +24,7 @@ export type StructureType =
   | 'nexus'
   | 'obelisk'
   | 'robotics'
+  | 'acquisitions'
   | 'harbor'
   | 'skyhook'
   | 'aviation'
@@ -33,7 +34,7 @@ export type StructureType =
 
 /** Placeable structure types, in command-bar order. The Nexus is never built — you start with it. */
 export const BUILDABLE: StructureType[] = [
-  'obelisk', 'supply', 'robotics', 'harbor', 'tech', 'aviation', 'special', 'skyhook',
+  'obelisk', 'supply', 'robotics', 'acquisitions', 'harbor', 'tech', 'aviation', 'special', 'skyhook',
 ];
 
 export interface StructureDef {
@@ -97,6 +98,22 @@ export const STRUCTURES: Record<StructureType, StructureDef> = {
     buildTimeS: 22,
     requires: { structure: 'supply' },
   },
+  acquisitions: {
+    type: 'acquisitions',
+    name: 'ACQUISITIONS',
+    blurb: 'Corporate. Upgrades the obelisk network, opens new sites, raises your authority and your funding.',
+    cost: 350,
+    maxHp: 800,
+    placement: 'free',
+    hotkey: 'A',
+    footprintM: 280,
+    buildTimeS: 20,
+    // Off robotics, alongside the tech facility rather than behind it. The two labs answer different
+    // questions — tech makes your MACHINES better, acquisitions makes your COMPANY bigger — and
+    // making them compete for the same rung is the point: an early acquisitions is a bet on the
+    // economy, an early tech is a bet on the fight.
+    requires: { structure: 'robotics' },
+  },
   harbor: {
     type: 'harbor',
     name: 'HARBOR',
@@ -127,7 +144,7 @@ export const STRUCTURES: Record<StructureType, StructureDef> = {
   tech: {
     type: 'tech',
     name: 'TECH FACILITY',
-    blurb: 'Researches upgrades — auto-fine obelisks, faster units, and more.',
+    blurb: 'Researches machine upgrades — heavier barrels, tougher hulls, longer reach. Unlocks the kite and the littoral.',
     cost: 350,
     maxHp: 800,
     placement: 'free',

@@ -1,7 +1,7 @@
 import * as Cesium from 'cesium';
 import type { RoadNet } from './roads';
 import { InstancedModelBatch } from './instancedModels';
-import { dataCenterMesh, roboticsMesh, harborMesh, skyhookMesh, techMesh, aviationMesh, specialMesh } from './unitModels';
+import { dataCenterMesh, roboticsMesh, acquisitionsMesh, harborMesh, skyhookMesh, techMesh, aviationMesh, specialMesh } from './unitModels';
 import {
   STRUCTURES,
   BUILD_RULES,
@@ -40,6 +40,7 @@ const FACILITY_COLOR: Record<StructureType, string> = {
   nexus: '#E23A2E',
   obelisk: '#E23A2E',
   robotics: '#E7A13B',
+  acquisitions: '#D9C24A',
   harbor: '#3F8FA0',
   skyhook: '#8FD8F0',
   aviation: '#3FA0E0',
@@ -53,6 +54,7 @@ const FACILITY_GLYPH: Record<StructureType, string> = {
   nexus: '◈',
   obelisk: '▲',
   robotics: 'R',
+  acquisitions: 'A',
   harbor: 'H',
   skyhook: 'K',
   aviation: 'V',
@@ -62,12 +64,13 @@ const FACILITY_GLYPH: Record<StructureType, string> = {
 };
 
 /** The facilities that render as a 3D building. Obelisks/the Nexus render as obelisk geometry. */
-type FacilityType = 'supply' | 'robotics' | 'harbor' | 'skyhook' | 'tech' | 'aviation' | 'special';
-const FACILITY_TYPES: FacilityType[] = ['supply', 'robotics', 'harbor', 'skyhook', 'tech', 'aviation', 'special'];
+type FacilityType = 'supply' | 'robotics' | 'acquisitions' | 'harbor' | 'skyhook' | 'tech' | 'aviation' | 'special';
+const FACILITY_TYPES: FacilityType[] = ['supply', 'robotics', 'acquisitions', 'harbor', 'skyhook', 'tech', 'aviation', 'special'];
 /** Built once at module load — one shared mesh per facility type. */
 const FACILITY_MESH: Record<FacilityType, ReturnType<typeof dataCenterMesh>> = {
   supply: dataCenterMesh(),
   robotics: roboticsMesh(),
+  acquisitions: acquisitionsMesh(),
   harbor: harborMesh(),
   skyhook: skyhookMesh(),
   tech: techMesh(),
@@ -77,7 +80,7 @@ const FACILITY_MESH: Record<FacilityType, ReturnType<typeof dataCenterMesh>> = {
 /** Per-type mesh scale so each building reads at theater zoom. */
 // The skyhook is scaled DOWN relative to the others because its mesh is already ~130 m tall before
 // scale; at 2.4 it would tower absurdly over a city rather than impressively.
-const FACILITY_SCALE: Record<FacilityType, number> = { supply: 2.4, robotics: 2.4, harbor: 2.4, skyhook: 1.6, tech: 2.6, aviation: 2.4, special: 2.5 };
+const FACILITY_SCALE: Record<FacilityType, number> = { supply: 2.4, robotics: 2.4, acquisitions: 2.4, harbor: 2.4, skyhook: 1.6, tech: 2.6, aviation: 2.4, special: 2.5 };
 const isFacilityType = (t: StructureType): t is FacilityType => (FACILITY_TYPES as StructureType[]).includes(t);
 
 /**

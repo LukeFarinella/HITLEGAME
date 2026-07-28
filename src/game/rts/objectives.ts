@@ -30,6 +30,7 @@ export type ObjectiveId =
   | 'expand'
   | 'data-center'
   | 'robotics'
+  | 'acquisitions'
   | 'first-army'
   | 'tech'
   | 'first-upgrade'
@@ -82,6 +83,13 @@ export const OBJECTIVES: ObjectiveDef[] = [
     hint: 'Build the ROBOTICS FACILITY (R). It makes the quadrupeds your whole opening line is built from.',
     bounty: 200,
     done: (f) => f.has('robotics'),
+  },
+  {
+    id: 'acquisitions',
+    hint: 'Build ACQUISITIONS (A) and research a programme. It upgrades the obelisk network, opens sites, and raises your funding and authority — the company, rather than the army.',
+    name: 'GROW THE COMPANY',
+    bounty: 250,
+    done: (f) => f.has('acquisitions'),
   },
   {
     id: 'first-army',

@@ -2579,6 +2579,27 @@ function enqueueUnit(unit: RtsUnitId): void {
 function applyResearch(id: ResearchId, kinds: UnitKind[]): void {
   if (!rtsGame || !unitField) return;
   const def = RESEARCH[id];
+
+  // A COMPANY programme lands on the world rather than on a chassis, and lands NOW: a full survey
+  // you paid for should open the map on completion, not the next time something else happens to
+  // check, and hardened masts should thicken the obelisks already standing.
+  if (def.effects) {
+    if (def.effects.opensAllSites) maybeOpenAllSites();
+    if (def.effects.obeliskHpMult) {
+      const mult = def.effects.obeliskHpMult;
+      for (const st of rtsGame.structures) {
+        if (st.type !== 'obelisk' && st.type !== 'nexus') continue;
+        // Raise the ceiling and give the same proportion of health with it. A structural retrofit is
+        // not a repair, but it is not a wound either: a mast at full health stays at full health.
+        const ratio = st.hp / st.maxHp;
+        st.maxHp = Math.round(st.maxHp * mult);
+        st.hp = Math.round(st.maxHp * ratio);
+      }
+    }
+    if (def.effects.powerRadiusM) refreshPowerLines();
+    updateRtsHud();
+  }
+
   let n = 0;
   if (kinds.length) {
     const touched = new Set<UnitKind>(kinds);
@@ -2699,11 +2720,12 @@ function runRtsViolations(dt: number): void {
   rtsSeenViolations.clear();
   for (const i of stillOpen) rtsSeenViolations.add(i);
 
-  if (rtsGame.hasResearch('auto-fine')) {
-    // Sweep every open fineable violation into money — the whole point of the upgrade.
+  if (rtsGame.economy.autoFine) {
+    // Sweep every open fineable violation into money — the whole point of the upgrade. Paid at the
+    // company's authority rate, exactly as a hand-collected one is.
     for (const v of open) {
       if (v.live.def.fine > 0) {
-        rtsGame.award(v.live.def.fine);
+        rtsGame.collectFine(v.live.def.fine);
         unitField.clearLive(v.index);
       }
     }
@@ -2787,14 +2809,14 @@ function openViolationMenu(screenX: number, screenY: number, index: number): voi
     fineBtn.addEventListener('click', () => {
       done();
       if (!unitField || !rtsGame) return;
-      rtsGame.award(fine);
+      const paid = rtsGame.collectFine(fine);
       unitField.clearLive(index);
       sound.play('purchase');
       reactAt(live.siteLon, live.siteLat, 'approve');
       // The flash again, at the moment of collection: the obelisk that caught it is also the thing
       // that gets paid, and that pairing is the entire economy of this mode in one gesture.
       flashAtSite(live.siteLon, live.siteLat);
-      toast(`◈ FINED · ${live.def.label} · +${fine}`);
+      toast(`◈ FINED · ${live.def.label} · +${paid}${paid > fine ? ' (AUTHORITY)' : ''}`);
       updateRtsHud();
     });
   }
@@ -2848,6 +2870,7 @@ const STRUCT_GLYPH: Record<StructureType, string> = {
   nexus: '◈',
   obelisk: '▲',
   robotics: 'R',
+  acquisitions: 'A',
   harbor: 'H',
   skyhook: 'K',
   aviation: 'V',
@@ -2859,6 +2882,7 @@ const STRUCT_ACCENT: Record<StructureType, string> = {
   nexus: '#E23A2E',
   obelisk: '#E23A2E',
   robotics: '#E7A13B',
+  acquisitions: '#D9C24A',
   harbor: '#3F8FA0',
   skyhook: '#8FD8F0',
   aviation: '#3FA0E0',
@@ -3205,7 +3229,10 @@ function validateObelisk(site: BuildSite): string | null {
   if (millstone && !millstone.destroyed && site.index === millstone.siteIndex) return 'MILLSTONE HOLDS THIS SITE';
   // Must be within reach of an existing obelisk (the Nexus counts), so expansion runs in a chain.
   const near = rtsGame.structures.some(
-    (s) => (s.type === 'obelisk' || s.type === 'nexus') && metresBetween(site.lon, site.lat, s.lon, s.lat) <= BUILD_RULES.OBELISK_REACH_M,
+    (s) =>
+      (s.type === 'obelisk' || s.type === 'nexus') &&
+      metresBetween(site.lon, site.lat, s.lon, s.lat) <=
+        BUILD_RULES.OBELISK_REACH_M + rtsGame!.economy.obeliskReachM,
   );
   return near ? null : 'OUT OF REACH OF YOUR NETWORK';
 }
@@ -3220,7 +3247,7 @@ const isObelisk = (t: StructureType): boolean => t === 'obelisk' || t === 'nexus
 function poweringObelisk(lon: number, lat: number): Structure | null {
   if (!rtsGame) return null;
   let best: Structure | null = null;
-  let bd = BUILD_RULES.POWER_RADIUS_M;
+  let bd = BUILD_RULES.POWER_RADIUS_M + rtsGame.economy.powerRadiusM;
   for (const s of rtsGame.structures) {
     if (!isObelisk(s.type)) continue;
     const d = metresBetween(lon, lat, s.lon, s.lat);
@@ -3405,10 +3432,18 @@ function finishConstruction(cs: ConstructionSite): void {
   updateRtsHud();
 }
 
-/** Once RTS_ALL_SITES_AT obelisks stand, throw the whole surveyed field open as build sites. */
+/**
+ * Throw the whole surveyed field open as build sites.
+ *
+ * Two ways to get there, and they are the same unlock by different routes: EARN it by standing
+ * RTS_ALL_SITES_AT obelisks, or BUY it at acquisitions with FULL SURVEY. Buying it is the point of
+ * the programme — it is what turns a slow expansion into an immediate one for money you could have
+ * spent on an army instead.
+ */
 function maybeOpenAllSites(): void {
   if (rtsSitesAllOpen || !rtsGame) return;
-  if (rtsGame.structuresOfType('obelisk').length < RTS_ALL_SITES_AT) return;
+  const bought = rtsGame.economy.opensAllSites;
+  if (!bought && rtsGame.structuresOfType('obelisk').length < RTS_ALL_SITES_AT) return;
   rtsSitesAllOpen = true;
   rtsSites = inTheaterObeliskSites();
   rtsBuild?.setSites(rtsSites, rtsBuiltSites);

@@ -1640,6 +1640,10 @@ body.dev-open #c2-tasking { display: none; }
    by the chip naming the chassis it lands on */
 .grc-chip.cat-upgrade .grc-key { background: #3fa0e0; }
 .grc-chip.cat-upgrade { border-bottom-color: #3fa0e0; }
+/* a programme grows the company rather than a machine — acquisitions' gold */
+.grc-chip.cat-programme .grc-key { background: #d9c24a; }
+.grc-chip.cat-programme { border-bottom-color: #d9c24a; }
+.grc-chip.type-acquisitions .grc-key { background: #d9c24a; }
 .grc-sub {
   font: 600 7px/1 var(--mono); letter-spacing: .1em; color: var(--steel);
   max-width: 92px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

@@ -15,7 +15,7 @@
 
 import { ABILITY_BY_ID, STRUCTURES, type AbilityId, type Structure, type StructureType } from './structures';
 import { RTS_UNITS, RTS_REGEN, type RtsUnitId } from './units';
-import { RESEARCH, type ResearchId } from './research';
+import { RESEARCH, type ResearchEffects, type ResearchId } from './research';
 import { kindsTouchedBy } from './research';
 import { stepUnrest, unrestPressure } from './unrest';
 
@@ -333,9 +333,13 @@ export class RtsGame {
 
   /** Why a research can't be started right now, or null. */
   researchBlocker(id: ResearchId): string | null {
+    const def = RESEARCH[id];
     if (this._researched.has(id)) return 'DONE';
     if ([...this.researching.values()].some((r) => r.id === id)) return 'IN PROGRESS';
-    if (this._money < RESEARCH[id].cost) return 'INSUFFICIENT FUNDS';
+    // Tiered programmes: FUNDING II is meaningless without I, and showing it as merely unaffordable
+    // would be a lie about why it can't be started.
+    if (def.requires && !this._researched.has(def.requires)) return `NEEDS ${RESEARCH[def.requires].name}`;
+    if (this._money < def.cost) return 'INSUFFICIENT FUNDS';
     return null;
   }
 
@@ -365,6 +369,7 @@ export class RtsGame {
         this._researched.add(r.id);
         this.researching.delete(sid);
         done.push({ id: r.id, kinds: kindsTouchedBy(r.id) });
+        this._economy = foldEffects(this._researched);
       }
     }
     if (done.length) this.changed();
@@ -384,6 +389,18 @@ export class RtsGame {
    */
   get researched(): ReadonlySet<ResearchId> {
     return this._researched;
+  }
+
+  /**
+   * The COMPANY's standing modifiers, folded from every completed programme.
+   *
+   * Recomputed only when research completes, not per frame: it is read by the income tick, the cap,
+   * the unrest tick, every fine and every placement test, and folding nine entries sixty times a
+   * second to get the same answer would be the silliest cost in the mode.
+   */
+  private _economy = foldEffects(new Set<ResearchId>());
+  get economy(): Required<ResearchEffects> {
+    return this._economy;
   }
 
   // ---- structure abilities ---------------------------------------------------------------------
@@ -478,7 +495,8 @@ export class RtsGame {
    * be the most expensive thing in the mode. The HUD reads it directly instead.
    */
   tickUnrest(dt: number): void {
-    this._unrest = stepUnrest(this._unrest, this.dataCenterCount(), dt);
+    // AUTHORITY is what buys patience: with powers in hand the same sheds provoke less.
+    this._unrest = stepUnrest(this._unrest, this.dataCenterCount(), dt * this._economy.unrestMult);
   }
 
   /** Banked money, floored — fractional accrual is real but never shown as a fraction. */
@@ -488,7 +506,7 @@ export class RtsGame {
 
   /** The banked ceiling at the current obelisk count. Shown next to money so the cap is legible. */
   cap(obeliskCount: number): number {
-    return Math.max(1, obeliskCount) * RTS_ECON.CAP_PER_OBELISK;
+    return Math.round(Math.max(1, obeliskCount) * RTS_ECON.CAP_PER_OBELISK * this._economy.capMult);
   }
 
   onChange(fn: RtsListener): () => void {
@@ -509,7 +527,8 @@ export class RtsGame {
   tick(dt: number, obeliskCount: number): void {
     const cap = this.cap(obeliskCount);
     if (this._money >= cap) return;
-    this._money = Math.min(cap, this._money + obeliskCount * RTS_ECON.INCOME_PER_OBELISK_S * dt);
+    const rate = RTS_ECON.INCOME_PER_OBELISK_S + this._economy.incomePerObelisk;
+    this._money = Math.min(cap, this._money + obeliskCount * rate * dt);
     this.changed();
   }
 
@@ -521,10 +540,56 @@ export class RtsGame {
     return true;
   }
 
-  /** A direct credit — a collected traffic bounty, a bonus. */
+  /** A direct credit — a bounty, a bonus. Flat: nothing scales an objective payout. */
   award(amount: number): void {
     if (amount <= 0) return;
     this._money += amount;
     this.changed();
   }
+
+  /**
+   * A collected FINE, scaled by the company's authority. Separate from {@link award} on purpose —
+   * authority is a statement about what the company may charge people for, not about grant income,
+   * and folding an objective bounty into it would say the wrong thing.
+   */
+  collectFine(amount: number): number {
+    const paid = Math.round(amount * this._economy.fineMult);
+    this.award(paid);
+    return paid;
+  }
+}
+
+/**
+ * Fold every completed programme's effects into one set of standing modifiers.
+ *
+ * Multipliers compound and additive terms sum, so FUNDING I + II is +10 per obelisk and 1.625x the
+ * bank, and both AUTHORITY tiers together are 2.03x on fines. Defaults are the identity, so a match
+ * with nothing researched behaves exactly as it did before any of this existed.
+ */
+function foldEffects(done: ReadonlySet<ResearchId>): Required<ResearchEffects> {
+  const out: Required<ResearchEffects> = {
+    incomePerObelisk: 0,
+    capMult: 1,
+    fineMult: 1,
+    unrestMult: 1,
+    powerRadiusM: 0,
+    obeliskReachM: 0,
+    obeliskHpMult: 1,
+    opensAllSites: false,
+    autoFine: false,
+  };
+  for (const id of done) {
+    const e = RESEARCH[id]?.effects;
+    if (!e) continue;
+    out.incomePerObelisk += e.incomePerObelisk ?? 0;
+    out.capMult *= e.capMult ?? 1;
+    out.fineMult *= e.fineMult ?? 1;
+    out.unrestMult *= e.unrestMult ?? 1;
+    out.powerRadiusM += e.powerRadiusM ?? 0;
+    out.obeliskReachM += e.obeliskReachM ?? 0;
+    out.obeliskHpMult *= e.obeliskHpMult ?? 1;
+    out.opensAllSites ||= e.opensAllSites ?? false;
+    out.autoFine ||= e.autoFine ?? false;
+  }
+  return out;
 }

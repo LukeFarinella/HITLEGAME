@@ -142,15 +142,19 @@ export class RtsCommandBar {
     const research = researchFrom(structureType).map((r) => {
       const blocked = this.hooks.researchBlocker(r.id);
       const locked = blocked === 'DONE' ? '✓ DONE' : blocked === 'IN PROGRESS' ? '◷ …' : null;
+      // Three flavours, three colours: an UPGRADE names the machine it improves, a PROGRAMME says
+      // COMPANY, and a bare DOCTRINE says so.
       const on = r.applies?.length ? unitNamesFor(r.applies) : null;
+      const kind = on ? 'cat-upgrade' : r.effects ? 'cat-programme' : 'cat-research';
+      const sub = on ?? (r.effects ? 'COMPANY' : 'DOCTRINE');
       return this.chip({
-        cls: `${on ? 'cat-upgrade' : 'cat-research'}${blocked && blocked !== 'INSUFFICIENT FUNDS' ? ' locked' : money >= r.cost ? '' : ' broke'}`,
+        cls: `${kind}${blocked && blocked !== 'INSUFFICIENT FUNDS' ? ' locked' : money >= r.cost ? '' : ' broke'}`,
         hotkey: r.hotkey,
         name: r.name,
         cost: r.cost,
         locked,
-        title: `${r.name}${on ? ` · ${on}` : ' · COMPANY-WIDE'} — ${r.blurb} · ${r.timeS}s`,
-        sub: on ?? 'DOCTRINE',
+        title: `${r.name} · ${sub} — ${r.blurb} · ${r.timeS}s`,
+        sub,
         onClick: () => this.hooks.onResearch(r.id),
       });
     });
