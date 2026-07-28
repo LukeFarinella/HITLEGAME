@@ -5,18 +5,33 @@
  * nothing about Cesium, money, or rendering. The scene owns the terrain/road/coverage tests and the
  * money; it asks this module "is this a legal spot?" and "what does this cost?", then builds.
  *
- * Two placement kinds, matching the design:
+ * Three placement kinds, matching the design:
  *   - `site`  — obelisks. They may only stand on a SURVEYED SITE (one of the theater's predetermined
  *               obelisk positions). The Nexus is one of these; every other is a build slot.
  *   - `free`  — facilities. Placed on open ground, but only NEAR A ROAD and WITHIN REACH of the Nexus
  *               or an existing facility, so a base grows as a connected sprawl rather than teleporting
  *               a factory into the wilderness.
+ *   - `shore` — the harbor. Stands on LAND but within {@link BUILD_RULES.SHORE_DIST_M} of navigable
+ *               water, and is exempt from the road rule: a quay is defined by the water it reaches,
+ *               and demanding a road as well makes a coastline of cliffs and beaches unbuildable.
+ *               This is the one structure whose legal ground is decided by the terrain rather than by
+ *               your own base, which is what makes a coastal theater play differently from an inland
+ *               one — on a landlocked map there is no navy, and that is a real strategic fact rather
+ *               than a missing feature.
  */
 
-export type StructureType = 'nexus' | 'obelisk' | 'robotics' | 'aviation' | 'tech' | 'supply' | 'special';
+export type StructureType =
+  | 'nexus'
+  | 'obelisk'
+  | 'robotics'
+  | 'harbor'
+  | 'aviation'
+  | 'tech'
+  | 'supply'
+  | 'special';
 
 /** Placeable structure types, in command-bar order. The Nexus is never built — you start with it. */
-export const BUILDABLE: StructureType[] = ['obelisk', 'supply', 'robotics', 'tech', 'aviation', 'special'];
+export const BUILDABLE: StructureType[] = ['obelisk', 'supply', 'robotics', 'harbor', 'tech', 'aviation', 'special'];
 
 export interface StructureDef {
   type: StructureType;
@@ -25,8 +40,8 @@ export interface StructureDef {
   blurb: string;
   cost: number;
   maxHp: number;
-  /** Where it may stand — a surveyed obelisk site, or free ground under the placement rules. */
-  placement: 'site' | 'free';
+  /** Where it may stand — a surveyed obelisk site, free ground, or the coast. See the module header. */
+  placement: 'site' | 'free' | 'shore';
   /** Command-bar hotkey. */
   hotkey: string;
   /** Ground-footprint radius in metres — its ring, and the spacing other structures keep from it. */
@@ -70,7 +85,7 @@ export const STRUCTURES: Record<StructureType, StructureDef> = {
   robotics: {
     type: 'robotics',
     name: 'ROBOTICS FACILITY',
-    blurb: 'Builds ground units — quadrupeds and walkers.',
+    blurb: 'Builds the ground line — quadrupeds, and the kite scout once the tech facility stands.',
     cost: 400,
     maxHp: 1000,
     placement: 'free',
@@ -79,10 +94,25 @@ export const STRUCTURES: Record<StructureType, StructureDef> = {
     buildTimeS: 22,
     requires: { structure: 'supply' },
   },
+  harbor: {
+    type: 'harbor',
+    name: 'HARBOR',
+    blurb: 'Builds water units — the USV picket and, once the tech facility stands, the littoral hull. Must be built on the coast.',
+    cost: 450,
+    maxHp: 900,
+    placement: 'shore',
+    hotkey: 'H',
+    footprintM: 300,
+    buildTimeS: 24,
+    // Same rung as robotics, deliberately: the harbor is an EARLY option you can open instead of
+    // committing everything to the ground line, not a late-game annex. What it can build changes as
+    // the tree grows (see the littoral's tech gate) rather than the harbor itself arriving late.
+    requires: { structure: 'supply' },
+  },
   aviation: {
     type: 'aviation',
     name: 'AVIATION FACILITY',
-    blurb: 'Builds air units — quadcopters and interceptors.',
+    blurb: 'Builds air units — interceptors and the disc observer.',
     cost: 550,
     maxHp: 850,
     placement: 'free',
@@ -119,7 +149,7 @@ export const STRUCTURES: Record<StructureType, StructureDef> = {
   special: {
     type: 'special',
     name: 'SPECIAL FACILITY',
-    blurb: 'Builds the heavy and exotic platforms — the siege walker, the disc, the littoral hull.',
+    blurb: 'Builds the heavy line and the capstones — arachnids, marshals and the siege walker.',
     cost: 700,
     maxHp: 1100,
     placement: 'free',
@@ -144,6 +174,15 @@ export const BUILD_RULES = {
   FACILITY_REACH_M: 7000,
   /** A facility must sit within this of a road. */
   ROAD_DIST_M: 450,
+  /**
+   * How close to navigable water a `shore` structure must stand, in metres.
+   *
+   * Measured against the theater's shoreline distance field, so it is distance to the actual coast
+   * rather than to some sampled water pixel. Generous enough that a harbor can sit on a beach or a
+   * bluff rather than demanding the waterline exactly, tight enough that "on the coast" still means
+   * something.
+   */
+  SHORE_DIST_M: 700,
   /** No structure may be built closer than this to another — basic spacing so bases don't stack. */
   MIN_SPACING_M: 260,
 };

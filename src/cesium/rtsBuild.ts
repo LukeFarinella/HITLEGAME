@@ -1,7 +1,7 @@
 import * as Cesium from 'cesium';
 import type { RoadNet } from './roads';
 import { InstancedModelBatch } from './instancedModels';
-import { dataCenterMesh, roboticsMesh, techMesh, aviationMesh, specialMesh } from './unitModels';
+import { dataCenterMesh, roboticsMesh, harborMesh, techMesh, aviationMesh, specialMesh } from './unitModels';
 import {
   STRUCTURES,
   BUILD_RULES,
@@ -40,6 +40,7 @@ const FACILITY_COLOR: Record<StructureType, string> = {
   nexus: '#E23A2E',
   obelisk: '#E23A2E',
   robotics: '#E7A13B',
+  harbor: '#3F8FA0',
   aviation: '#3FA0E0',
   tech: '#8B6FE0',
   supply: '#3FBF6F',
@@ -51,6 +52,7 @@ const FACILITY_GLYPH: Record<StructureType, string> = {
   nexus: '◈',
   obelisk: '▲',
   robotics: 'R',
+  harbor: 'H',
   aviation: 'V',
   tech: 'T',
   supply: 'D',
@@ -58,18 +60,19 @@ const FACILITY_GLYPH: Record<StructureType, string> = {
 };
 
 /** The facilities that render as a 3D building. Obelisks/the Nexus render as obelisk geometry. */
-type FacilityType = 'supply' | 'robotics' | 'tech' | 'aviation' | 'special';
-const FACILITY_TYPES: FacilityType[] = ['supply', 'robotics', 'tech', 'aviation', 'special'];
+type FacilityType = 'supply' | 'robotics' | 'harbor' | 'tech' | 'aviation' | 'special';
+const FACILITY_TYPES: FacilityType[] = ['supply', 'robotics', 'harbor', 'tech', 'aviation', 'special'];
 /** Built once at module load — one shared mesh per facility type. */
 const FACILITY_MESH: Record<FacilityType, ReturnType<typeof dataCenterMesh>> = {
   supply: dataCenterMesh(),
   robotics: roboticsMesh(),
+  harbor: harborMesh(),
   tech: techMesh(),
   aviation: aviationMesh(),
   special: specialMesh(),
 };
 /** Per-type mesh scale so each building reads at theater zoom. */
-const FACILITY_SCALE: Record<FacilityType, number> = { supply: 2.4, robotics: 2.4, tech: 2.6, aviation: 2.4, special: 2.5 };
+const FACILITY_SCALE: Record<FacilityType, number> = { supply: 2.4, robotics: 2.4, harbor: 2.4, tech: 2.6, aviation: 2.4, special: 2.5 };
 const isFacilityType = (t: StructureType): t is FacilityType => (FACILITY_TYPES as StructureType[]).includes(t);
 
 /**
@@ -212,13 +215,12 @@ export class RtsBuildLayer {
   /** One instanced 3D-model batch per facility type — the buildings themselves. */
   private facilityBatch: Record<FacilityType, InstancedModelBatch>;
   /** Placed instances per type, kept so the batch can be re-written when one is added or falls. */
-  private facilityList: Record<FacilityType, { id: number; lon: number; lat: number }[]> = {
-    supply: [],
-    robotics: [],
-    tech: [],
-    aviation: [],
-    special: [],
-  };
+  // Derived from FACILITY_TYPES rather than written out, so adding a facility can't leave it with
+  // nowhere to record its instances — the previous hand-written literal was one line per type and
+  // one more thing to forget.
+  private facilityList = Object.fromEntries(
+    FACILITY_TYPES.map((t) => [t, [] as { id: number; lon: number; lat: number }[]]),
+  ) as Record<FacilityType, { id: number; lon: number; lat: number }[]>;
   /** Ring + icon per structure id, so a destroyed structure can take its chrome down with it. */
   private structureVisuals = new Map<number, { ring: Cesium.Polyline; icon: Cesium.Billboard }>();
   /** The Millstone Nexus marker, present only during a match with an enemy still standing. */
@@ -235,13 +237,10 @@ export class RtsBuildLayer {
     // A generous bounds so the buildings never cull inside the theater; culling here is a nicety,
     // not a correctness concern.
     const bounds = new Cesium.BoundingSphere(Cesium.Cartesian3.fromDegrees(center.lon, center.lat, 0), 500_000);
-    this.facilityBatch = {
-      supply: new InstancedModelBatch(FACILITY_MESH.supply, 24, bounds, false),
-      robotics: new InstancedModelBatch(FACILITY_MESH.robotics, 24, bounds, false),
-      tech: new InstancedModelBatch(FACILITY_MESH.tech, 24, bounds, false),
-      aviation: new InstancedModelBatch(FACILITY_MESH.aviation, 24, bounds, false),
-      special: new InstancedModelBatch(FACILITY_MESH.special, 24, bounds, false),
-    };
+    // Same reason as facilityList: one batch per declared type, not per remembered type.
+    this.facilityBatch = Object.fromEntries(
+      FACILITY_TYPES.map((t) => [t, new InstancedModelBatch(FACILITY_MESH[t], 24, bounds, false)]),
+    ) as Record<FacilityType, InstancedModelBatch>;
     this.meshBatches = FACILITY_TYPES.map((t) => this.facilityBatch[t]);
   }
 

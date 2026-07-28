@@ -56,6 +56,9 @@ export const RTS_COMBAT: Partial<Record<UnitKind, ChassisCombat>> = {
   biped: { hp: 320, hardpoints: 2 },
   quad: { hp: 90, hardpoints: 1 },
   interceptor: { hp: 160, hardpoints: 1 },
+  // The picket is deliberately flimsy: one hardpoint, and a hull's deck gun kills it in three. What
+  // you are buying is presence on water early, not a fight.
+  usv: { hp: 90, hardpoints: 1 },
   naval: { hp: 260, hardpoints: 2 },
   drone: { hp: 400, hardpoints: 2 },
   // Four slots, as in the campaign catalog: the walker is the platform defined by what's bolted to

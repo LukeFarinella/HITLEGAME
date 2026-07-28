@@ -12,8 +12,13 @@ import type { UnitKind } from '../cesium/unitModels';
  * entry plus one `hasCapability` check at the point it matters.
  */
 
+/**
+ * A player chassis. Note that `skid` and `usv` are RTS-ONLY: they are platforms for selection,
+ * ordering and combat, but have no entry in {@link PLATFORMS} because neither is for sale in the
+ * campaign. Anything reading a catalog entry off a PlatformId must tolerate `undefined`.
+ */
 export type PlatformId = UnitKind &
-  ('drone' | 'dog' | 'quad' | 'spider' | 'biped' | 'walker' | 'naval' | 'interceptor' | 'skid');
+  ('drone' | 'dog' | 'quad' | 'spider' | 'biped' | 'walker' | 'naval' | 'interceptor' | 'skid' | 'usv');
 
 /** What a piece of gear grants. The scene asks for these by name. */
 export type Capability = 'laser' | 'wide-sensor' | 'deep-scan' | 'detain';

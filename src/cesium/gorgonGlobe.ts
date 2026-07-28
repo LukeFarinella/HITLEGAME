@@ -2269,8 +2269,16 @@ function countLiveObelisks(): number {
 // rules — near a road, within reach of the Nexus or another facility. Everything routes through the
 // rtsGame money and the rtsBuild render layer.
 
-const FACILITY_TYPES: StructureType[] = ['robotics', 'aviation', 'tech'];
-const isFacility = (t: StructureType): boolean => FACILITY_TYPES.includes(t);
+/**
+ * Whether a structure is a FACILITY — a building, as opposed to a network site.
+ *
+ * Derived from the catalog rather than listed: the two site-placed types are the Nexus and the
+ * obelisk, so everything else is a facility by definition. This used to be a hand-written
+ * `['robotics', 'aviation', 'tech']`, which silently omitted the data center and the special
+ * facility — meaning a base whose nearest building was one of those did not count as an anchor, and
+ * you could not build outward from it. The harbor would have been the third omission.
+ */
+const isFacility = (t: StructureType): boolean => STRUCTURES[t].placement !== 'site';
 
 /** Stand up the build layer + command bar for a fresh match. Called once, from buildTheater. */
 function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
@@ -2659,6 +2667,7 @@ const STRUCT_GLYPH: Record<StructureType, string> = {
   nexus: '◈',
   obelisk: '▲',
   robotics: 'R',
+  harbor: 'H',
   aviation: 'V',
   tech: 'T',
   supply: 'D',
@@ -2668,6 +2677,7 @@ const STRUCT_ACCENT: Record<StructureType, string> = {
   nexus: '#E23A2E',
   obelisk: '#E23A2E',
   robotics: '#E7A13B',
+  harbor: '#3F8FA0',
   aviation: '#3FA0E0',
   tech: '#8B6FE0',
   supply: '#3FBF6F',
@@ -2755,6 +2765,12 @@ function waterNear(lon: number, lat: number, maxM = 30_000): { lon: number; lat:
   return null;
 }
 
+/**
+ * Chassis that can only exist on water. Anything here has to be launched from a navigable point
+ * rather than from its producer's doorstep, and is refunded if the theater is landlocked.
+ */
+const WATER_KINDS = new Set<UnitKind>(['naval', 'usv']);
+
 /** Roll a finished unit out of its building and send it to the rally point (or just clear of the building). */
 function spawnProducedUnit(structureId: number, unit: RtsUnitId): void {
   if (!rtsGame || !unitField) return;
@@ -2764,9 +2780,10 @@ function spawnProducedUnit(structureId: number, unit: RtsUnitId): void {
   const mLon = 111_320 * Math.cos((s.lat * Math.PI) / 180);
   let spawnLon = s.lon + (STRUCTURES[s.type].footprintM + 60) / mLon;
   let spawnLat = s.lat;
-  // A hull rolled out onto the factory forecourt is a hull that can never move: naval orders refuse
-  // any point that isn't water. Launch it from the nearest sea instead.
-  if (def.meshKind === 'naval') {
+  // A hull rolled out onto the forecourt is a hull that can never move: naval orders refuse any
+  // point that isn't water. Launch it from the nearest sea instead. Covers every water chassis, not
+  // just the littoral — the USV picket has exactly the same problem.
+  if (WATER_KINDS.has(def.meshKind)) {
     const water = waterNear(s.lon, s.lat);
     if (!water) {
       sound.play('denied');
@@ -2909,7 +2926,7 @@ function resolvePlacement(screen: Cesium.Cartesian2): PlacementResolve | null {
     return { lon: best.lon, lat: best.lat, radiusM: def.footprintM, valid: reason === null, reason, siteIndex: best.index };
   }
 
-  const reason = validateFacility(g.lon, g.lat);
+  const reason = validateFacility(g.lon, g.lat, rtsPlacing);
   return { lon: g.lon, lat: g.lat, radiusM: def.footprintM, valid: reason === null, reason };
 }
 
@@ -2928,7 +2945,7 @@ function validateObelisk(site: BuildSite): string | null {
 }
 
 /** Why a facility can't stand here, or null. */
-function validateFacility(lon: number, lat: number): string | null {
+function validateFacility(lon: number, lat: number, type: StructureType = 'robotics'): string | null {
   if (!rtsGame || !rtsBuild) return 'NO MATCH';
   if (theaterMap && theaterMap.heightAt(lon, lat) < 1) return 'AT SEA';
   // Anchored to the base first — it's the primary RTS placement concept, so a far click should read
@@ -2937,7 +2954,18 @@ function validateFacility(lon: number, lat: number): string | null {
     (s) => (s.type === 'nexus' || isFacility(s.type)) && metresBetween(lon, lat, s.lon, s.lat) <= BUILD_RULES.FACILITY_REACH_M,
   );
   if (!anchored) return 'OUT OF BASE RANGE';
-  if (!rtsBuild.nearRoad(lon, lat)) return 'NOT NEAR A ROAD';
+
+  if (STRUCTURES[type].placement === 'shore') {
+    // A quay is defined by the water it reaches, so it answers to the coastline instead of the road
+    // network. `shoreDistance` is the theater's signed field — positive on land — so this is
+    // "standing on land, but with the sea within reach".
+    const shore = theaterMap?.shoreDistance(lon, lat);
+    if (shore === undefined) return 'NO TERRAIN';
+    if (shore > BUILD_RULES.SHORE_DIST_M) return 'NOT ON THE COAST';
+  } else if (!rtsBuild.nearRoad(lon, lat)) {
+    return 'NOT NEAR A ROAD';
+  }
+
   const tooClose = rtsGame.structures.some((s) => metresBetween(lon, lat, s.lon, s.lat) < BUILD_RULES.MIN_SPACING_M);
   if (tooClose) return 'TOO CLOSE TO A STRUCTURE';
   return null;
@@ -3729,7 +3757,7 @@ function endMarquee() {
 const KIND_ABBR: Record<UnitKind, string> = {
   land: 'CV', sea: 'SV', air: 'AV', foot: 'FT',
   drone: 'DISC', dog: 'K9', quad: 'KITE', spider: 'ARC', biped: 'MAR', walker: 'COL',
-  naval: 'LIT', interceptor: 'RAP', skid: 'WRK',
+  naval: 'LIT', interceptor: 'RAP', skid: 'WRK', usv: 'USV',
   drudge: 'DRD', ripper: 'RIP', flenser: 'FLN', bulwark: 'BLW', mote: 'MOT',
   shrike: 'SHR', hulk: 'HLK', censer: 'CNS', leviathan: 'LEV',
 };

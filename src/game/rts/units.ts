@@ -4,7 +4,7 @@ import type { StructureType } from './structures';
 /**
  * The RTS unit roster.
  *
- * Units are sorted into four CATEGORIES — worker, infantry, aerial, special — the way an RTS sorts a
+ * Units are sorted into five CATEGORIES — worker, infantry, aerial, naval, special — the way an RTS sorts a
  * production tree. Each unit reuses an existing platform MESH (the game already has quadrupeds,
  * interceptors and a colossus modelled) so this is a data layer over the renderer, not new art.
  *
@@ -14,8 +14,9 @@ import type { StructureType } from './structures';
  *
  *   NEXUS      worker
  *   ROBOTICS   quadruped · kite (behind the tech facility)
+ *   HARBOR     usv · littoral (behind the tech facility)
  *   AVIATION   interceptor · disc observer
- *   SPECIAL    arachnid · marshal · giga walker · littoral
+ *   SPECIAL    arachnid · marshal · giga walker
  *
  * Producer is deliberately NOT the same axis as {@link UnitCategory}: a kite is an aerial unit that
  * happens to roll out of robotics, and an arachnid is infantry that happens to need the special
@@ -25,7 +26,13 @@ import type { StructureType } from './structures';
  * NOTE ON TECH GATES. `requiresStructure` is only for a unit whose producer can exist BEFORE the
  * gate. The chain is 3 obelisks → data center → robotics → tech → aviation → special, so anything
  * produced by aviation or special is already past tech and needs no explicit gate — the facility
- * that builds it IS the gate. Only the kite carries one, because robotics comes before tech.
+ * that builds it IS the gate. The kite and the littoral are the two that carry one, because robotics
+ * and the harbor both sit on the data-center rung, before tech.
+ *
+ * Both producers on that rung are shaped the same way on purpose: one cheap unit you can have
+ * immediately, and one real one the tech facility unlocks. Opening a harbor early buys you a picket
+ * and the option of a navy later, exactly as opening robotics buys a quadruped and the option of a
+ * kite.
  */
 
 /**
@@ -35,7 +42,7 @@ import type { StructureType } from './structures';
  * (`unitField.rtsHpOf`), so what it shows is always the number combat is actually shooting at.
  * Shield and energy have no combat model yet and are owned here.
  */
-export type UnitCategory = 'worker' | 'infantry' | 'aerial' | 'special';
+export type UnitCategory = 'worker' | 'infantry' | 'aerial' | 'naval' | 'special';
 export type RtsUnitId =
   | 'worker'
   | 'quadruped'
@@ -45,6 +52,7 @@ export type RtsUnitId =
   | 'interceptor'
   | 'giga'
   | 'disc'
+  | 'usv'
   | 'littoral';
 
 export interface RtsUnitDef {
@@ -128,6 +136,38 @@ export const RTS_UNITS: Record<RtsUnitId, RtsUnitDef> = {
     hotkey: 'K',
   },
 
+  // ---- harbor: the water line -------------------------------------------------------------------
+  usv: {
+    id: 'usv',
+    name: 'USV',
+    category: 'naval',
+    blurb: 'Small unmanned surface vessel. Cheap, quick picket that holds a channel and sees across it.',
+    meshKind: 'usv',
+    maxShield: 20,
+    maxEnergy: 0,
+    cost: 80,
+    buildTimeS: 12,
+    supply: 2,
+    producedBy: 'harbor',
+    hotkey: 'U',
+  },
+  littoral: {
+    id: 'littoral',
+    name: 'LITTORAL',
+    category: 'naval',
+    blurb: 'Trimaran hull for the coast and the crossings. Holds water the ground platforms cannot follow onto.',
+    meshKind: 'naval',
+    maxShield: 100,
+    maxEnergy: 0,
+    cost: 220,
+    buildTimeS: 26,
+    supply: 4,
+    producedBy: 'harbor',
+    // The harbor stands on the data-center rung, so without this the hull would be an opening unit.
+    requiresStructure: 'tech',
+    hotkey: 'L',
+  },
+
   // ---- aviation: the air wing -------------------------------------------------------------------
   interceptor: {
     id: 'interceptor',
@@ -158,7 +198,7 @@ export const RTS_UNITS: Record<RtsUnitId, RtsUnitDef> = {
     hotkey: 'O',
   },
 
-  // ---- special: the heavy line and the capstones ------------------------------------------------
+  // ---- special: the heavy line and the capstone -------------------------------------------------
   // Everything here is already two rungs past the tech facility (special ← aviation ← tech), so
   // none of it carries a requiresStructure — the facility that builds it is the gate.
   arachnid: {
@@ -202,20 +242,6 @@ export const RTS_UNITS: Record<RtsUnitId, RtsUnitDef> = {
     supply: 8,
     producedBy: 'special',
     hotkey: 'G',
-  },
-  littoral: {
-    id: 'littoral',
-    name: 'LITTORAL',
-    category: 'special',
-    blurb: 'Trimaran hull for the coast and the crossings. Holds water the ground platforms cannot follow onto.',
-    meshKind: 'naval',
-    maxShield: 100,
-    maxEnergy: 0,
-    cost: 220,
-    buildTimeS: 26,
-    supply: 4,
-    producedBy: 'special',
-    hotkey: 'L',
   },
 };
 

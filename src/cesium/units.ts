@@ -5,7 +5,6 @@ import {
   UNIT_SCALE,
   UNIT_KINDS,
   PLATFORM_KINDS,
-  MILLSTONE_KINDS,
   platformIcon,
   hostilePlatformIcon,
   type UnitKind,
@@ -181,6 +180,8 @@ const SPEED: Record<UnitKind, number> = {
   // The worker skidsteer is RTS-only and has no campaign catalog entry, so its speed is set here
   // directly. Brisk — it has to cross a base to build without feeling like a chore.
   skid: 300,
+  // The USV is the fastest thing the player owns on water — a picket has to get somewhere and look.
+  usv: 700,
   // Millstone. Set here for the same reason as the skid: none of these has a campaign catalog
   // entry, because none of them is for sale. Each is pitched against the Gorgon unit it answers,
   // and the melee line is deliberately FASTER than what it chases — a melee army that can be
@@ -217,6 +218,7 @@ const RIDE_HEIGHT: Record<UnitKind, number> = {
   naval: 1, // floats on the water plane, like the ambient shipping
   interceptor: 0,
   skid: 5, // a wheeled vehicle sitting on the road drape
+  usv: 1, // floats on the water plane, like the littoral
   // Millstone. Its flyers have no campaign catalog entry to read a cruise altitude from, so their
   // altitude IS their ride height — which is why these three are the only large numbers in here.
   drudge: 5,
@@ -242,6 +244,14 @@ export const PLATFORM_SENSOR: Record<string, number> = {};
 function zeroByKind(): Record<UnitKind, number> {
   return Object.fromEntries(UNIT_KINDS.map((k) => [k, 0])) as Record<UnitKind, number>;
 }
+
+/**
+ * Chassis that may only be ordered onto navigable water.
+ *
+ * Was a bare `kind === 'naval'` in three places, which silently let the USV picket be walked onto
+ * dry land the moment it existed. A set, so the next hull is one entry rather than three greps.
+ */
+const WATER_BOUND = new Set<UnitKind>(['naval', 'usv']);
 
 /** Within this many metres of its ordered destination, a platform is "on station". */
 const ARRIVE_M = 120;
@@ -674,7 +684,7 @@ interface Unit {
 const CALLSIGN: Record<UnitKind, string> = {
   land: 'CV', sea: 'SV', air: 'AV', foot: 'FT',
   drone: 'GORGON', dog: 'K9', quad: 'KITE', spider: 'ARC', biped: 'MAR', walker: 'COL',
-  naval: 'LIT', interceptor: 'RAP', skid: 'WRK',
+  naval: 'LIT', interceptor: 'RAP', skid: 'WRK', usv: 'USV',
   // Millstone's callsigns are numbered rather than named — you don't get to know what they call
   // their hardware, only what it is.
   drudge: 'MS-D', ripper: 'MS-R', flenser: 'MS-F', bulwark: 'MS-B', mote: 'MS-M',
@@ -695,6 +705,7 @@ export const KIND_LABEL: Record<UnitKind, string> = {
   naval: 'LITTORAL DRONE',
   interceptor: 'RAPTOR INTERCEPTOR',
   skid: 'WORKER SKIDSTEER',
+  usv: 'USV PICKET',
   drudge: 'MILLSTONE DRUDGE',
   ripper: 'MILLSTONE RIPPER',
   flenser: 'MILLSTONE FLENSER',
@@ -1036,26 +1047,29 @@ export class UnitField {
     // Fall back to 1 for a kind with no catalog entry (the RTS-only skidsteer): the campaign never
     // fields it, so its batch just sits empty; the RTS override sizes every platform batch anyway.
     const pcap = (id: PlatformId) => counts.platformCap ?? PLATFORM_BY_ID.get(id)?.maxCount ?? 1;
-    this.batches = {
-      land: new InstancedModelBatch(UNIT_MESHES.land, counts.land, bounds, true),
-      sea: new InstancedModelBatch(UNIT_MESHES.sea, counts.sea, bounds, true),
-      air: new InstancedModelBatch(UNIT_MESHES.air, counts.air, bounds, true),
-      foot: new InstancedModelBatch(UNIT_MESHES.foot, counts.foot + FOOT_SPAWN_HEADROOM, bounds, true),
-      drone: new InstancedModelBatch(UNIT_MESHES.drone, pcap('drone'), bounds, true),
-      dog: new InstancedModelBatch(UNIT_MESHES.dog, pcap('dog'), bounds, true),
-      quad: new InstancedModelBatch(UNIT_MESHES.quad, pcap('quad'), bounds, true),
-      spider: new InstancedModelBatch(UNIT_MESHES.spider, pcap('spider'), bounds, true),
-      biped: new InstancedModelBatch(UNIT_MESHES.biped, pcap('biped'), bounds, true),
-      walker: new InstancedModelBatch(UNIT_MESHES.walker, pcap('walker'), bounds, true),
-      naval: new InstancedModelBatch(UNIT_MESHES.naval, pcap('naval'), bounds, true),
-      interceptor: new InstancedModelBatch(UNIT_MESHES.interceptor, pcap('interceptor'), bounds, true),
-      skid: new InstancedModelBatch(UNIT_MESHES.skid, pcap('skid'), bounds, true),
-    } as Record<UnitKind, InstancedModelBatch>;
-    // Millstone's batches. Sized by the RTS override like the player's, and left at 1 in the
-    // campaign, where none of these is ever fielded and an empty batch costs nothing to draw.
-    for (const k of MILLSTONE_KINDS) {
-      this.batches[k] = new InstancedModelBatch(UNIT_MESHES[k], counts.platformCap ?? 1, bounds, true);
-    }
+    /**
+     * How many instances a kind's batch is sized for.
+     *
+     * The ambient population is sized to its spawn count; every combat chassis on either side is
+     * sized by the RTS override, falling back to the campaign catalog's maxCount and then to 1 for
+     * the RTS-only kinds that have no catalog entry (the skidsteer, the USV). An oversized-by-one
+     * empty batch costs nothing at draw time.
+     */
+    const capOf = (k: UnitKind): number => {
+      if (k === 'land') return counts.land;
+      if (k === 'sea') return counts.sea;
+      if (k === 'air') return counts.air;
+      if (k === 'foot') return counts.foot + FOOT_SPAWN_HEADROOM;
+      return pcap(k as PlatformId);
+    };
+    // Built by iterating UNIT_KINDS rather than as a literal, so a new chassis CANNOT be added
+    // without a batch. The previous version was a hand-written literal cast to
+    // Record<UnitKind, …>, and that cast silently accepted a missing entry — adding the USV type-
+    // checked cleanly and then threw a Cesium DeveloperError on the first frame, because the render
+    // loop walks UNIT_KINDS and called beginFrame() on undefined.
+    this.batches = Object.fromEntries(
+      UNIT_KINDS.map((k) => [k, new InstancedModelBatch(UNIT_MESHES[k], capOf(k), bounds, true)]),
+    ) as Record<UnitKind, InstancedModelBatch>;
 
     // Vehicles favour freeways heavily (constant motorway flow); pedestrians stay on surface streets.
     this.spawnRoadUnits('land', counts.land, 0.45);
@@ -2673,7 +2687,7 @@ export class UnitField {
     attackMove = false,
   ): boolean {
     const kind = this.units[index].kind as PlatformId;
-    if (kind === 'naval' && this.shoreAt(lon, lat) > -60) return false;
+    if (WATER_BOUND.has(kind) && this.shoreAt(lon, lat) > -60) return false;
     const u = this.units[index];
 
     // A road-bound platform doesn't get a straight line to anywhere. Its order is expanded into an
@@ -2764,7 +2778,7 @@ export class UnitField {
   /** Send an idle platform to a patrol point — a route with no order attached. Unreachable = no-op. */
   private patrolTo(u: Unit, lon: number, lat: number): void {
     const kind = u.kind as PlatformId;
-    if (kind === 'naval' && this.shoreAt(lon, lat) > -60) return;
+    if (WATER_BOUND.has(kind) && this.shoreAt(lon, lat) > -60) return;
     const drive = this.roadRouteFor(kind, u, lon, lat);
     if (drive === null) return; // unreachable this pick — it'll try another next tick
     const [first, ...rest] = drive ?? [{ lon, lat }];
@@ -2845,7 +2859,7 @@ export class UnitField {
     action: RouteAction,
     target?: number,
   ): boolean {
-    if (kind === 'naval' && this.shoreAt(lon, lat) > -60) return false;
+    if (WATER_BOUND.has(kind) && this.shoreAt(lon, lat) > -60) return false;
     const u = this.units[index];
     if (!u || u.dead) return false;
     // Reassignment starts from a clean sheet: the old route is dropped before pathing, so a

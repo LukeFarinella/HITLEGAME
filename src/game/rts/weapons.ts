@@ -71,6 +71,9 @@ export const BASIC_ATTACK: Record<UnitKind, Weapon> = {
   biped: { name: 'SERVICE CANNON', kind: 'ranged', rangeM: 950, dmg: 26, periodS: 0.9 },
   quad: { name: 'SIDEARM', kind: 'ranged', rangeM: 700, dmg: 8, periodS: 1.0 },
   interceptor: { name: 'STRIKE LANCE', kind: 'ranged', rangeM: 1500, dmg: 30, periodS: 1.5 },
+  // The picket's gun is the smallest thing that shoots: enough to bully another picket or finish a
+  // worker, nowhere near enough to trade with a hull.
+  usv: { name: 'PICKET GUN', kind: 'ranged', rangeM: 600, dmg: 9, periodS: 0.8 },
   // The hull's gun is the player's basic projectile: it lobs, so it reaches past anything on the
   // shore that could answer it, and it lands late.
   naval: { name: 'DECK GUN', kind: 'projectile', rangeM: 1200, dmg: 22, periodS: 1.1, speedMps: 900, splashM: 90 },
@@ -160,7 +163,7 @@ export const MOUNTS: MountDef[] = [
     blurb: 'Fast rounds, tight burst radius. The projectile that still lands on something moving.',
     cost: 150,
     weapon: { name: 'MISSILE RACK', kind: 'projectile', rangeM: 1300, dmg: 32, periodS: 1.5, speedMps: 1400, splashM: 60 },
-    fits: ['quad', 'interceptor', 'drone', 'walker', 'naval'],
+    fits: ['quad', 'interceptor', 'drone', 'walker', 'naval', 'usv'],
     hotkey: '4',
   },
   {
@@ -178,7 +181,7 @@ export const MOUNTS: MountDef[] = [
     blurb: 'A fast, wide burst built for things in the air. Unpleasant at any altitude, lethal at cruise.',
     cost: 120,
     weapon: { name: 'FLAK BATTERY', kind: 'ranged', rangeM: 1100, dmg: 14, periodS: 0.5 },
-    fits: ['dog', 'spider', 'biped', 'walker', 'naval', 'quad'],
+    fits: ['dog', 'spider', 'biped', 'walker', 'naval', 'quad', 'usv'],
     hotkey: '6',
   },
 ];

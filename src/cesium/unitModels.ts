@@ -444,6 +444,32 @@ const INTERCEPTOR_HARDPOINT: Hardpoint = { x: 0, y: -11, z: 5 };
 /** Dorsal mount on the disc, just off the dome. */
 const DISC_HARDPOINT: Hardpoint = { x: 0, y: 0, z: 22 };
 
+/**
+ * USV — a small unmanned surface vessel. The cheap picket boat, and the water's answer to the kite.
+ *
+ * A flat planing hull with a hard chine, a low sensor mast and a single pintle forward. Deliberately
+ * a fraction of the littoral's size: against the trimaran's outriggers and superstructure this reads
+ * as something you field four of, which is the point of it. ~14 m before scale.
+ */
+function usvMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  const L = 7;
+  const W = 2.2;
+  const D = 1.4;
+  m.box(0, -1, D / 2, W * 2, (L - 1.5) * 2, D); // hull
+  // Planing bow: a wedge rather than a point, so it reads as a small fast boat.
+  m.tri([W, L - 4, 0], [0, L, D], [W, L - 4, D]);
+  m.tri([-W, L - 4, D], [0, L, D], [-W, L - 4, 0]);
+  m.tri([W, L - 4, D], [0, L, D], [-W, L - 4, D]);
+  m.box(0, -2.5, D + 1.1, 2.6, 4.5, 2.2); // low deckhouse
+  m.strut([0, -2.5, D + 2.2], [0, -2.5, D + 6], 0.35); // sensor mast
+  m.box(0, 2.6, D + 0.9, 1.5, 2.4, 1.4); // forward pintle mount
+  return m.build();
+}
+
+/** Foredeck, beside the pintle. */
+const USV_HARDPOINT: Hardpoint = { x: 0, y: 2.6, z: 3.6 };
+
 // ---- Millstone chassis ---------------------------------------------------------------------------
 //
 // The rival army, and deliberately a different DESIGN LANGUAGE rather than a palette swap of the
@@ -715,6 +741,30 @@ export function aviationMesh(): ModelMesh {
 }
 
 /**
+ * Harbor: a quay with two mooring fingers reaching out, a boat shed and a pair of gantry cranes.
+ *
+ * Faces +y like everything else, and the fingers point that way on purpose — the building's own
+ * silhouette says which side the water is on, which matters because it is the one facility whose
+ * placement is decided by the coastline rather than by your base.
+ */
+export function harborMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  m.box(0, -14, 6, 62, 30, 12); // quay apron
+  m.box(-16, -18, 18, 26, 20, 12); // boat shed
+  m.box(-16, -18, 26, 28, 22, 5); // shed roof overhang
+  // Two mooring fingers reaching into the water.
+  for (const sx of [-20, 20]) m.box(sx, 12, 4, 8, 44, 5);
+  m.box(0, 30, 5, 48, 6, 4); // outer breakwater tying the fingers together
+  // Gantry cranes on the apron: a leg pair and a jib cantilevered out over the water.
+  for (const sx of [-4, 22]) {
+    m.box(sx, -8, 22, 4, 4, 32);
+    m.box(sx, -20, 22, 4, 4, 32);
+    m.box(sx, 2, 40, 5, 40, 4); // jib
+  }
+  return m.build();
+}
+
+/**
  * Special facility: a heavy assembly bay — a broad windowless block with a gantry crane spanning it
  * and two buttress towers. Reads as the biggest, most industrial thing in the base, which is what
  * builds the walker.
@@ -742,6 +792,7 @@ export type UnitKind =
   | 'naval'
   | 'interceptor'
   | 'skid'
+  | 'usv'
   // Millstone's chassis. Disjoint from the player's by design — the two armies no longer share
   // hardware, so a mesh kind identifies both the machine AND whose it is.
   | 'drudge'
@@ -761,7 +812,7 @@ export const MILLSTONE_KINDS: UnitKind[] = [
 
 /** The player's chassis, in roster order. */
 export const GORGON_KINDS: UnitKind[] = [
-  'drone', 'dog', 'quad', 'spider', 'biped', 'walker', 'naval', 'interceptor', 'skid',
+  'drone', 'dog', 'quad', 'spider', 'biped', 'walker', 'naval', 'interceptor', 'skid', 'usv',
 ];
 
 /** Every kind, in one place — iterate this instead of re-listing the literals. */
@@ -798,6 +849,7 @@ export const UNIT_MESHES: Record<UnitKind, ModelMesh> = {
   naval: navalMesh(),
   interceptor: interceptorMesh(),
   skid: skidMesh(),
+  usv: usvMesh(),
   drudge: drudgeMesh(),
   ripper: ripperMesh(),
   flenser: flenserMesh(),
@@ -831,6 +883,7 @@ export const UNIT_SCALE: Record<UnitKind, number> = {
   naval: 3, // ~180 m — reads as a ship against the 78 m ground vehicles
   interceptor: 3, // ~210 m span, between a ground vehicle and the disc
   skid: 2.4, // ~40 m — a small work vehicle, a touch bigger than the dog
+  usv: 2.6, // ~36 m — a fifth of the littoral, so a picket reads as small next to a hull
   // Millstone, each matched to the Gorgon unit it is sent against so the two rosters field at the
   // same read. Where a pair differs it is because the machine is genuinely a different size, not
   // because the scale is doing the work.
@@ -982,6 +1035,27 @@ const PLATFORM_ICONS: Partial<Record<UnitKind, HTMLCanvasElement>> = {
     g.beginPath();
     g.rect(-10, -10, 20, 20);
     g.fill();
+    g.stroke();
+  }),
+  /**
+   * USV: one small hull, no outriggers, with a mast tick.
+   *
+   * Deliberately the littoral's silhouette with the outriggers removed and shrunk — at 24 px the
+   * difference between "hull with wings" and "hull alone" is the whole read, and it maps to the
+   * actual distinction between the two boats.
+   */
+  usv: iconCanvas((g) => {
+    g.beginPath();
+    g.moveTo(0, -14);
+    g.lineTo(4.5, -3);
+    g.lineTo(4.5, 11);
+    g.lineTo(-4.5, 11);
+    g.lineTo(-4.5, -3);
+    g.closePath();
+    g.fill();
+    g.stroke();
+    g.beginPath();
+    g.moveTo(0, 4); g.lineTo(0, -8); // mast
     g.stroke();
   }),
   // Skidsteer: a boxy body with a bucket reaching forward (up), and four wheels.
@@ -1177,4 +1251,5 @@ export const HARDPOINTS: Partial<Record<UnitKind, Hardpoint>> = {
   walker: WALKER_HARDPOINT,
   naval: NAVAL_HARDPOINT,
   interceptor: INTERCEPTOR_HARDPOINT,
+  usv: USV_HARDPOINT,
 };
