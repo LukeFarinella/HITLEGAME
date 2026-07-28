@@ -54,7 +54,10 @@ import { showTitle, setTitleTerritory } from '../ui/title';
 import { RtsGame } from '../game/rts/rtsGame';
 import { RtsBuildLayer, type BuildSite } from './rtsBuild';
 import { RtsCommandBar, type CommandContext } from '../ui/rtsCommand';
-import { STRUCTURES, BUILDABLE, BUILD_RULES, metresBetween, type StructureType, type Structure } from '../game/rts/structures';
+import {
+  STRUCTURES, BUILDABLE, BUILD_RULES, ABILITY_BY_ID, ORBITAL, abilitiesFrom, metresBetween,
+  type AbilityId, type StructureType, type Structure,
+} from '../game/rts/structures';
 import { RTS_UNITS, unitsFrom, producesUnits, type RtsUnitId } from '../game/rts/units';
 import { RESEARCH, researchFrom, type ResearchId } from '../game/rts/research';
 import { RTS_COMBAT, armamentOf } from '../game/rts/combat';
@@ -1291,14 +1294,21 @@ scene.preUpdate.addEventListener(() => {
       // Advance any structures a worker is building on site.
       rtsConstructionTick(dt);
       rtsGame.tickResearch(dt);
+      rtsGame.tickAbilities(dt);
       runMillstone(dt);
       runRtsCombat(dt);
       rtsGame.tickUnits(dt); // shield/energy regen
       // Traffic-incident economy: obelisks catch violations; auto-fine collects them, else they ping.
       runRtsViolations(dt);
       updateRtsHud();
-      // The queue progress bar animates, so repaint the card while the selected building is building.
-      if (rtsSelectedStructure && rtsGame.queueAt(rtsSelectedStructure.id).length) rtsCmd?.render();
+      // The queue progress bar animates and an ability chip counts its cooldown down, so repaint the
+      // card while the selected building has either running.
+      if (
+        rtsSelectedStructure &&
+        (rtsGame.queueAt(rtsSelectedStructure.id).length || rtsGame.abilityBusy(rtsSelectedStructure.id))
+      ) {
+        rtsCmd?.render();
+      }
       rebuildRoster();
       refreshRoster();
       updateRouteLayer();
@@ -2356,6 +2366,9 @@ function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
     },
     onFit: (index, slot, mount) => fitMountOn(index, slot, mount),
     fitBlocker: (index, slot, mount) => rtsGame?.fitBlocker(index, slot, mount) ?? null,
+    onAbility: (id) => beginAbility(id),
+    abilityBlocker: (sid, id) => rtsGame?.abilityBlocker(sid, id) ?? null,
+    aiming: () => rtsAiming?.id ?? null,
   });
   rtsCmd.show();
   // The command card greys chips by affordability and shows queue progress, so it repaints on every
@@ -2377,6 +2390,7 @@ function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
 /** Tear the build layer + command bar down at the end of a match. */
 function teardownRtsBuild(): void {
   rtsPlacing = null;
+  rtsAiming = null;
   rtsSelectedStructure = null;
   rtsUnitCard?.hide();
   rtsUnitCard = null;
@@ -2410,7 +2424,9 @@ function teardownRtsBuild(): void {
 function rtsCommandContext(): CommandContext {
   if (
     rtsSelectedStructure &&
-    (producesUnits(rtsSelectedStructure.type) || researchFrom(rtsSelectedStructure.type).length > 0)
+    (producesUnits(rtsSelectedStructure.type) ||
+      researchFrom(rtsSelectedStructure.type).length > 0 ||
+      abilitiesFrom(rtsSelectedStructure.type).length > 0)
   ) {
     return { kind: 'produce', structureId: rtsSelectedStructure.id, structureType: rtsSelectedStructure.type };
   }
@@ -2668,6 +2684,7 @@ const STRUCT_GLYPH: Record<StructureType, string> = {
   obelisk: '▲',
   robotics: 'R',
   harbor: 'H',
+  skyhook: 'K',
   aviation: 'V',
   tech: 'T',
   supply: 'D',
@@ -2678,6 +2695,7 @@ const STRUCT_ACCENT: Record<StructureType, string> = {
   obelisk: '#E23A2E',
   robotics: '#E7A13B',
   harbor: '#3F8FA0',
+  skyhook: '#8FD8F0',
   aviation: '#3FA0E0',
   tech: '#8B6FE0',
   supply: '#3FBF6F',
@@ -2861,9 +2879,89 @@ function computeRtsSites(): BuildSite[] {
   return sites;
 }
 
+// ---- structure abilities (orbital strike) -------------------------------------------------------
+//
+// An ability is aimed the way a building is placed: the chip arms a cursor, the cursor shows what the
+// order would do, and the next left click commits it. Sharing that shape with placement is deliberate
+// — the player already knows this interaction, and an area weapon is exactly the kind of order that
+// should have a visible footprint and a way out of it before you commit.
+
+/** Arm the targeting cursor for an ability, if the building can fire it. */
+function beginAbility(id: AbilityId): void {
+  if (!rtsGame || !rtsSelectedStructure) return;
+  const def = ABILITY_BY_ID.get(id);
+  if (!def) return;
+  const blocked = rtsGame.abilityBlocker(rtsSelectedStructure.id, id);
+  if (blocked) {
+    sound.play('denied');
+    toast(blocked === 'INSUFFICIENT FUNDS' ? `◈ NEED ${def.cost} · HAVE ${rtsGame.money}` : `◈ ${blocked}`);
+    return;
+  }
+  cancelPlacement(); // one armed cursor at a time
+  rtsAiming = { id, structureId: rtsSelectedStructure.id };
+  sound.play('click');
+  toast(`◈ ${def.name} · PICK GROUND · RMB CANCELS`);
+  rtsCmd?.render();
+}
+
+/** Drop the targeting cursor without firing. */
+function cancelAiming(): void {
+  if (!rtsAiming) return;
+  rtsAiming = null;
+  rtsBuild?.hideGhost();
+  rtsCmd?.render();
+}
+
+/**
+ * Show what the armed ability would hit under the cursor — the splash ring, at its true radius.
+ *
+ * Drawn with the placement ghost on purpose: this weapon's whole character is that the ring is what
+ * matters and the ring does not care whose units are in it, so the player should be looking at the
+ * ring over their own army before they click, not reading a number off a chip.
+ */
+function updateAimGhost(screen: Cesium.Cartesian2): void {
+  if (!rtsAiming || !rtsBuild) return;
+  const g = groundAt(screen);
+  if (!g) {
+    rtsBuild.hideGhost();
+    return;
+  }
+  rtsBuild.showGhost(g.lon, g.lat, ORBITAL.splashM, true);
+}
+
+/** Commit the armed ability at a click: charge for it, and put the round in the air. */
+function fireAbilityAt(screen: Cesium.Cartesian2): void {
+  if (!rtsAiming || !rtsGame || !unitField) return;
+  const { id, structureId } = rtsAiming;
+  const def = ABILITY_BY_ID.get(id)!;
+  const g = groundAt(screen);
+  if (!g) {
+    sound.play('denied');
+    toast('◈ NO GROUND UNDER CURSOR');
+    return;
+  }
+  // Re-checked at the click, not just when the chip was pressed: the tether can have fallen, or the
+  // money been spent elsewhere, in the seconds you spent choosing where to put it.
+  const blocked = rtsGame.abilityBlocker(structureId, id);
+  if (blocked) {
+    sound.play('denied');
+    toast(`◈ ${blocked === 'NO BUILDING' ? `${STRUCTURES[def.from].name} GONE` : blocked}`);
+    cancelAiming();
+    return;
+  }
+  if (!rtsGame.fireAbility(structureId, id)) return;
+  unitField.callOrbitalStrike(g.lon, g.lat, ORBITAL);
+  sound.play('orderLethal');
+  const fall = Math.round(ORBITAL.dropFromM / ORBITAL.speedMps);
+  toast(`◈ ROUND AWAY · IMPACT IN ${fall}s · CLEAR THE RING`);
+  cancelAiming();
+  updateRtsHud();
+}
+
 /** Arm placement for a structure type, if it can be afforded. */
 function beginPlacement(type: StructureType): void {
   if (!rtsGame || !rtsBuild) return;
+  cancelAiming(); // one armed cursor at a time
   // Tech-tree gate first: "you can't build this yet" outranks "you can't afford it".
   const gate = rtsGame.structureBlocker(type);
   if (gate) {
@@ -4626,6 +4724,15 @@ let rtsSites: BuildSite[] = [];
 const rtsBuiltSites = new Set<number>();
 /** The structure currently being placed, or null. When set, clicks place instead of selecting. */
 let rtsPlacing: StructureType | null = null;
+/**
+ * The ability currently being AIMED, and the building that will fire it.
+ *
+ * Shaped exactly like {@link rtsPlacing} — an armed cursor that owns the next left click — because it
+ * is the same interaction: pick ground, commit, or right-click out of it. Carrying the structure id
+ * means the strike is answerable to the tether that ordered it even if you click somewhere else in
+ * between and lose the selection.
+ */
+let rtsAiming: { id: AbilityId; structureId: number } | null = null;
 /** The selected structure (its command card is shown), or null. */
 let rtsSelectedStructure: Structure | null = null;
 /** The RTS unit card — portrait/HP/shield/energy for your own machines. Null outside a match. */
@@ -5184,6 +5291,11 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.MotionEvent) => {
     updatePlacementGhost(m.endPosition);
     return;
   }
+  // Same for an armed ability: the ring tracks the cursor at the radius the strike will actually have.
+  if (rtsAiming) {
+    updateAimGhost(m.endPosition);
+    return;
+  }
   // theater: draw the marquee box while dragging
   if (marqueeStart) {
     if (Cesium.Cartesian2.distance(marqueeStart, m.endPosition) > MARQUEE_MIN) marqueeActive = true;
@@ -5206,7 +5318,7 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.MotionEvent) => {
 
 // LMB down: begin a possible marquee (theater, desktop — mobile LMB pans the map).
 handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
-  if (rtsPlacing) return; // in placement mode LMB places, not marquees
+  if (rtsPlacing || rtsAiming) return; // an armed cursor owns the click: it places or fires, never marquees
   if (mode !== 'theater' || IS_MOBILE) return;
   marqueeStart = Cesium.Cartesian2.clone(m.position);
   marqueeActive = false;
@@ -5233,6 +5345,10 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
 handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
   if (rtsPlacing) {
     tryPlaceAt(m.position);
+    return;
+  }
+  if (rtsAiming) {
+    fireAbilityAt(m.position);
     return;
   }
   if (mode === 'globe') {
@@ -5283,9 +5399,11 @@ function groundAt(p: Cesium.Cartesian2): { lon: number; lat: number } | undefine
 }
 
 const onRightDown = (m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
-  // Right-click cancels a placement in progress, the way an RTS drops the build cursor.
-  if (rtsPlacing) {
+  // Right-click cancels a placement in progress, the way an RTS drops the build cursor. An armed
+  // ability drops the same way — a 300-credit strike must be abandonable without firing it.
+  if (rtsPlacing || rtsAiming) {
     cancelPlacement();
+    cancelAiming();
     rightDownAt = null;
     return;
   }
@@ -6091,7 +6209,10 @@ window.addEventListener('keydown', (e) => {
   // RTS build hotkeys + placement cancel take the key before anything else in a match.
   if (rtsGame) {
     if (e.key === 'Escape') {
+      // Back out of an armed cursor first. Escape only ends the match when there is nothing else to
+      // escape from — otherwise aiming a strike and changing your mind would quit the game.
       if (rtsPlacing) cancelPlacement();
+      else if (rtsAiming) cancelAiming();
       else endRtsMatch();
       return;
     }
@@ -6107,6 +6228,11 @@ window.addEventListener('keydown', (e) => {
         const r = researchFrom(ctx.structureType).find((x) => x.hotkey === k);
         if (r) {
           startResearchAt(r.id);
+          return;
+        }
+        const a = abilitiesFrom(ctx.structureType).find((x) => x.hotkey === k);
+        if (a) {
+          beginAbility(a.id);
           return;
         }
       } else if (ctx.kind === 'build') {
@@ -6195,6 +6321,12 @@ if (import.meta.env.DEV) {
     showRtsEnd,
     RTS_COMBAT,
     startResearchAt,
+    beginAbility,
+    fireAbilityAt,
+    cancelAiming,
+    get rtsAiming() {
+      return rtsAiming;
+    },
     openViolationMenu,
     inTheaterObeliskSites,
     get rtsConstruction() {

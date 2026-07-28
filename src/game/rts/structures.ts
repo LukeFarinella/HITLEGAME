@@ -25,13 +25,16 @@ export type StructureType =
   | 'obelisk'
   | 'robotics'
   | 'harbor'
+  | 'skyhook'
   | 'aviation'
   | 'tech'
   | 'supply'
   | 'special';
 
 /** Placeable structure types, in command-bar order. The Nexus is never built — you start with it. */
-export const BUILDABLE: StructureType[] = ['obelisk', 'supply', 'robotics', 'harbor', 'tech', 'aviation', 'special'];
+export const BUILDABLE: StructureType[] = [
+  'obelisk', 'supply', 'robotics', 'harbor', 'tech', 'aviation', 'special', 'skyhook',
+];
 
 export interface StructureDef {
   type: StructureType;
@@ -146,6 +149,21 @@ export const STRUCTURES: Record<StructureType, StructureDef> = {
     buildTimeS: 14,
     requires: { obelisks: 3 },
   },
+  skyhook: {
+    type: 'skyhook',
+    name: 'SKYHOOK',
+    blurb: 'Orbital tether. Unlocks the disc observer and the giga walker, and calls orbital bombardment on ground you pick.',
+    cost: 800,
+    maxHp: 950,
+    placement: 'free',
+    hotkey: 'K',
+    footprintM: 300,
+    buildTimeS: 38,
+    // A SECOND lab hanging off tech, parallel to aviation rather than behind special. That makes it
+    // a real fork in the build: the tether is what turns your top end on, but it competes for the
+    // same money as the aviation-into-special line that produces the things it unlocks.
+    requires: { structure: 'tech' },
+  },
   special: {
     type: 'special',
     name: 'SPECIAL FACILITY',
@@ -185,6 +203,63 @@ export const BUILD_RULES = {
   SHORE_DIST_M: 700,
   /** No structure may be built closer than this to another — basic spacing so bases don't stack. */
   MIN_SPACING_M: 260,
+};
+
+/**
+ * A STRUCTURE ABILITY — something a building does on command, rather than something it produces.
+ *
+ * Kept as data next to the buildings for the same reason units are: the command card reads
+ * {@link abilitiesFrom} and needs no knowledge of what any particular ability means. The scene owns
+ * what firing one actually does.
+ */
+export type AbilityId = 'orbital';
+
+export interface AbilityDef {
+  id: AbilityId;
+  name: string;
+  blurb: string;
+  /** Money per use. */
+  cost: number;
+  /** Seconds before the same building can fire it again. */
+  cooldownS: number;
+  /** The building that offers it. */
+  from: StructureType;
+  hotkey: string;
+}
+
+export const ABILITIES: AbilityDef[] = [
+  {
+    id: 'orbital',
+    name: 'ORBITAL STRIKE',
+    blurb:
+      'Drops a round from the tether onto ground you pick. Wide, heavy, and it does not distinguish — everything standing in the ring is in it, including yours.',
+    cost: 300,
+    cooldownS: 50,
+    from: 'skyhook',
+    hotkey: 'B',
+  },
+];
+
+/** The abilities a building offers, in catalog order — what its command card adds under the units. */
+export function abilitiesFrom(type: StructureType): AbilityDef[] {
+  return ABILITIES.filter((a) => a.from === type);
+}
+
+export const ABILITY_BY_ID = new Map<AbilityId, AbilityDef>(ABILITIES.map((a) => [a.id, a]));
+
+/**
+ * Orbital strike numbers. Separate from the ability's cost/cooldown because these are the WEAPON,
+ * and the weapon is what balance work touches.
+ *
+ * The round falls from 120 km, which is what gives it its tell: several seconds of a bright point
+ * dropping out of the sky before anything happens, long enough to walk out of if you notice.
+ */
+export const ORBITAL = {
+  dmg: 320,
+  splashM: 420,
+  /** Metres per second on the way down. 120 km at 12 km/s is a ten-second warning. */
+  speedMps: 12_000,
+  dropFromM: 120_000,
 };
 
 /** A built (or building) structure. Match state — position, type, health. */

@@ -1636,6 +1636,11 @@ body.dev-open #c2-tasking { display: none; }
 .grc-chip.type-supply .grc-key { background: var(--ok); }
 .grc-chip.type-special .grc-key { background: #e0553f; }
 .grc-chip.type-harbor .grc-key { background: #3f8fa0; }
+.grc-chip.type-skyhook .grc-key { background: #8fd8f0; }
+/* a building ability is the one chip that fires a weapon, so it reads hot rather than as a purchase */
+.grc-chip.cat-ability .grc-key { background: #e0553f; }
+.grc-chip.cat-ability { border-bottom-color: #e0553f; }
+.grc-chip.cat-ability .grc-cost { color: #ff9a6a; }
 /* loadout card: hardpoint slots read as sockets, mounts as the things that go in them */
 .grc-chip.cat-slot .grc-key { background: var(--bone); }
 .grc-chip.cat-slot { border-style: dashed; }

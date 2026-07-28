@@ -13,7 +13,7 @@
  * expansion the player builds at a predetermined site and rebuilds if it falls.
  */
 
-import { STRUCTURES, type Structure, type StructureType } from './structures';
+import { ABILITY_BY_ID, STRUCTURES, type AbilityId, type Structure, type StructureType } from './structures';
 import { RTS_UNITS, RTS_REGEN, type RtsUnitId } from './units';
 import { RESEARCH, type ResearchId } from './research';
 import { hardpointsOf } from './combat';
@@ -92,6 +92,16 @@ export class RtsGame {
   /** Every fielded unit's live state, keyed by its UnitField index. */
   readonly unitStates = new Map<number, RtsUnitState>();
 
+  /**
+   * Ability cooldowns in seconds remaining, keyed by the structure that fired and then the ability.
+   *
+   * Per-BUILDING, not per-player: two skyhooks give you two independent strikes, which is the whole
+   * reason a second one is worth 800. Keyed by structure id so a tether's fall takes its cooldown
+   * with it — and, more to the point, so rebuilding does not hand you a fresh strike for free while
+   * the old one was still charging, because the new building's id is not the dead one's.
+   */
+  private abilityCd = new Map<number, Map<AbilityId, number>>();
+
   /** Research completed — a set of standing capabilities (e.g. auto-fine). */
   private _researched = new Set<ResearchId>();
   /** Research in progress, keyed by the researching structure's id: {id, remaining, total}. */
@@ -140,6 +150,7 @@ export class RtsGame {
     this.production.delete(id);
     this.rally.delete(id);
     this.researching.delete(id);
+    this.abilityCd.delete(id);
     this.changed();
     return s;
   }
@@ -397,6 +408,73 @@ export class RtsGame {
   /** The research a structure is working on, for the command card's progress. */
   researchAt(structureId: number): { id: ResearchId; remainingS: number; totalS: number } | undefined {
     return this.researching.get(structureId);
+  }
+
+  // ---- structure abilities ---------------------------------------------------------------------
+  //
+  // Something a building DOES on command, rather than something it produces or researches. The match
+  // owns the money and the cooldown; what the ability means in the world is the scene's (an orbital
+  // strike is a round dropped from 120 km, and only the scene knows where the ground is).
+
+  /** Seconds left before a building can fire an ability again. 0 when it's ready. */
+  abilityCooldown(structureId: number, id: AbilityId): number {
+    return this.abilityCd.get(structureId)?.get(id) ?? 0;
+  }
+
+  /** Whether any ability on this building is still charging — drives the card's live repaint. */
+  abilityBusy(structureId: number): boolean {
+    const m = this.abilityCd.get(structureId);
+    if (!m) return false;
+    for (const s of m.values()) if (s > 0) return true;
+    return false;
+  }
+
+  /** Why a building can't fire an ability right now, or null. */
+  abilityBlocker(structureId: number, id: AbilityId): string | null {
+    const def = ABILITY_BY_ID.get(id);
+    if (!def) return 'UNKNOWN';
+    if (!this.structures.some((s) => s.id === structureId && s.type === def.from)) return 'NO BUILDING';
+    const cd = this.abilityCooldown(structureId, id);
+    if (cd > 0) return `CHARGING ${Math.ceil(cd)}s`;
+    if (this._money < def.cost) return 'INSUFFICIENT FUNDS';
+    return null;
+  }
+
+  /**
+   * Fire an ability: charge for it and start its cooldown.
+   *
+   * Charging HERE, before the scene does anything, is deliberate — the money goes when the order is
+   * given, so a strike you aimed and paid for is spent whether or not anything was standing in it.
+   */
+  fireAbility(structureId: number, id: AbilityId): boolean {
+    if (this.abilityBlocker(structureId, id)) return false;
+    const def = ABILITY_BY_ID.get(id)!;
+    this._money -= def.cost;
+    const m = this.abilityCd.get(structureId) ?? new Map<AbilityId, number>();
+    m.set(id, def.cooldownS);
+    this.abilityCd.set(structureId, m);
+    this.changed();
+    return true;
+  }
+
+  /** Run down every ability cooldown. */
+  tickAbilities(dt: number): void {
+    if (!this.abilityCd.size) return;
+    let ready = false;
+    for (const m of this.abilityCd.values()) {
+      for (const [id, s] of m) {
+        const left = s - dt;
+        if (left <= 0) {
+          m.delete(id);
+          ready = true;
+        } else {
+          m.set(id, left);
+        }
+      }
+    }
+    // Only announce the transition to READY. Announcing every frame of a 50-second charge would
+    // repaint the whole command card fifty times a second for a number nobody is reading.
+    if (ready) this.changed();
   }
 
   /** Banked money, floored — fractional accrual is real but never shown as a fraction. */

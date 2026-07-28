@@ -15,8 +15,8 @@ import type { StructureType } from './structures';
  *   NEXUS      worker
  *   ROBOTICS   quadruped · kite (behind the tech facility)
  *   HARBOR     usv · littoral (behind the tech facility)
- *   AVIATION   interceptor · disc observer
- *   SPECIAL    arachnid · marshal · giga walker
+ *   AVIATION   interceptor · disc observer (behind the skyhook)
+ *   SPECIAL    arachnid · marshal · giga walker (behind the skyhook)
  *
  * Producer is deliberately NOT the same axis as {@link UnitCategory}: a kite is an aerial unit that
  * happens to roll out of robotics, and an arachnid is infantry that happens to need the special
@@ -26,8 +26,10 @@ import type { StructureType } from './structures';
  * NOTE ON TECH GATES. `requiresStructure` is only for a unit whose producer can exist BEFORE the
  * gate. The chain is 3 obelisks → data center → robotics → tech → aviation → special, so anything
  * produced by aviation or special is already past tech and needs no explicit gate — the facility
- * that builds it IS the gate. The kite and the littoral are the two that carry one, because robotics
- * and the harbor both sit on the data-center rung, before tech.
+ * that builds it IS the gate. The kite and the littoral carry one because robotics and the harbor
+ * both sit on the data-center rung, before tech. The disc and the giga carry one for a different
+ * reason: the SKYHOOK is a second lab hanging off tech, parallel to aviation, so aviation and special
+ * can both exist without it. It is the top end that is gated, not the buildings that make it.
  *
  * Both producers on that rung are shaped the same way on purpose: one cheap unit you can have
  * immediately, and one real one the tech facility unlocks. Opening a harbor early buys you a picket
@@ -195,12 +197,14 @@ export const RTS_UNITS: Record<RtsUnitId, RtsUnitDef> = {
     buildTimeS: 40,
     supply: 6,
     producedBy: 'aviation',
+    // Aviation can stand without the tether, so the disc needs the gate named explicitly.
+    requiresStructure: 'skyhook',
     hotkey: 'O',
   },
 
   // ---- special: the heavy line and the capstone -------------------------------------------------
-  // Everything here is already two rungs past the tech facility (special ← aviation ← tech), so
-  // none of it carries a requiresStructure — the facility that builds it is the gate.
+  // The arachnid and the marshal are already two rungs past tech (special ← aviation ← tech) and so
+  // need no explicit gate. The giga does, because the skyhook is off to the side of that chain.
   arachnid: {
     id: 'arachnid',
     name: 'ARACHNID',
@@ -241,6 +245,8 @@ export const RTS_UNITS: Record<RtsUnitId, RtsUnitDef> = {
     buildTimeS: 45,
     supply: 8,
     producedBy: 'special',
+    // Same as the disc: the special facility is reachable without the tether, the walker is not.
+    requiresStructure: 'skyhook',
     hotkey: 'G',
   },
 };

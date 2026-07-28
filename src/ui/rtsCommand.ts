@@ -1,4 +1,4 @@
-import { STRUCTURES, BUILDABLE, type StructureType } from '../game/rts/structures';
+import { STRUCTURES, BUILDABLE, abilitiesFrom, type AbilityId, type StructureType } from '../game/rts/structures';
 import { RTS_UNITS, unitsFrom, type RtsUnitId } from '../game/rts/units';
 import { researchFrom, type ResearchId } from '../game/rts/research';
 import { mountsFor, MOUNT_BY_ID, type RtsLoadout, type WeaponId } from '../game/rts/weapons';
@@ -11,6 +11,7 @@ import type { UnitKind } from '../cesium/unitModels';
  *
  *   worker selected      → BUILD chips (place a structure)
  *   producing building   → PRODUCE chips + the live build queue for that building
+ *   building w/ abilities → ABILITY chips, showing their cooldown in place of a price
  *   armed unit selected  → LOADOUT: its hardpoints, and the weapons that fit them
  *   anything else        → empty
  *
@@ -57,6 +58,12 @@ export interface RtsCommandHooks {
   onFit(unitIndex: number, slot: number, mount: WeaponId): void;
   /** A reason this mount can't go in this slot (cost, fit, already there), or null. */
   fitBlocker(unitIndex: number, slot: number, mount: WeaponId): string | null;
+  /** A structure ability was chosen — the scene takes over (an aimed one opens a targeting cursor). */
+  onAbility(id: AbilityId): void;
+  /** A reason this ability can't fire (charging, cost), or null. */
+  abilityBlocker(structureId: number, id: AbilityId): string | null;
+  /** The ability currently being AIMED, if any — its chip reads as armed, like a build ghost. */
+  aiming(): AbilityId | null;
 }
 
 export class RtsCommandBar {
@@ -144,10 +151,28 @@ export class RtsCommandBar {
       });
     });
 
+    // Ability chips (the Skyhook): a thing the building DOES, on a cooldown rather than a queue.
+    // Charging shows the seconds left in place of the price, so the chip is the cooldown readout too.
+    const aiming = this.hooks.aiming();
+    const abilities = abilitiesFrom(structureType).map((a) => {
+      const blocked = this.hooks.abilityBlocker(structureId, a.id);
+      const locked = blocked && blocked !== 'INSUFFICIENT FUNDS' ? blocked : null;
+      return this.chip({
+        cls: `cat-ability${aiming === a.id ? ' active' : ''}${locked ? ' locked' : money >= a.cost ? '' : ' broke'}`,
+        hotkey: a.hotkey,
+        name: a.name,
+        cost: a.cost,
+        locked,
+        title: `${a.name} — ${a.blurb} · ${a.cooldownS}s cooldown`,
+        onClick: () => this.hooks.onAbility(a.id),
+      });
+    });
+
     const children: (HTMLElement | Node)[] = [
       this.label(STRUCTURES[structureType].name.replace(' FACILITY', '')),
       ...chips,
       ...research,
+      ...abilities,
     ];
     const queue = this.hooks.queueOf(structureId);
     if (queue.length) children.push(this.queueStrip(queue));

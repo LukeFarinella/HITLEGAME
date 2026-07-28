@@ -765,6 +765,30 @@ export function harborMesh(): ModelMesh {
 }
 
 /**
+ * Skyhook: an orbital tether. A broad anchor pad, a mast that tapers as it climbs, four guy cables
+ * raking out to ground anchors, and a climber car partway up.
+ *
+ * Built to be the TALLEST thing in the base by a wide margin, and to run off the top of its own
+ * silhouette — the tether is supposed to read as going somewhere the frame doesn't reach, which is
+ * the whole idea of the building.
+ */
+export function skyhookMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  m.box(0, 0, 5, 46, 46, 10); // anchor pad
+  m.box(0, 0, 13, 30, 30, 8); // machinery deck
+  // The mast: stacked boxes narrowing as they climb, so it tapers without needing a cone.
+  const segs: [number, number][] = [[26, 9], [46, 7], [68, 5.5], [92, 4], [118, 3]];
+  for (const [z, w] of segs) m.box(0, 0, z, w, w, z === 118 ? 30 : 22);
+  // Guy cables from high on the mast out to four ground anchors.
+  for (const [sx, sy] of [[1, 1], [1, -1], [-1, 1], [-1, -1]] as [number, number][]) {
+    m.strut([sx * 2, sy * 2, 70], [sx * 21, sy * 21, 2], 0.9, 0.5);
+    m.box(sx * 21, sy * 21, 3, 6, 6, 6); // anchor block
+  }
+  m.box(0, 5, 54, 9, 9, 7); // climber car, riding the mast
+  return m.build();
+}
+
+/**
  * Special facility: a heavy assembly bay — a broad windowless block with a gantry crane spanning it
  * and two buttress towers. Reads as the biggest, most industrial thing in the base, which is what
  * builds the walker.

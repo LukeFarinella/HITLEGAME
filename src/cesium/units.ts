@@ -1765,6 +1765,36 @@ export class UnitField {
     });
   }
 
+  /**
+   * Drop a round on a patch of ground from orbit.
+   *
+   * The same {@link Munition} a gun fires, just with no gun: it enters the world already falling,
+   * from `dropFromM` straight down onto the point, and the ordinary munition pass flies it, lands it
+   * and reports the impact. That reuse is the point — the strike obeys every rule a shell obeys,
+   * including the one that matters, which is that the splash does not check whose side anyone is on.
+   * Aim is fixed at the moment of firing, so the seconds of fall are the warning, and anything that
+   * walks into the ring during them is in it.
+   *
+   * Fired as side 0 (the player's), which spares the player's own STRUCTURES — see stepMunitions.
+   * Units get no such exemption, and neither does the enemy Nexus.
+   */
+  callOrbitalStrike(
+    lon: number,
+    lat: number,
+    o: { dmg: number; splashM: number; speedMps: number; dropFromM: number },
+  ): void {
+    const ground = this.heightAt(lon, lat);
+    this.munitions.push({
+      side: 0,
+      flon: lon, flat: lat, falt: ground + o.dropFromM,
+      tlon: lon, tlat: lat, talt: ground,
+      t: 0,
+      flightS: Math.max(0.5, o.dropFromM / o.speedMps),
+      dmg: o.dmg,
+      splashM: o.splashM,
+    });
+  }
+
   /** Drop every round in the air — a match ending shouldn't rain shells on the next one. */
   clearMunitions(): void {
     this.munitions.length = 0;
