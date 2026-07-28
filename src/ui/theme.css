@@ -1598,6 +1598,8 @@ body.dev-open #c2-tasking { display: none; }
 .grts-sub { margin-top: 3px; font: 600 8.5px/1 var(--mono); letter-spacing: .16em; color: var(--steel); }
 /* the unrest line is a cost, so it reads in the same orange as the rings on the ground */
 .grts-unrest { color: #F27A2E; }
+.grts-auth { color: #6FA8C7; }
+.grts-auth:empty { display: none; }
 .grts-unrest:empty { display: none; }
 
 /* ---- build command bar ---- */
@@ -2105,3 +2107,37 @@ body.dev-open #c2-tasking { display: none; }
 .gro-hint { margin-top: 5px; font: 500 8.5px/1.45 var(--mono); letter-spacing: .04em; color: var(--bone); opacity: .82; }
 .gro-all .gro-name { color: var(--ok); }
 @media (max-width: 900px) { #g-rts-obj { display: none; } }
+
+/* ---- inspection card -------------------------------------------------------------------------
+   A floating sheet at the click. Cool grey rather than the command bar's warm chrome: this is the
+   machine reading a person, not you giving an order. */
+#g-inspect {
+  position: fixed; z-index: 40; width: 292px; max-height: 74vh; overflow-y: auto;
+  background: rgba(9, 10, 12, .96); border: 1px solid var(--gunmetal);
+  border-left: 2px solid #6FA8C7; padding: 9px 11px 10px;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, .55);
+}
+.gi-head { display: flex; flex-direction: column; gap: 3px; padding-bottom: 7px; border-bottom: 1px solid rgba(120, 130, 140, .2); }
+.gi-title { font: 700 10px/1 var(--mono); letter-spacing: .18em; color: var(--bone); }
+.gi-auth { font: 600 8px/1 var(--mono); letter-spacing: .12em; color: #6FA8C7; }
+.gi-refused {
+  margin-top: 8px; padding: 7px 8px; background: rgba(226, 58, 46, .1);
+  border: 1px dashed rgba(226, 58, 46, .5);
+  font: 600 8.5px/1.5 var(--mono); letter-spacing: .06em; color: var(--red);
+}
+.gi-sec { margin-top: 9px; }
+.gi-sec-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font: 700 8px/1 var(--mono); letter-spacing: .2em; color: var(--steel); margin-bottom: 5px;
+}
+.gi-lvl { color: #6FA8C7; letter-spacing: .1em; }
+.gi-row { display: flex; justify-content: space-between; gap: 10px; padding: 2.5px 0; align-items: baseline; }
+.gi-k { font: 500 8.5px/1.35 var(--mono); letter-spacing: .04em; color: var(--steel); flex: none; }
+.gi-v { font: 600 8.5px/1.35 var(--mono); letter-spacing: .04em; color: var(--bone); text-align: right; }
+.gi-note { display: block; font: 500 7.5px/1.3 var(--mono); font-style: normal; color: var(--warn); letter-spacing: .08em; }
+.gi-next {
+  margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(120, 130, 140, .2);
+  display: flex; flex-direction: column; gap: 3px;
+}
+.gi-lock { font: 700 8px/1 var(--mono); letter-spacing: .14em; color: var(--warn); }
+.gi-grants { font: 500 8px/1.45 var(--mono); letter-spacing: .04em; color: var(--steel); }

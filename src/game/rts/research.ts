@@ -41,6 +41,9 @@ export type ResearchId =
   | 'full-survey'
   | 'authority-i'
   | 'authority-ii'
+  | 'authority-iii'
+  | 'authority-iv'
+  | 'authority-v'
   | 'funding-i'
   | 'funding-ii'
   | 'funding-iii'
@@ -85,6 +88,11 @@ export interface ResearchEffects {
   opensAllSites?: boolean;
   /** Obelisks collect their own fines, with no alert to answer. */
   autoFine?: boolean;
+  /**
+   * AUTHORITY LEVEL granted, 1–5. Folded with max() rather than summed — it is a rung on a ladder,
+   * not a quantity. See {@link ./inspect} for what each one lets the operator look at.
+   */
+  authority?: number;
 }
 
 export interface ResearchDef {
@@ -171,29 +179,64 @@ export const RESEARCH: Record<ResearchId, ResearchDef> = {
   },
 
   // ---- ACQUISITIONS · authority -----------------------------------------------------------------
-  // What the company is PERMITTED to do. Each tier is worth more money per fine and costs less
-  // public patience — the two halves of the same argument, which is that a programme nobody has
-  // agreed to is expensive and one everybody has stopped objecting to is not.
+  // The ladder the whole game is an argument about. Each rung buys two things at once: a wider view
+  // of a member of the public (see ./inspect), and a better rate on what you charge them for it —
+  // because a programme nobody has agreed to is expensive to run and one everybody has stopped
+  // objecting to is not. They cost more as they get more invasive, and every one is a prerequisite
+  // for the next, so the arc is a commitment rather than a menu.
   'authority-i': {
     id: 'authority-i',
     name: 'CIVIL AUTHORITY',
-    blurb: 'Municipal enforcement powers. Fines pay 35% more, and the public minds the data centers rather less.',
-    cost: 300,
-    timeS: 28,
+    blurb: 'Municipal enforcement powers. Scan VEHICLES — plate, class, bearing — and charge them. The public on foot remains none of your business.',
+    cost: 250,
+    timeS: 24,
     producedBy: 'acquisitions',
     hotkey: 'A',
-    effects: { fineMult: 1.35, unrestMult: 0.85 },
+    effects: { authority: 1, fineMult: 1.25, unrestMult: 0.92 },
   },
   'authority-ii': {
     id: 'authority-ii',
-    name: 'EMERGENCY POWERS',
-    blurb: 'Standing emergency authority. Half again on top of civil, and the objections mostly stop.',
+    name: 'GAIT ANALYSIS',
+    blurb: 'Identify people on foot by how they walk. Pedestrians become scannable — and, for the first time, fineable.',
+    cost: 400,
+    timeS: 30,
+    producedBy: 'acquisitions',
+    hotkey: 'G',
+    requires: 'authority-i',
+    effects: { authority: 2, fineMult: 1.2, unrestMult: 0.94 },
+  },
+  'authority-iii': {
+    id: 'authority-iii',
+    name: 'FACIAL RECOGNITION',
+    blurb: 'Put a name to a contact, and read the net’s own assessment of them.',
     cost: 550,
-    timeS: 40,
+    timeS: 34,
+    producedBy: 'acquisitions',
+    hotkey: 'R',
+    requires: 'authority-ii',
+    effects: { authority: 3, fineMult: 1.2, unrestMult: 0.92 },
+  },
+  'authority-iv': {
+    id: 'authority-iv',
+    name: 'RECORDS ACCESS',
+    blurb: 'Open the charge sheet. Every prior on file, from an unreturned shopping cart upward.',
+    cost: 700,
+    timeS: 38,
+    producedBy: 'acquisitions',
+    hotkey: 'X',
+    requires: 'authority-iii',
+    effects: { authority: 4, fineMult: 1.25, unrestMult: 0.9 },
+  },
+  'authority-v': {
+    id: 'authority-v',
+    name: 'EMERGENCY POWERS',
+    blurb: 'The rest of the life — address, social, financial, travel, biometrics. There is nothing after this.',
+    cost: 950,
+    timeS: 46,
     producedBy: 'acquisitions',
     hotkey: 'P',
-    requires: 'authority-i',
-    effects: { fineMult: 1.5, unrestMult: 0.7 },
+    requires: 'authority-iv',
+    effects: { authority: 5, fineMult: 1.3, unrestMult: 0.88 },
   },
 
   // ---- ACQUISITIONS · funding -------------------------------------------------------------------

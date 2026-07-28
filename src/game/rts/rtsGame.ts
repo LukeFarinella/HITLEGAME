@@ -574,6 +574,7 @@ function foldEffects(done: ReadonlySet<ResearchId>): Required<ResearchEffects> {
     unrestMult: 1,
     powerRadiusM: 0,
     obeliskHpMult: 1,
+    authority: 0,
     opensAllSites: false,
     autoFine: false,
   };
@@ -586,6 +587,8 @@ function foldEffects(done: ReadonlySet<ResearchId>): Required<ResearchEffects> {
     out.unrestMult *= e.unrestMult ?? 1;
     out.powerRadiusM += e.powerRadiusM ?? 0;
     out.obeliskHpMult *= e.obeliskHpMult ?? 1;
+    // A rung on a ladder, not a quantity: two tiers do not make level three.
+    out.authority = Math.max(out.authority, e.authority ?? 0);
     out.opensAllSites ||= e.opensAllSites ?? false;
     out.autoFine ||= e.autoFine ?? false;
   }

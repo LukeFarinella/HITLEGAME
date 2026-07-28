@@ -65,6 +65,8 @@ import { MILLSTONE_BY_KIND, MILLSTONE_UNIT_LIST } from '../game/rts/millstoneUni
 import { MillstoneDirector, MILLSTONE } from '../game/rts/millstone';
 import { unrestLabel } from '../game/rts/unrest';
 import { newlyDone, type MatchFacts, type ObjectiveId } from '../game/rts/objectives';
+import { inspectContact, fineBlockedBy, AUTHORITY_TIERS, type AuthorityLevel } from '../game/rts/inspect';
+import { showInspectCard, closeInspectCard } from '../ui/rtsInspect';
 import { RtsObjectivePanel } from '../ui/rtsObjectives';
 import { RtsUnitCard, type RtsCardUnit, type RtsCardStructure } from '../ui/rtsUnitCard';
 import { showLoading, setStage, hideLoading } from '../ui/loading';
@@ -2269,6 +2271,8 @@ function updateRtsHud(): void {
   // then visibly stays after they stop.
   const dc = rtsGame.dataCenterCount();
   const unrest = rtsGame.unrest;
+  const auth = rtsAuthority();
+  setText('grts-auth', auth > 0 ? `AUTH ${auth} · ${AUTHORITY_TIERS[auth].name}` : 'NO ENFORCEMENT AUTHORITY');
   setText(
     'grts-unrest',
     dc || unrest > 0.01
@@ -2509,6 +2513,28 @@ function spawnMillstoneAt(kind: UnitKind, lon: number, lat: number): void {
   toast(`◈ ${def?.name ?? kind.toUpperCase()} FIELDED`);
 }
 
+/**
+ * Open the inspection card on a member of the public.
+ *
+ * Everything about WHAT is legible is decided in game/rts/inspect from the company's authority; this
+ * only finds who was clicked and puts the sheet on screen.
+ */
+function openInspect(screenX: number, screenY: number, index: number): void {
+  if (!rtsGame || !unitField) return;
+  const facts = unitField.contactIntel(index);
+  if (!facts) return;
+  const auth = rtsAuthority();
+  const res = inspectContact(facts, auth);
+  const title = facts.violation ? `CONTACT ${facts.id} · ACCUSED` : `CONTACT ${facts.id}`;
+  showInspectCard(screenX, screenY, title, res, auth);
+  sound.play(res.refused ? 'denied' : 'click');
+}
+
+/** The company's authority level, 0–5. */
+function rtsAuthority(): AuthorityLevel {
+  return Math.min(5, Math.max(0, Math.round(rtsGame?.economy.authority ?? 0))) as AuthorityLevel;
+}
+
 /** Whether the currently selected unit is a worker drone — the only unit that opens the build menu. */
 function selectedIsWorker(): boolean {
   const sel = unitField?.selectedPlatform();
@@ -2722,12 +2748,14 @@ function runRtsViolations(dt: number): void {
 
   if (rtsGame.economy.autoFine) {
     // Sweep every open fineable violation into money — the whole point of the upgrade. Paid at the
-    // company's authority rate, exactly as a hand-collected one is.
+    // company's authority rate, and bound by the same authority rule a hand-collected one is: an
+    // automatic system does not get to charge people the company may not lawfully look at.
+    const auth = rtsAuthority();
     for (const v of open) {
-      if (v.live.def.fine > 0) {
-        rtsGame.collectFine(v.live.def.fine);
-        unitField.clearLive(v.index);
-      }
+      if (v.live.def.fine <= 0) continue;
+      if (fineBlockedBy(unitField.contactIntel(v.index)?.kind ?? 'land', auth)) continue;
+      rtsGame.collectFine(v.live.def.fine);
+      unitField.clearLive(v.index);
     }
   }
   updatePings(dt); // draw the alert markers over whatever is still open
@@ -4993,6 +5021,14 @@ const rtsObjectivesDone = new Set<ObjectiveId>();
 let rtsOrbitalFired = false;
 /** Seconds until the next objective check. Conditions move slowly; sixty checks a second is waste. */
 let rtsObjClock = 0;
+/**
+ * Whether I is being held — the INSPECT modifier.
+ *
+ * A held modifier rather than a mode, for the same reason shift+right-click spawns a Millstone unit:
+ * inspecting is something you do to one person on the way past, not a state you enter and have to
+ * remember to leave.
+ */
+let inspectHeld = false;
 /** The theater's surveyed obelisk sites — where obelisks may be built. */
 let rtsSites: BuildSite[] = [];
 /** Global obelisk indices already carrying an obelisk (the Nexus, then anything built). */
@@ -5634,6 +5670,15 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
   // RTS: a click on a caught violator opens the decide-fate popup; a structure shows its command
   // card. Both take priority over selecting your own units.
   if (rtsGame && unitField) {
+    // I + left-click INSPECTS whoever is under the pointer, ahead of everything else — including a
+    // live violation, because "who is this" is a different question from "what do I do about them".
+    if (inspectHeld) {
+      const who = unitField.contactAt(scene, m.position.x, m.position.y, SELECT_PX);
+      if (who) {
+        openInspect(m.position.x, m.position.y, who.index);
+        return;
+      }
+    }
     const contact = unitField.contactAt(scene, m.position.x, m.position.y, SELECT_PX);
     if (contact && unitField.liveOf(contact.index)) {
       openViolationMenu(m.position.x, m.position.y, contact.index);
@@ -6480,10 +6525,21 @@ el('up-mark')?.addEventListener('click', () => {
   updateUnitPanel();
 });
 
+window.addEventListener('keyup', (e) => {
+  if (e.key === 'i' || e.key === 'I') inspectHeld = false;
+});
+window.addEventListener('blur', () => {
+  inspectHeld = false;
+});
+
 window.addEventListener('keydown', (e) => {
+  // INSPECT is a held modifier and must be tracked before the hotkey table gets the key, or the RTS
+  // branch's per-context lookup would swallow the I in some contexts and not others.
+  if (rtsGame && (e.key === 'i' || e.key === 'I')) inspectHeld = true;
   // RTS build hotkeys + placement cancel take the key before anything else in a match.
   if (rtsGame) {
     if (e.key === 'Escape') {
+      closeInspectCard();
       // Back out of an armed cursor first. Escape only ends the match when there is nothing else to
       // escape from — otherwise aiming a strike and changing your mind would quit the game.
       if (rtsPlacing) cancelPlacement();
@@ -6521,7 +6577,9 @@ window.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Escape') exitTheater();
   // I cycles the infection: spread it to more units so the red state is easy to watch, then reset.
-  if ((e.key === 'i' || e.key === 'I') && mode === 'theater' && unitField) {
+  // Campaign only — in a match I is the INSPECT modifier, and a debug shortcut that scrambled the
+  // sim every time you looked at somebody would be a genuinely baffling bug to hit.
+  if ((e.key === 'i' || e.key === 'I') && mode === 'theater' && unitField && !rtsGame) {
     unitField.cycleInfection();
     updateUnitHud();
   }
@@ -6591,6 +6649,10 @@ if (import.meta.env.DEV) {
     RTS_COMBAT,
     startResearchAt,
     refreshPowerLines,
+    openInspect,
+    inspectContact,
+    fineBlockedBy,
+    rtsAuthority,
     flashAtSite,
     beginAbility,
     fireAbilityAt,

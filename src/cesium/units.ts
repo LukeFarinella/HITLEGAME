@@ -2801,6 +2801,36 @@ export class UnitField {
     return out;
   }
 
+  /**
+   * Everything the field will say about a member of the public, for the inspection card.
+   *
+   * Deliberately does NOT include `state` — the sim's ground truth about whether somebody is what
+   * the net thinks they are. That number never leaves this module except as a verdict on an order,
+   * and an inspection card is not a verdict; the whole point of the card is that it is the machine's
+   * account of a person, which is sometimes wrong.
+   */
+  contactIntel(index: number): {
+    id: string;
+    kind: UnitKind;
+    heading: number;
+    assess: number;
+    record: Record_;
+    covered: boolean;
+    violation: string | null;
+  } | null {
+    const u = this.units[index];
+    if (!u || u.dead) return null;
+    return {
+      id: u.id,
+      kind: u.kind,
+      heading: u.heading,
+      assess: u.assess,
+      record: u.record,
+      covered: this.coveredNow(u),
+      violation: u.live ? `${u.live.def.label} · ${Math.round(u.live.certainty * 100)}%` : null,
+    };
+  }
+
   /** The live violation on one contact, if it has one. */
   liveOf(index: number): LiveViolation | null {
     const u = this.units[index];
