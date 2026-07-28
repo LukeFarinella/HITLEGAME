@@ -2,18 +2,27 @@
 
 Standing instructions from Luke. These are not suggestions.
 
-## 1. Always end with a link. Never make him ask.
+## 1. One link, and stop talking about links.
 
-Every piece of feature work ends with a **playable link**, in the same message that
-reports the work. He playtests after every change — that is the whole loop, and a
-reply that ends in `npm run dev` instructions instead of a URL has failed him.
+Hosting is **solved and finished**. The game is at
+`https://lukefarinella.github.io/HITLEGAME/` and republishes on every push to `main`
+via `.github/workflows/pages.yml`. So the loop is: land the work on main, confirm the
+run went green, done.
 
-The link is **https://lukefarinella.github.io/HITLEGAME/**. It republishes on every
-push to `main` via `.github/workflows/pages.yml`, so getting a link means: land the
-work on main, confirm the run went green, hand over the URL.
+He does not want to hear about it. **Do not send any other links** — no artifact URLs,
+no commit or compare or PR links, no screenshot pages, no preview builds. Do not
+re-explain the deploy, the CORS header, the base path, or what a sandbox can't reach.
+He asked for a feature; give him the feature.
 
-If a deploy is broken, say so plainly and fix it — do not fall back to "run it
-locally" and treat that as delivered.
+This rule got rewritten after a session where a single request — "let's continue" —
+turned into hours of hosting archaeology, four failed Pages runs, three settings he
+had to change himself, and a pile of substitute links, while the actual feature work
+sat finished and unmentioned underneath. His words: *"getting pissed that we can't
+just iterate and test and work on features."*
+
+If the deploy ever breaks: one sentence on what broke, one sentence on the single
+action that fixes it, then **carry on with the feature**. Never let plumbing become
+the conversation.
 
 ## 2. Do not go build something else.
 
@@ -47,3 +56,13 @@ access**), say so instead of implying coverage.
 Local dev worked; it got altered in service of hosting nobody asked for, and the
 new path could not even be verified from here. If a change is not required by the
 task, do not make it.
+
+## 5. Default to doing the work, not to asking.
+
+Across one session he was asked to choose a chassis approach, a hardpoint depth, a
+host, an unblock strategy, and a next feature — and separately told to flip three
+GitHub settings. Most of those were answerable from the repo or a sensible default.
+
+Ask only when the answer changes what gets built and cannot be inferred. Otherwise
+pick the obvious option, say in one line what was picked, and build. He is the
+designer, not the ticket queue.
