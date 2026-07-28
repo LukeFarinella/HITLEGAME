@@ -1596,6 +1596,9 @@ body.dev-open #c2-tasking { display: none; }
 .grts-money { font: 700 22px/1 var(--mono); color: var(--bone); letter-spacing: .04em; }
 .grts-cap { font: 500 12px/1 var(--mono); color: var(--ash); }
 .grts-sub { margin-top: 3px; font: 600 8.5px/1 var(--mono); letter-spacing: .16em; color: var(--steel); }
+/* the unrest line is a cost, so it reads in the same orange as the rings on the ground */
+.grts-unrest { color: #F27A2E; }
+.grts-unrest:empty { display: none; }
 
 /* ---- build command bar ---- */
 #g-rts-cmd {
@@ -1633,6 +1636,14 @@ body.dev-open #c2-tasking { display: none; }
 .grc-chip.cat-special .grc-key { background: #8b6fe0; }
 .grc-chip.cat-naval .grc-key { background: #3f8fa0; }
 .grc-chip.cat-research .grc-key { background: #8b6fe0; }
+/* an upgrade improves a machine; doctrine changes a rule. Same row, told apart by key colour and
+   by the chip naming the chassis it lands on */
+.grc-chip.cat-upgrade .grc-key { background: #3fa0e0; }
+.grc-chip.cat-upgrade { border-bottom-color: #3fa0e0; }
+.grc-sub {
+  font: 600 7px/1 var(--mono); letter-spacing: .1em; color: var(--steel);
+  max-width: 92px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .grc-chip.type-supply .grc-key { background: var(--ok); }
 .grc-chip.type-special .grc-key { background: #e0553f; }
 .grc-chip.type-harbor .grc-key { background: #3f8fa0; }
@@ -2067,3 +2078,26 @@ body.dev-open #c2-tasking { display: none; }
   white-space: nowrap;
 }
 .up-tag[hidden] { display: none; }
+
+/* ---- RTS objective chain (right-hand side) ---------------------------------------------------
+   Sits where the campaign's tasking panel sits, and borrows its language: a boxed list, mono, with
+   the live item lit and the ones behind it dimmed to a title. */
+#g-rts-obj {
+  position: absolute; top: 92px; right: 14px; width: 236px; z-index: 6;
+  background: rgba(11, 12, 14, .88); border: 1px solid var(--gunmetal);
+  border-left: 2px solid var(--warn); padding: 8px 10px 9px;
+  display: flex; flex-direction: column; gap: 6px; pointer-events: auto;
+}
+#g-rts-obj[hidden] { display: none; }
+.gro-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.gro-title { font: 700 9px/1 var(--mono); letter-spacing: .22em; color: var(--bone); }
+.gro-count { font: 600 8.5px/1 var(--mono); letter-spacing: .1em; color: var(--steel); }
+.gro-item { border-top: 1px solid rgba(120, 130, 140, .16); padding-top: 6px; }
+.gro-row { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; }
+.gro-name { font: 700 8.5px/1.2 var(--mono); letter-spacing: .14em; color: var(--steel); }
+.gro-item.live .gro-name { color: var(--warn); }
+.gro-bounty { font: 600 8px/1 var(--mono); letter-spacing: .06em; color: var(--steel); flex: none; }
+.gro-item.live .gro-bounty { color: var(--warn); }
+.gro-hint { margin-top: 5px; font: 500 8.5px/1.45 var(--mono); letter-spacing: .04em; color: var(--bone); opacity: .82; }
+.gro-all .gro-name { color: var(--ok); }
+@media (max-width: 900px) { #g-rts-obj { display: none; } }

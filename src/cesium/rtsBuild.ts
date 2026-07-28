@@ -149,6 +149,17 @@ const POWER_DASH = 0b1100010001000100;
 /** Seconds between one-bit rotations of the pattern. */
 const POWER_STEP_S = 0.055;
 
+// ---- unrest rings -------------------------------------------------------------------------------
+//
+// The public's anger at a data center, drawn where it is felt. Orange rather than the obelisk red or
+// the Millstone green: this is not a weapon and it is not the enemy, it is the neighbourhood.
+
+const UNREST_COLOR = Cesium.Color.fromCssColorString('#F27A2E');
+/** Radius at full anger, metres — matches UNREST.RING_M in the model. */
+const UNREST_RING_M = 900;
+const UNREST_SEGMENTS = 48;
+const UNREST_LIFT_M = 30;
+
 /** A ring of world positions around a ground point, for footprints and the ghost. */
 function ringPositions(
   lon: number,
@@ -232,6 +243,11 @@ export class RtsBuildLayer {
   /** In-progress construction sites — an amber ring while a worker builds. */
   readonly construction = new Cesium.PolylineCollection();
   private constructionLines = new Map<number, Cesium.Polyline>();
+  /** Unrest rings: a pulsing ring around every data center, brightening as the ground turns. */
+  readonly unrest = new Cesium.PolylineCollection();
+  private unrestRings: { line: Cesium.Polyline; material: Cesium.Material; positions: Cesium.Cartesian3[]; lon: number; lat: number }[] = [];
+  private unrestT = 0;
+  private unrestLevel = 0;
   /** Power tethers: a thin crawling red line from each obelisk to every building it powers. */
   readonly power = new Cesium.PolylineCollection();
   private powerLines: Cesium.Polyline[] = [];
@@ -473,6 +489,30 @@ export class RtsBuildLayer {
     this.dashPhase = 0;
   }
 
+  /**
+   * Redraw the unrest rings — one around each data center.
+   *
+   * A ring rather than a number on a panel because the anger is a fact about GROUND: it belongs at
+   * the shed that caused it, in the neighbourhood that has it, where the player is already looking
+   * when they decide whether to plant another one.
+   */
+  setUnrestSites(sites: { lon: number; lat: number }[]): void {
+    this.unrest.removeAll();
+    this.unrestRings = [];
+    for (const s of sites) {
+      const positions: Cesium.Cartesian3[] = [];
+      for (let i = 0; i <= UNREST_SEGMENTS; i++) positions.push(new Cesium.Cartesian3());
+      const material = Cesium.Material.fromType('Color', { color: UNREST_COLOR.withAlpha(0) });
+      const line = this.unrest.add({ positions, width: 2.4, material, show: true });
+      this.unrestRings.push({ line, material, positions, lon: s.lon, lat: s.lat });
+    }
+  }
+
+  /** How angry the ground is, 0–1 — drives how bright and how wide the rings pulse. */
+  setUnrestLevel(level: number): void {
+    this.unrestLevel = level;
+  }
+
   /** Drop every tether — a match ending, or a base with nothing powered. */
   clearPower(): void {
     this.power.removeAll();
@@ -488,6 +528,7 @@ export class RtsBuildLayer {
    * nearly four times a second, which reads as a strobe; {@link POWER_STEP_S} slows it to a crawl.
    */
   update(dt: number): void {
+    this.updateUnrest(dt);
     if (!this.powerMaterials.length) return;
     this.dashClock += dt;
     if (this.dashClock < POWER_STEP_S) return;
@@ -498,6 +539,34 @@ export class RtsBuildLayer {
     const p = POWER_DASH;
     const pattern = ((p >>> this.dashPhase) | (p << (16 - this.dashPhase))) & 0xffff;
     for (const m of this.powerMaterials) (m.uniforms as { dashPattern: number }).dashPattern = pattern;
+  }
+
+  /**
+   * Breathe the unrest rings.
+   *
+   * The pulse is a heartbeat rather than a wobble: it quickens with the level, so calm ground barely
+   * moves and riotous ground throbs. Amplitude and brightness both scale from zero, which means a
+   * freshly-built data center draws a ring that is technically there and visually silent — the anger
+   * arrives over minutes, and the ring should say so.
+   */
+  private updateUnrest(dt: number): void {
+    if (!this.unrestRings.length) return;
+    const lvl = this.unrestLevel;
+    this.unrestT += dt * (0.9 + lvl * 1.8);
+    const pulse = 0.5 + 0.5 * Math.sin(this.unrestT * Math.PI);
+    const r = UNREST_RING_M * (0.72 + 0.28 * pulse) * (0.55 + 0.45 * lvl);
+    const alpha = Math.min(0.85, 0.06 + lvl * (0.55 + 0.3 * pulse));
+    for (const ring of this.unrestRings) {
+      const mLon = 111_320 * Math.cos((ring.lat * Math.PI) / 180);
+      for (let i = 0; i <= UNREST_SEGMENTS; i++) {
+        const a = (i / UNREST_SEGMENTS) * Math.PI * 2;
+        const lon = ring.lon + (Math.cos(a) * r) / mLon;
+        const lat = ring.lat + (Math.sin(a) * r) / 111_320;
+        Cesium.Cartesian3.fromDegrees(lon, lat, this.heightAt(lon, lat) + UNREST_LIFT_M, undefined, ring.positions[i]);
+      }
+      ring.line.positions = ring.positions;
+      (ring.material.uniforms as { color: Cesium.Color }).color = UNREST_COLOR.withAlpha(alpha);
+    }
   }
 
   /** Whether a point is close enough to a road for a facility. */

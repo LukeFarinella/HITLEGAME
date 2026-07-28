@@ -90,9 +90,14 @@ export class MillstoneDirector {
     return this._hp <= 0;
   }
 
-  /** Seconds until the next wave leaves, for the HUD's threat clock. */
-  get nextWaveS(): number {
-    return Math.max(0, this.timer);
+  /**
+   * Seconds until the next wave leaves, for the HUD's threat clock.
+   *
+   * `pressure` divides it, so the clock the player reads is the clock they actually get rather than
+   * the one they would get on calm ground.
+   */
+  nextWaveS(pressure = 1): number {
+    return Math.max(0, this.timer / Math.max(0.01, pressure));
   }
 
   /** The standing guard at the enemy Nexus, spawned once when the match opens. */
@@ -103,10 +108,15 @@ export class MillstoneDirector {
   /**
    * Advance the wave clock. Returns the wave to field when one is due, else null. The scene calls
    * this every frame; a wave is a burst, not a stream.
+   *
+   * `pressure` is how much faster the clock runs than real time — the public's anger at the player's
+   * data centers, handed in by the scene (see {@link ./unrest}). Millstone is not simulating the
+   * neighbourhood's politics; it is simply finding it easier to move through ground that has stopped
+   * cooperating with the company, which is the same thing from the wave's point of view.
    */
-  tick(dt: number): WaveSpawn[] | null {
+  tick(dt: number, pressure = 1): WaveSpawn[] | null {
     if (this._hp <= 0) return null; // a razed base sends nothing
-    this.timer -= dt;
+    this.timer -= dt * pressure;
     if (this.timer > 0) return null;
     this.timer = MILLSTONE.WAVE_EVERY_S;
     this.waveN++;

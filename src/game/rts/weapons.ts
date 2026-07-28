@@ -21,6 +21,9 @@ import type { UnitKind } from '../../cesium/unitModels';
  * That triangle is the whole reason both armies field all three: projectiles out-range ranged fire
  * and punish massed slow units, ranged fire kills melee before it lands, and melee walks through
  * projectile fire (it leads badly against anything quick) to reach the artillery.
+ *
+ * What a unit is CARRYING is assembled in {@link ./combat armamentOf}: this basic attack, plus any
+ * factory-fitted weapon the chassis has, plus every researched upgrade that touches it.
  */
 
 export type AttackKind = 'melee' | 'ranged' | 'projectile';
@@ -69,8 +72,8 @@ export const BASIC_ATTACK: Record<UnitKind, Weapon> = {
   dog: { name: 'SHOULDER GUN', kind: 'ranged', rangeM: 650, dmg: 12, periodS: 0.8 },
   // The one Gorgon unit that CHASES. A pursuit walker that then shot from 800 m was a contradiction:
   // the speed bought nothing the shoulder gun didn't already have. Blades make the legs the point —
-  // it runs something down and takes it apart, which is the only way the player owns the melee corner
-  // of the triangle without fitting a ram to something slow.
+  // it runs something down and takes it apart, which is how the player owns the melee corner of the
+  // triangle at all. SERRATED ARMS sharpens it further.
   spider: { name: 'PURSUIT BLADES', kind: 'melee', rangeM: 150, dmg: 42, periodS: 0.8 },
   biped: { name: 'SERVICE CANNON', kind: 'ranged', rangeM: 950, dmg: 26, periodS: 0.9 },
   quad: { name: 'SIDEARM', kind: 'ranged', rangeM: 700, dmg: 8, periodS: 1.0 },
@@ -101,117 +104,8 @@ export const BASIC_ATTACK: Record<UnitKind, Weapon> = {
   leviathan: { name: 'GRINDING WHEEL', kind: 'melee', rangeM: 260, dmg: 150, periodS: 1.5 },
 };
 
-// ---- hardpoint weapons --------------------------------------------------------------------------
-
-export type WeaponId =
-  | 'pintle'
-  | 'lance'
-  | 'mortar'
-  | 'missiles'
-  | 'ram'
-  | 'flak';
-
-export interface MountDef {
-  id: WeaponId;
-  name: string;
-  /** One line for the fitting card. */
-  blurb: string;
-  /** Money, charged when it is fitted. Refitting a slot refunds nothing — a pod is consumed. */
-  cost: number;
-  weapon: Weapon;
-  /** Chassis this fits, or 'all' for anything with a slot. */
-  fits: UnitKind[] | 'all';
-  hotkey: string;
-}
-
-/**
- * What the player can bolt into a hardpoint.
- *
- * The catalog is deliberately short and each entry is a different ANSWER rather than a bigger
- * number: the ram is how a slow platform stops being kited, the mortar is how a ground line reaches
- * something that outranges it, the flak is how an army that keeps losing to air stops losing to air.
- * Fitting is per-unit and permanent for that unit's life, so a loadout is a decision about one
- * machine rather than a global upgrade — which is what makes a mixed army worth building.
- */
-export const MOUNTS: MountDef[] = [
-  {
-    id: 'pintle',
-    name: 'PINTLE GUN',
-    blurb: 'A second barrel on the same mount. Cheap, short, and it simply adds fire.',
-    cost: 60,
-    weapon: { name: 'PINTLE GUN', kind: 'ranged', rangeM: 600, dmg: 10, periodS: 0.7 },
-    fits: 'all',
-    hotkey: '1',
-  },
-  {
-    id: 'lance',
-    name: 'DIRECTED LANCE',
-    blurb: 'Long, precise, silent. Reaches past the line it is standing behind.',
-    cost: 130,
-    weapon: { name: 'DIRECTED LANCE', kind: 'ranged', rangeM: 1400, dmg: 24, periodS: 1.3 },
-    fits: ['spider', 'biped', 'walker', 'naval', 'drone', 'interceptor'],
-    hotkey: '2',
-  },
-  {
-    id: 'mortar',
-    name: 'SIEGE MORTAR',
-    blurb: 'Lobbed and slow. Out-ranges a ground line and does not care what else is standing there.',
-    cost: 170,
-    weapon: { name: 'SIEGE MORTAR', kind: 'projectile', rangeM: 1700, dmg: 40, periodS: 2.2, speedMps: 650, splashM: 160 },
-    fits: ['biped', 'walker', 'naval'],
-    hotkey: '3',
-  },
-  {
-    id: 'missiles',
-    name: 'MISSILE RACK',
-    blurb: 'Fast rounds, tight burst radius. The projectile that still lands on something moving.',
-    cost: 150,
-    weapon: { name: 'MISSILE RACK', kind: 'projectile', rangeM: 1300, dmg: 32, periodS: 1.5, speedMps: 1400, splashM: 60 },
-    fits: ['quad', 'interceptor', 'drone', 'walker', 'naval', 'usv'],
-    hotkey: '4',
-  },
-  {
-    id: 'ram',
-    name: 'BREACHING RAM',
-    blurb: 'Contact reach, brutal damage. What a slow platform fits so that being caught is the other side’s problem.',
-    cost: 110,
-    weapon: { name: 'BREACHING RAM', kind: 'melee', rangeM: 150, dmg: 70, periodS: 1.2 },
-    fits: ['dog', 'spider', 'biped', 'walker', 'skid'],
-    hotkey: '5',
-  },
-  {
-    id: 'flak',
-    name: 'FLAK BATTERY',
-    blurb: 'A fast, wide burst built for things in the air. Unpleasant at any altitude, lethal at cruise.',
-    cost: 120,
-    weapon: { name: 'FLAK BATTERY', kind: 'ranged', rangeM: 1100, dmg: 14, periodS: 0.5 },
-    fits: ['dog', 'spider', 'biped', 'walker', 'naval', 'quad', 'usv'],
-    hotkey: '6',
-  },
-];
-
-export const MOUNT_BY_ID = new Map(MOUNTS.map((m) => [m.id, m]));
-
-/** Whether a mount fits a chassis. */
-export function mountFits(mount: MountDef, kind: UnitKind): boolean {
-  return mount.fits === 'all' || mount.fits.includes(kind);
-}
-
-/** The mounts offerable on a chassis, in catalog order — what the fitting card lists. */
-export function mountsFor(kind: UnitKind): MountDef[] {
-  return MOUNTS.filter((m) => mountFits(m, kind));
-}
-
-/** A unit's fitted hardpoints, one entry per slot. `null` is empty. */
-export type RtsLoadout = (WeaponId | null)[];
-
-/** Every weapon a chassis is currently firing: its basic attack plus whatever is bolted on. */
-export function weaponsOf(kind: UnitKind, loadout: RtsLoadout | undefined): Weapon[] {
-  const out: Weapon[] = [BASIC_ATTACK[kind]];
-  for (const id of loadout ?? []) {
-    if (!id) continue;
-    const m = MOUNT_BY_ID.get(id);
-    if (m) out.push(m.weapon);
-  }
-  return out;
-}
+// The hardpoint catalog that used to live below this line is gone. Bolting a weapon pod onto one
+// individual machine was replaced by researching an upgrade that lands on every machine of that
+// kind — see {@link ./research}. The weapons themselves survived the move: the lance, the mortar,
+// the missile rack and the flak battery are the same numbers, now attached to a project rather than
+// to a slot.

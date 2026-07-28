@@ -61,9 +61,11 @@ import {
 import { RTS_UNITS, unitsFrom, producesUnits, type RtsUnitId } from '../game/rts/units';
 import { RESEARCH, researchFrom, type ResearchId } from '../game/rts/research';
 import { RTS_COMBAT, armamentOf } from '../game/rts/combat';
-import { MOUNT_BY_ID, mountsFor, type WeaponId } from '../game/rts/weapons';
 import { MILLSTONE_BY_KIND, MILLSTONE_UNIT_LIST } from '../game/rts/millstoneUnits';
 import { MillstoneDirector, MILLSTONE } from '../game/rts/millstone';
+import { unrestLabel } from '../game/rts/unrest';
+import { newlyDone, type MatchFacts, type ObjectiveId } from '../game/rts/objectives';
+import { RtsObjectivePanel } from '../ui/rtsObjectives';
 import { RtsUnitCard, type RtsCardUnit, type RtsCardStructure } from '../ui/rtsUnitCard';
 import { showLoading, setStage, hideLoading } from '../ui/loading';
 import { setActiveSlot, migrateLegacySave } from '../game/saves';
@@ -1301,11 +1303,14 @@ scene.preUpdate.addEventListener(() => {
       for (const c of produced) spawnProducedUnit(c.structureId, c.unit);
       // Advance any structures a worker is building on site.
       rtsConstructionTick(dt);
-      rtsGame.tickResearch(dt);
+      for (const done of rtsGame.tickResearch(dt)) applyResearch(done.id, done.kinds);
       rtsGame.tickAbilities(dt);
       // Tethers are static geometry between builds; only the dash crawl runs every frame.
       if (rtsPowerSig !== rtsGame.structures.length) refreshPowerLines();
       rtsBuild?.update(dt);
+      rtsGame.tickUnrest(dt);
+      runRtsObjectives(dt);
+      refreshUnrestRings();
       runMillstone(dt);
       runRtsCombat(dt);
       rtsGame.tickUnits(dt); // shield/energy regen
@@ -2259,14 +2264,27 @@ function updateRtsHud(): void {
   setText('grts-cap', `/ ${rtsGame.cap(obeliskCount).toLocaleString('en-US')}`);
   setText('grts-obelisks', String(obeliskCount));
   setText('grts-supply', `${rtsGame.supplyUsed} / ${rtsGame.supplyCap()}`);
+  // Public unrest, and what it is costing. Shown whenever a data center stands OR the ground is
+  // still cooling off, so the number appears the moment the player does the thing that causes it and
+  // then visibly stays after they stop.
+  const dc = rtsGame.dataCenterCount();
+  const unrest = rtsGame.unrest;
+  setText(
+    'grts-unrest',
+    dc || unrest > 0.01
+      ? `PUBLIC ${unrestLabel(unrest)} · ${Math.round(unrest * 100)}% · ${dc} DATA CENTER${dc === 1 ? '' : 'S'}`
+      : '',
+  );
   // The threat line: how much of Millstone stands, and how long until it knocks again.
   if (millstone) {
     const pct = Math.round((millstone.hp / millstone.maxHp) * 100);
+    const fast = rtsGame.unrestPressure;
     setText(
       'grts-threat',
       millstone.destroyed
         ? 'MILLSTONE RAZED'
-        : `MILLSTONE ${pct}% · NEXT WAVE ${Math.ceil(millstone.nextWaveS)}S`,
+        : `MILLSTONE ${pct}% · NEXT WAVE ${Math.ceil(millstone.nextWaveS(fast))}S` +
+          (fast > 1.02 ? ` · ${fast.toFixed(2)}× (UNREST)` : ''),
     );
   } else {
     // Say so rather than showing an empty line: a blank threat readout reads as broken, and "no
@@ -2311,6 +2329,7 @@ function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
   scene.primitives.add(rtsBuild.rallyDots);
   scene.primitives.add(rtsBuild.construction);
   scene.primitives.add(rtsBuild.power);
+  scene.primitives.add(rtsBuild.unrest);
   for (const b of rtsBuild.meshBatches) scene.primitives.add(b); // 3D building models
   rtsSitesAllOpen = false;
   rtsConstruction = [];
@@ -2326,7 +2345,7 @@ function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
       // Everything the player opens with is a combatant from the first frame — and now that means
       // ALL of them: the worker swings a bucket rather than standing there being dismantled.
       if (RTS_COMBAT[u.kind]) {
-        unitField.armRtsCombat(u.index, 0, armamentOf(u.kind, rtsGame.loadoutOf(u.index)));
+        unitField.armRtsCombat(u.index, 0, armamentOf(u.kind, rtsGame.researched));
       }
     }
   }
@@ -2371,13 +2390,17 @@ function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
       const r = rtsGame?.researchAt(sid);
       return r ? { id: r.id, pct: Math.round((1 - r.remainingS / r.totalS) * 100) } : null;
     },
-    onFit: (index, slot, mount) => fitMountOn(index, slot, mount),
-    fitBlocker: (index, slot, mount) => rtsGame?.fitBlocker(index, slot, mount) ?? null,
     onAbility: (id) => beginAbility(id),
     abilityBlocker: (sid, id) => rtsGame?.abilityBlocker(sid, id) ?? null,
     aiming: () => rtsAiming?.id ?? null,
   });
   rtsCmd.show();
+  rtsObjectivesDone.clear();
+  rtsOrbitalFired = false;
+  rtsObjClock = 0;
+  rtsObjectives = new RtsObjectivePanel();
+  rtsObjectives.show();
+  rtsObjectives.render(rtsObjectivesDone);
   // The command card greys chips by affordability and shows queue progress, so it repaints on every
   // economy/production change (and per-frame while a queue runs — see the RTS update branch).
   rtsGame.onChange(() => rtsCmd?.render());
@@ -2409,6 +2432,7 @@ function teardownRtsBuild(): void {
     scene.primitives.remove(rtsBuild.rallyDots);
     scene.primitives.remove(rtsBuild.construction);
     scene.primitives.remove(rtsBuild.power);
+    scene.primitives.remove(rtsBuild.unrest);
     for (const b of rtsBuild.meshBatches) scene.primitives.remove(b);
     rtsBuild = null;
   }
@@ -2419,6 +2443,10 @@ function teardownRtsBuild(): void {
   rounds?.show([]);
   rtsCmd?.hide();
   rtsCmd = null;
+  rtsObjectives?.hide();
+  rtsObjectives = null;
+  rtsObjectivesDone.clear();
+  rtsOrbitalFired = false;
   rtsSites = [];
   rtsBuiltSites.clear();
   rtsPowerSig = -1;
@@ -2443,21 +2471,9 @@ function rtsCommandContext(): CommandContext {
   // The worker's BUILD menu wins over its loadout card: a worker's job is building, and burying
   // that behind a weapons screen would be the wrong default for the unit you click most.
   if (selectedIsWorker()) return { kind: 'build' };
-  // One of your own units selected → its hardpoints. selectedPlatform() already refuses a
-  // multi-selection, which is the behaviour we want: fitting is a per-unit decision, and a card
-  // that quietly charged you for twelve pintle guns because you had a box-select up is not a
-  // decision you made.
-  const sel = unitField?.selectedPlatform();
-  const st = sel && rtsGame ? rtsGame.unitStateOf(sel.index) : undefined;
-  if (sel && st) {
-    return {
-      kind: 'loadout',
-      unitIndex: sel.index,
-      unitId: st.unit,
-      meshKind: RTS_UNITS[st.unit].meshKind,
-      loadout: st.loadout,
-    };
-  }
+  // A selected unit shows nothing here. It used to open a hardpoint-fitting card; upgrades are
+  // researched at a laboratory now, and the unit panel on the left already carries what the machine
+  // is and what it is carrying.
   return { kind: 'none' };
 }
 
@@ -2491,31 +2507,6 @@ function spawnMillstoneAt(kind: UnitKind, lon: number, lat: number): void {
   unitField.spawnRtsEnemy(kind, lon, lat, armamentOf(kind), false);
   sound.play('alert');
   toast(`◈ ${def?.name ?? kind.toUpperCase()} FIELDED`);
-}
-
-/**
- * Bolt a mount into one of a unit's hardpoints and re-arm it in the field.
- *
- * The re-arm is what makes the fitting real: {@link armamentOf} rebuilds the whole weapon list from
- * the chassis plus the new loadout, and `armRtsCombat` keeps the unit's current damage while it
- * swaps the weapons in — fitting a gun is not a repair.
- */
-function fitMountOn(index: number, slot: number, mount: WeaponId): void {
-  if (!rtsGame || !unitField) return;
-  const st = rtsGame.unitStateOf(index);
-  if (!st) return;
-  const blocked = rtsGame.fitBlocker(index, slot, mount);
-  if (blocked) {
-    sound.play('denied');
-    toast(`◈ ${blocked}`);
-    return;
-  }
-  if (!rtsGame.fitMount(index, slot, mount)) return;
-  unitField.armRtsCombat(index, 0, armamentOf(RTS_UNITS[st.unit].meshKind, st.loadout));
-  sound.play('confirm');
-  toast(`◈ ${MOUNT_BY_ID.get(mount)!.name} FITTED · ${RTS_UNITS[st.unit].name}`);
-  rtsCmd?.render();
-  updateUnitHud();
 }
 
 /** Whether the currently selected unit is a worker drone — the only unit that opens the build menu. */
@@ -2575,6 +2566,77 @@ function enqueueUnit(unit: RtsUnitId): void {
   sound.play('purchase');
   rtsCmd?.render();
 }
+
+/**
+ * A research project has finished — make it real on the units already standing.
+ *
+ * Re-arms every live unit of the affected chassis. That re-arm is the whole feature: an upgrade that
+ * applied only to units built afterwards would be a trap, because the army you already paid for is
+ * the army in front of you, and nobody would ever research anything mid-fight. `armRtsCombat` keeps
+ * a unit's current damage while swapping the weapons in, so a hull upgrade raises the ceiling
+ * without healing the hole — being improved is not being repaired.
+ */
+function applyResearch(id: ResearchId, kinds: UnitKind[]): void {
+  if (!rtsGame || !unitField) return;
+  const def = RESEARCH[id];
+  let n = 0;
+  if (kinds.length) {
+    const touched = new Set<UnitKind>(kinds);
+    for (const u of unitField.platformUnits()) {
+      if (!touched.has(u.kind) || !unitField.isAlive(u.index)) continue;
+      unitField.armRtsCombat(u.index, 0, armamentOf(u.kind, rtsGame.researched));
+      n++;
+    }
+  }
+  sound.play('success');
+  toast(n ? `◈ ${def.name} · REFITTED ${n} IN THE FIELD` : `◈ ${def.name} COMPLETE`);
+  rtsCmd?.render();
+  updateUnitHud();
+}
+
+/**
+ * Advance the objective chain: sample the match, clear anything now satisfied, pay the bounty.
+ *
+ * Sampled on a clock rather than every frame — every condition here is a building being finished or
+ * a unit rolling out, none of which can happen twice in half a second, and the unit tally walks the
+ * fielded roster. A completion pays immediately whichever order things were done in, so a player who
+ * built the tech facility before the data center gets both the moment the second one lands.
+ */
+function runRtsObjectives(dt: number): void {
+  if (!rtsGame || !unitField || !rtsObjectives) return;
+  rtsObjClock -= dt;
+  if (rtsObjClock > 0) return;
+  rtsObjClock = OBJECTIVE_CHECK_S;
+
+  // One pass over the fielded roster, tallied by chassis, rather than a scan per objective.
+  const byKind = new Map<UnitKind, number>();
+  for (const u of unitField.platformUnits()) {
+    if (!unitField.isAlive(u.index)) continue;
+    byKind.set(u.kind, (byKind.get(u.kind) ?? 0) + 1);
+  }
+  const facts: MatchFacts = {
+    obelisks: countLiveObelisks(),
+    has: (t) => rtsGame!.hasStructure(t),
+    units: (k) => byKind.get(k) ?? 0,
+    researchDone: rtsGame.researched.size,
+    orbitalFired: rtsOrbitalFired,
+    millstoneRazed: !!millstone?.destroyed,
+  };
+
+  const done = newlyDone(facts, rtsObjectivesDone);
+  if (!done.length) return;
+  for (const o of done) {
+    rtsObjectivesDone.add(o.id);
+    if (o.bounty > 0) rtsGame.award(o.bounty);
+    toast(o.bounty > 0 ? `◈ OBJECTIVE · ${o.name} · +${o.bounty}` : `◈ OBJECTIVE · ${o.name}`);
+  }
+  sound.play('success');
+  rtsObjectives.render(rtsObjectivesDone);
+  updateRtsHud();
+}
+
+/** Seconds between objective checks. */
+const OBJECTIVE_CHECK_S = 0.75;
 
 /** Begin a research project at the selected building. */
 function startResearchAt(id: ResearchId): void {
@@ -2669,11 +2731,30 @@ function refreshPowerLines(): void {
     if (src) links.push({ flon: src.lon, flat: src.lat, tlon: s.lon, tlat: s.lat });
   }
   rtsBuild.setPower(links);
+  refreshUnrestSites();
   rtsPowerSig = rtsGame.structures.length;
 }
 
 /** Structure count the tethers were last drawn for — a cheap "did the base change shape" test. */
 let rtsPowerSig = -1;
+
+/**
+ * Keep the unrest rings on the data centers, and the level they are drawn at current.
+ *
+ * The ring SET only changes when a data center is built or falls, which the same structure-count
+ * signature already catches; the LEVEL moves every frame and is a single number, so it is pushed
+ * unconditionally.
+ */
+function refreshUnrestRings(): void {
+  if (!rtsGame || !rtsBuild) return;
+  rtsBuild.setUnrestLevel(rtsGame.unrest);
+}
+
+/** Rebuild the ring geometry from the data centers currently standing. */
+function refreshUnrestSites(): void {
+  if (!rtsGame || !rtsBuild) return;
+  rtsBuild.setUnrestSites(rtsGame.structuresOfType('supply').map((s) => ({ lon: s.lon, lat: s.lat })));
+}
 
 /** The decide-fate popup for a caught violator: fine it for money, or let it go. */
 function openViolationMenu(screenX: number, screenY: number, index: number): void {
@@ -2899,8 +2980,10 @@ function spawnProducedUnit(structureId: number, unit: RtsUnitId): void {
   }
   const idx = unitField.spawnRtsUnit(def.meshKind, spawnLon, spawnLat);
   // Supply was already reserved when this was queued, so don't charge it twice.
-  const state = rtsGame.registerUnit(idx, unit, false);
-  unitField.armRtsCombat(idx, 0, armamentOf(def.meshKind, state.loadout));
+  rtsGame.registerUnit(idx, unit, false);
+  // Rolls out already carrying everything the company has researched — a factory that shipped the
+  // pre-upgrade version of a machine you paid to improve would just be a bug with a story.
+  unitField.armRtsCombat(idx, 0, armamentOf(def.meshKind, rtsGame.researched));
   const rally = rtsGame.rally.get(structureId);
   if (rally) unitField.moveUnitTo(idx, rally.lon, rally.lat);
   updateUnitHud();
@@ -3035,6 +3118,7 @@ function fireAbilityAt(screen: Cesium.Cartesian2): void {
   }
   if (!rtsGame.fireAbility(structureId, id)) return;
   unitField.callOrbitalStrike(g.lon, g.lat, ORBITAL);
+  rtsOrbitalFired = true;
   sound.play('orderLethal');
   const fall = Math.round(ORBITAL.dropFromM / ORBITAL.speedMps);
   toast(`◈ ROUND AWAY · IMPACT IN ${fall}s · CLEAR THE RING`);
@@ -3378,7 +3462,9 @@ function pickMillstoneBase(): MillstoneDirector | null {
 /** Advance Millstone's wave clock and field anything it sends. */
 function runMillstone(dt: number): void {
   if (!millstone || !unitField || rtsEnded) return;
-  const wave = millstone.tick(dt);
+  // Unrest runs Millstone's clock fast — the public's anger at your data centers is why the next
+  // wave is early. See game/rts/unrest.ts.
+  const wave = millstone.tick(dt, rtsGame?.unrestPressure ?? 1);
   if (!wave) return;
   let fielded = 0;
   for (const w of wave) {
@@ -4828,6 +4914,14 @@ const ENEMY_NEXUS_ID = -1;
 let rtsBuild: RtsBuildLayer | null = null;
 /** The RTS build command bar, or null outside a match. */
 let rtsCmd: RtsCommandBar | null = null;
+/** The objective chain panel, or null outside a match. */
+let rtsObjectives: RtsObjectivePanel | null = null;
+/** Objectives cleared this match. */
+const rtsObjectivesDone = new Set<ObjectiveId>();
+/** Whether an orbital strike has been fired this match — an objective nothing else records. */
+let rtsOrbitalFired = false;
+/** Seconds until the next objective check. Conditions move slowly; sixty checks a second is waste. */
+let rtsObjClock = 0;
 /** The theater's surveyed obelisk sites — where obelisks may be built. */
 let rtsSites: BuildSite[] = [];
 /** Global obelisk indices already carrying an obelisk (the Nexus, then anything built). */
@@ -6351,15 +6445,6 @@ window.addEventListener('keydown', (e) => {
           beginPlacement(hit);
           return;
         }
-      } else if (ctx.kind === 'loadout') {
-        // Mounts are numbered, so the key IS the catalog index. Fits into the first empty
-        // hardpoint — the same default the card opens on, so the keyboard and the mouse agree.
-        const m = mountsFor(ctx.meshKind).find((x) => x.hotkey === k);
-        if (m) {
-          const empty = ctx.loadout.indexOf(null);
-          fitMountOn(ctx.unitIndex, empty >= 0 ? empty : 0, m.id);
-          return;
-        }
       }
     }
   }
@@ -6457,7 +6542,6 @@ if (import.meta.env.DEV) {
     rtsSelectedCardStructure,
     rtsUnitAction,
     updateUnitPanel,
-    fitMountOn,
     armamentOf,
     spawnMillstoneAt,
     groundAt,

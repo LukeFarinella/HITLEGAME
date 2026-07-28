@@ -88,9 +88,15 @@
           <span id="grts-obelisks">1</span> OBELISKS ·
           <span id="grts-supply">0 / 10</span> SUPPLY
         </div>
+        <!-- What the data centers are costing you: how angry the public is, and how many sheds. -->
+        <div class="grts-sub grts-unrest" id="grts-unrest"></div>
         <!-- Millstone threat readout: their Nexus integrity and the wave clock. -->
         <div class="grts-sub" id="grts-threat"></div>
       </div>
+
+      <!-- RTS objective chain: right-hand side, auto-populated from src/game/rts/objectives.ts.
+           Acts as the mode's tutorial — it names the next thing to build, all the way to the win. -->
+      <div id="g-rts-obj" hidden></div>
 
       <!-- RTS build command bar: bottom-centre, one chip per buildable structure. Rows generated in
            src/ui/rtsCommand.ts. Only shown during an RTS match. -->

@@ -16,8 +16,8 @@
 import { ABILITY_BY_ID, STRUCTURES, type AbilityId, type Structure, type StructureType } from './structures';
 import { RTS_UNITS, RTS_REGEN, type RtsUnitId } from './units';
 import { RESEARCH, type ResearchId } from './research';
-import { hardpointsOf } from './combat';
-import { MOUNT_BY_ID, mountFits, type RtsLoadout, type WeaponId } from './weapons';
+import { kindsTouchedBy } from './research';
+import { stepUnrest, unrestPressure } from './unrest';
 
 /** Economy tuning. One place, so the whole balance of the opening is a handful of readable numbers. */
 export const RTS_ECON = {
@@ -52,12 +52,6 @@ export interface RtsUnitState {
   unit: RtsUnitId;
   shield: number;
   energy: number;
-  /**
-   * What is bolted into this unit's hardpoints, one entry per slot. Per-UNIT, not per-type: two
-   * marshals rolled off the same line can carry different weapons, which is the whole point of
-   * fitting rather than researching. Empty slots are null.
-   */
-  loadout: RtsLoadout;
 }
 
 /** One unit waiting in a building's production queue. */
@@ -101,6 +95,13 @@ export class RtsGame {
    * the old one was still charging, because the new building's id is not the dead one's.
    */
   private abilityCd = new Map<number, Map<AbilityId, number>>();
+
+  /**
+   * How angry the public is, 0–1. Driven entirely by how many DATA CENTERS are standing — see
+   * {@link ./unrest}. Match state rather than a global, because it is a fact about this skirmish's
+   * ground and should not follow the player into the next one.
+   */
+  private _unrest = 0;
 
   /** Research completed — a set of standing capabilities (e.g. auto-fine). */
   private _researched = new Set<ResearchId>();
@@ -279,54 +280,11 @@ export class RtsGame {
       unit,
       shield: def.maxShield,
       energy: def.maxEnergy,
-      // Rolls out with every slot empty. A unit is never born with a weapon it didn't get fitted —
-      // the basic attack is the chassis', and everything else is bought.
-      loadout: new Array(hardpointsOf(def.meshKind)).fill(null),
     };
     this.unitStates.set(index, s);
     if (chargeSupply) this._supplyUsed += def.supply;
     this.changed();
     return s;
-  }
-
-  // ---- hardpoints ------------------------------------------------------------------------------
-
-  /**
-   * Why a mount can't go into a slot right now, or null if it can.
-   *
-   * Fitting is deliberately cheap to check and impossible to undo: there's no "unfit and refund"
-   * path, because a pod bolted to a chassis in the field is spent. Replacing one costs full price,
-   * which is what stops the loadout screen becoming a free toybox to fiddle with between waves.
-   */
-  fitBlocker(index: number, slot: number, mount: WeaponId): string | null {
-    const s = this.unitStates.get(index);
-    if (!s) return 'NO SUCH UNIT';
-    if (slot < 0 || slot >= s.loadout.length) return 'NO SUCH HARDPOINT';
-    const def = MOUNT_BY_ID.get(mount);
-    if (!def) return 'NO SUCH MOUNT';
-    if (!mountFits(def, RTS_UNITS[s.unit].meshKind)) return 'DOES NOT FIT';
-    if (s.loadout[slot] === mount) return 'ALREADY FITTED';
-    if (this._money < def.cost) return 'INSUFFICIENT FUNDS';
-    return null;
-  }
-
-  /**
-   * Bolt a mount into one of a unit's hardpoints, charging for it. Returns false and changes
-   * nothing if {@link fitBlocker} would have refused. The caller re-arms the unit in the field —
-   * this owns the money and the record of what is fitted, not the combat stats.
-   */
-  fitMount(index: number, slot: number, mount: WeaponId): boolean {
-    if (this.fitBlocker(index, slot, mount)) return false;
-    const s = this.unitStates.get(index)!;
-    this._money -= MOUNT_BY_ID.get(mount)!.cost;
-    s.loadout[slot] = mount;
-    this.changed();
-    return true;
-  }
-
-  /** What a unit is carrying, or an empty list if it isn't ours. */
-  loadoutOf(index: number): RtsLoadout {
-    return this.unitStates.get(index)?.loadout ?? [];
   }
 
   /**
@@ -391,23 +349,41 @@ export class RtsGame {
     return true;
   }
 
-  /** Advance research; mark anything finished as done. */
-  tickResearch(dt: number): void {
-    let changed = false;
+  /**
+   * Advance research; mark anything finished as done and report it.
+   *
+   * The returned list is what the scene needs to make an upgrade REAL in the field: an upgrade that
+   * only applied to units built afterwards would be a trap, since the army you already paid for is
+   * the army standing in front of you. The scene re-arms every live unit of the chassis named by
+   * {@link kindsTouchedBy}.
+   */
+  tickResearch(dt: number): { id: ResearchId; kinds: ReturnType<typeof kindsTouchedBy> }[] {
+    const done: { id: ResearchId; kinds: ReturnType<typeof kindsTouchedBy> }[] = [];
     for (const [sid, r] of this.researching) {
       r.remainingS -= dt;
       if (r.remainingS <= 0) {
         this._researched.add(r.id);
         this.researching.delete(sid);
-        changed = true;
+        done.push({ id: r.id, kinds: kindsTouchedBy(r.id) });
       }
     }
-    if (changed) this.changed();
+    if (done.length) this.changed();
+    return done;
   }
 
   /** The research a structure is working on, for the command card's progress. */
   researchAt(structureId: number): { id: ResearchId; remainingS: number; totalS: number } | undefined {
     return this.researching.get(structureId);
+  }
+
+  /**
+   * Everything researched, for the combat layer to fold into an armament.
+   *
+   * Handed out as the live set rather than a copy: it is read on every unit spawn and every re-arm,
+   * and it is only ever written through {@link tickResearch}.
+   */
+  get researched(): ReadonlySet<ResearchId> {
+    return this._researched;
   }
 
   // ---- structure abilities ---------------------------------------------------------------------
@@ -475,6 +451,34 @@ export class RtsGame {
     // Only announce the transition to READY. Announcing every frame of a 50-second charge would
     // repaint the whole command card fifty times a second for a number nobody is reading.
     if (ready) this.changed();
+  }
+
+  // ---- public unrest -----------------------------------------------------------------------------
+
+  /** How many data centers are standing — the only thing that drives unrest. */
+  dataCenterCount(): number {
+    return this.structures.reduce((n, s) => n + (s.type === 'supply' ? 1 : 0), 0);
+  }
+
+  /** How angry the ground is, 0–1. */
+  get unrest(): number {
+    return this._unrest;
+  }
+
+  /** What that anger does: the multiplier on how fast Millstone's wave clock runs. */
+  get unrestPressure(): number {
+    return unrestPressure(this._unrest);
+  }
+
+  /**
+   * Advance unrest for a frame.
+   *
+   * Deliberately does NOT announce a change — this moves every single frame a data center is up, and
+   * repainting the command card sixty times a second for a number in the fourth decimal place would
+   * be the most expensive thing in the mode. The HUD reads it directly instead.
+   */
+  tickUnrest(dt: number): void {
+    this._unrest = stepUnrest(this._unrest, this.dataCenterCount(), dt);
   }
 
   /** Banked money, floored — fractional accrual is real but never shown as a fraction. */
