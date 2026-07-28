@@ -3187,6 +3187,8 @@ interface PlacementResolve {
   valid: boolean;
   reason: string | null;
   siteIndex?: number;
+  /** Power radius to preview, for a structure that projects one. Obelisks only. */
+  powerM?: number;
 }
 
 /** Resolve where the current placement would land under the cursor, and whether it's legal. */
@@ -3210,10 +3212,18 @@ function resolvePlacement(screen: Cesium.Cartesian2): PlacementResolve | null {
     }
     if (!best) return { lon: g.lon, lat: g.lat, radiusM: def.footprintM, valid: false, reason: 'NO OPEN SITE' };
     if (bestD > BUILD_RULES.OBELISK_SNAP_M) {
-      return { lon: best.lon, lat: best.lat, radiusM: def.footprintM, valid: false, reason: 'MOVE ONTO A SITE', siteIndex: best.index };
+      return {
+        lon: best.lon, lat: best.lat, radiusM: def.footprintM,
+        valid: false, reason: 'MOVE ONTO A SITE', siteIndex: best.index,
+        powerM: obeliskPowerRadiusM(),
+      };
     }
     const reason = validateObelisk(best);
-    return { lon: best.lon, lat: best.lat, radiusM: def.footprintM, valid: reason === null, reason, siteIndex: best.index };
+    return {
+      lon: best.lon, lat: best.lat, radiusM: def.footprintM,
+      valid: reason === null, reason, siteIndex: best.index,
+      powerM: obeliskPowerRadiusM(),
+    };
   }
 
   const reason = validateFacility(g.lon, g.lat, rtsPlacing);
@@ -3227,18 +3237,30 @@ function validateObelisk(site: BuildSite): string | null {
   if (theaterMap && theaterMap.heightAt(site.lon, site.lat) < 1) return 'AT SEA';
   // Millstone's home site is not a build slot while Millstone is still standing on it.
   if (millstone && !millstone.destroyed && site.index === millstone.siteIndex) return 'MILLSTONE HOLDS THIS SITE';
-  // Must be within reach of an existing obelisk (the Nexus counts), so expansion runs in a chain.
-  const near = rtsGame.structures.some(
-    (s) =>
-      (s.type === 'obelisk' || s.type === 'nexus') &&
-      metresBetween(site.lon, site.lat, s.lon, s.lat) <=
-        BUILD_RULES.OBELISK_REACH_M + rtsGame!.economy.obeliskReachM,
-  );
-  return near ? null : 'OUT OF REACH OF YOUR NETWORK';
+  // And that is the whole rule. An obelisk may stand on ANY surveyed site, however far from anything
+  // you already own — see the note on validateFacility.
+  return null;
 }
+
+/**
+ * Why an obelisk can't stand on this site, or null.
+ *
+ * NOTE ON REACH. There is deliberately no distance rule here any more. An obelisk used to have to sit
+ * within 14 km of one you already owned, which meant expansion crept outward in a chain and the
+ * commonest thing a new player did — click a distant dot — answered OUT OF REACH OF YOUR NETWORK.
+ * The obelisk is a PYLON: it is the thing that projects the right to build, so gating where it may go
+ * on where you have already built made it the one structure that could not open new ground. Any
+ * surveyed site, anywhere, is legal. What it costs you is the 250, the worker's walk, and the fact
+ * that a forward obelisk is undefended ground with your name on it.
+ */
 
 /** Whether a structure is an obelisk — the Nexus is one. Power comes from these and only these. */
 const isObelisk = (t: StructureType): boolean => t === 'obelisk' || t === 'nexus';
+
+/** How far one obelisk currently projects the right to build, including WIDE APERTURE. */
+function obeliskPowerRadiusM(): number {
+  return BUILD_RULES.POWER_RADIUS_M + (rtsGame?.economy.powerRadiusM ?? 0);
+}
 
 /**
  * The obelisk powering a point, or null. Nearest wins, so a building in two obelisks' range draws its
@@ -3247,7 +3269,7 @@ const isObelisk = (t: StructureType): boolean => t === 'obelisk' || t === 'nexus
 function poweringObelisk(lon: number, lat: number): Structure | null {
   if (!rtsGame) return null;
   let best: Structure | null = null;
-  let bd = BUILD_RULES.POWER_RADIUS_M + rtsGame.economy.powerRadiusM;
+  let bd = obeliskPowerRadiusM();
   for (const s of rtsGame.structures) {
     if (!isObelisk(s.type)) continue;
     const d = metresBetween(lon, lat, s.lon, s.lat);
@@ -3295,7 +3317,7 @@ function updatePlacementGhost(screen: Cesium.Cartesian2): void {
     rtsBuild?.hideGhost();
     return;
   }
-  rtsBuild.showGhost(r.lon, r.lat, r.radiusM, r.valid);
+  rtsBuild.showGhost(r.lon, r.lat, r.radiusM, r.valid, r.powerM ?? 0);
 }
 
 /**
@@ -6531,6 +6553,9 @@ if (import.meta.env.DEV) {
     },
     waterNear,
     buildObeliskAt,
+    validateObelisk,
+    updatePlacementGhost,
+    cancelPlacement,
     beginPlacement,
     validateFacility,
     enqueueUnit,

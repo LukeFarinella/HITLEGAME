@@ -79,8 +79,6 @@ export interface ResearchEffects {
   unrestMult?: number;
   /** Metres added to how far an obelisk's power reaches, i.e. how far from one you may build. */
   powerRadiusM?: number;
-  /** Metres added to how far a new obelisk may be planted from your existing network. */
-  obeliskReachM?: number;
   /** Multiplier on obelisk and Nexus hit points. */
   obeliskHpMult?: number;
   /** Throws every surveyed site in the theater open as a build site, immediately. */
@@ -164,12 +162,12 @@ export const RESEARCH: Record<ResearchId, ResearchDef> = {
   'full-survey': {
     id: 'full-survey',
     name: 'FULL SURVEY',
-    blurb: 'Buy the whole survey at once: every site in the theater opens as a build slot, and obelisks may be planted twice as far out.',
+    blurb: 'Buy the whole survey at once. Every site in the theater opens as a build slot, instead of waiting for the obelisk count to earn them.',
     cost: 450,
     timeS: 36,
     producedBy: 'acquisitions',
     hotkey: 'E',
-    effects: { opensAllSites: true, obeliskReachM: 10_000 },
+    effects: { opensAllSites: true },
   },
 
   // ---- ACQUISITIONS · authority -----------------------------------------------------------------

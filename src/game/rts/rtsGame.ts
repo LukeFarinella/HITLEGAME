@@ -573,7 +573,6 @@ function foldEffects(done: ReadonlySet<ResearchId>): Required<ResearchEffects> {
     fineMult: 1,
     unrestMult: 1,
     powerRadiusM: 0,
-    obeliskReachM: 0,
     obeliskHpMult: 1,
     opensAllSites: false,
     autoFine: false,
@@ -586,7 +585,6 @@ function foldEffects(done: ReadonlySet<ResearchId>): Required<ResearchEffects> {
     out.fineMult *= e.fineMult ?? 1;
     out.unrestMult *= e.unrestMult ?? 1;
     out.powerRadiusM += e.powerRadiusM ?? 0;
-    out.obeliskReachM += e.obeliskReachM ?? 0;
     out.obeliskHpMult *= e.obeliskHpMult ?? 1;
     out.opensAllSites ||= e.opensAllSites ?? false;
     out.autoFine ||= e.autoFine ?? false;

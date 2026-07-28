@@ -7,10 +7,13 @@
  *
  * Three placement kinds, matching the design:
  *   - `site`  — obelisks. They may only stand on a SURVEYED SITE (one of the theater's predetermined
- *               obelisk positions). The Nexus is one of these; every other is a build slot.
- *   - `free`  — facilities. Placed on open ground, but only NEAR A ROAD and WITHIN REACH of the Nexus
- *               or an existing facility, so a base grows as a connected sprawl rather than teleporting
- *               a factory into the wilderness.
+ *               obelisk positions) — but on ANY of them, however far out. The Nexus is one of these;
+ *               every other is a build slot. There is no distance rule, because the obelisk is the
+ *               PYLON: it is the thing that projects the right to build, so making where it may go
+ *               depend on where you have already built would leave nothing able to open new ground.
+ *   - `free`  — facilities. Placed on open ground, NEAR A ROAD and inside the POWER RADIUS of an
+ *               obelisk. That is the whole base-building loop: plant a pylon on a site, build the
+ *               cluster it lights up, plant the next pylon further out.
  *   - `shore` — the harbor. Stands on LAND but within {@link BUILD_RULES.SHORE_DIST_M} of navigable
  *               water, and is exempt from the road rule: a quay is defined by the water it reaches,
  *               and demanding a road as well makes a coastline of cliffs and beaches unbuildable.
@@ -78,7 +81,7 @@ export const STRUCTURES: Record<StructureType, StructureDef> = {
   obelisk: {
     type: 'obelisk',
     name: 'OBELISK',
-    blurb: 'Economy and vision. Raises your income and its cap. Buildable only on a surveyed site.',
+    blurb: 'Pylon. Powers every building around it, and raises your income and its cap. Stands on any surveyed site, however far out.',
     cost: 250,
     maxHp: 700,
     placement: 'site',
@@ -197,12 +200,9 @@ export const STRUCTURES: Record<StructureType, StructureDef> = {
 
 /** Placement geometry, in metres. One place so the whole "where can I build" feel is a few numbers. */
 export const BUILD_RULES = {
-  /**
-   * A new obelisk must be within this of an existing live obelisk. The surveyed sites are the only
-   * legal spots; this keeps expansion a reachable chain outward rather than a site plonked across
-   * the map with no line back to your base.
-   */
-  OBELISK_REACH_M: 14_000,
+  // There is no OBELISK_REACH_M any more. An obelisk may stand on any surveyed site, however far
+  // out — it is the pylon that projects the right to build, so a rule about where it may go based on
+  // where you have already built made the one structure that opens new ground unable to open any.
   /** How close the cursor must be to a surveyed site for the obelisk ghost to snap onto it. */
   OBELISK_SNAP_M: 2500,
   /**

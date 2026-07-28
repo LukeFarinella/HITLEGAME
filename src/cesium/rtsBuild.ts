@@ -260,6 +260,8 @@ export class RtsBuildLayer {
 
   private roadGrid: RoadGrid;
   private ghostLine: Cesium.Polyline | undefined;
+  /** Second, wider ghost ring: the power a pylon would project from where the cursor is. */
+  private ghostPower: Cesium.Polyline | undefined;
 
   /** One instanced 3D-model batch per facility type — the buildings themselves. */
   private facilityBatch: Record<FacilityType, InstancedModelBatch>;
@@ -400,16 +402,43 @@ export class RtsBuildLayer {
   }
 
   /** Show the placement preview at a point, tinted by whether the spot is legal. */
-  showGhost(lon: number, lat: number, radiusM: number, valid: boolean): void {
+  /**
+   * Draw the placement ghost: a footprint ring, and optionally the POWER radius the thing would
+   * project if it were built.
+   *
+   * The power ring is what makes an obelisk legible as a pylon. Without it the player is told "NO
+   * OBELISK POWER" at a spot and has to guess how far away the nearest mast would have to be; with
+   * it, planting one shows exactly how much ground it opens, before paying for it.
+   */
+  showGhost(lon: number, lat: number, radiusM: number, valid: boolean, powerM = 0): void {
     const color = valid
       ? Cesium.Color.fromCssColorString('#3FBF6F').withAlpha(0.9)
       : Cesium.Color.fromCssColorString('#E23A2E').withAlpha(0.9);
-    const positions = ringPositions(lon, lat, radiusM, this.heightAt(lon, lat) + 25);
+    const h = this.heightAt(lon, lat);
+    const positions = ringPositions(lon, lat, radiusM, h + 25);
     if (!this.ghostLine) {
       this.ghostLine = this.ghost.add({ positions, width: 3, material: Cesium.Material.fromType('Color', { color }) });
     } else {
       this.ghostLine.positions = positions;
       (this.ghostLine.material as Cesium.Material).uniforms.color = color;
+    }
+
+    if (powerM <= 0) {
+      if (this.ghostPower) {
+        this.ghost.remove(this.ghostPower);
+        this.ghostPower = undefined;
+      }
+      return;
+    }
+    // Fainter and wider than the footprint, in the obelisk red, so it reads as "what this would
+    // light up" rather than as a second thing being placed.
+    const pcol = Cesium.Color.fromCssColorString('#E23A2E').withAlpha(valid ? 0.5 : 0.22);
+    const ppos = ringPositions(lon, lat, powerM, h + 25, 72);
+    if (!this.ghostPower) {
+      this.ghostPower = this.ghost.add({ positions: ppos, width: 1.6, material: Cesium.Material.fromType('Color', { color: pcol }) });
+    } else {
+      this.ghostPower.positions = ppos;
+      (this.ghostPower.material as Cesium.Material).uniforms.color = pcol;
     }
   }
 
@@ -417,6 +446,10 @@ export class RtsBuildLayer {
     if (this.ghostLine) {
       this.ghost.remove(this.ghostLine);
       this.ghostLine = undefined;
+    }
+    if (this.ghostPower) {
+      this.ghost.remove(this.ghostPower);
+      this.ghostPower = undefined;
     }
   }
 
