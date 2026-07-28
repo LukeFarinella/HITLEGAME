@@ -2859,6 +2859,12 @@ function rtsUnitAction(index: number): string {
     if (!onSite) return `MOVING TO ${name} SITE`;
     return `BUILDING ${name} · ${Math.ceil(cs.remainingS)}s`;
   }
+  // The field taking a unit to a fight is said out loud. A unit that walks off on its own without
+  // the card explaining why reads as a bug, and the operator needs to be able to tell an order they
+  // gave from one the field gave.
+  if (unitField?.isAssisting(index)) {
+    return unitField.platformStatus(index)?.moving ? 'RESPONDING' : 'DEFENDING';
+  }
   if (!unitField?.platformStatus(index)?.moving) return 'HOLDING';
   // An attack-moving unit still reads as "moving" while it is stopped mid-route shooting something,
   // which is exactly right: the order is still running.

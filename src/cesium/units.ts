@@ -291,6 +291,41 @@ const MELEE_LUNGE_MULT = 2.5;
 /** Metres up a structure its weapon fires from — the beam leaves the mast, not the pavement. */
 const STRUCT_MUZZLE_M = 170;
 
+// ---- automatic defence ---------------------------------------------------------------------------
+//
+// An army that stands and watches the building next to it be dismantled is not an army, it is a row
+// of statues. But a unit that wanders off to find a fight is worse: it is the field overriding the
+// operator, and it is how a defensive line quietly stops being a line.
+//
+// The rule that threads that: a unit answers a CALL. Something friendly — a unit or a building —
+// takes damage, that raises distress at the spot, and idle units within earshot go and deal with
+// whatever is causing it, then come back to where they were standing. Nothing responds to an enemy
+// merely being visible; the trigger is always a friendly getting hit, which is what makes it read as
+// defence rather than as the units playing the game for you.
+
+/** How far a unit will travel to answer a call. Roughly ten seconds' walk for the ground line. */
+const ASSIST_CALL_M = 1500;
+/** How close to the distress point a hostile must be to count as the thing causing it. */
+const ASSIST_ENGAGE_M = 900;
+/** Seconds a distress point stays live after the last hit there. */
+const DISTRESS_TTL_S = 5;
+/** Calls closer together than this are the same fight, not two. */
+const DISTRESS_MERGE_M = 350;
+/** Hard ceiling on live calls, so a base under general bombardment doesn't grow an unbounded list. */
+const DISTRESS_MAX = 24;
+/** Close enough to its post to call itself home again. */
+const POST_SLOP_M = 90;
+/** How far a target must move before an assisting unit re-paths to it — stops per-frame A* churn. */
+const ASSIST_REPATH_M = 220;
+/**
+ * Chassis that never answer a call.
+ *
+ * The worker, and only the worker. It has a weapon and will use it on anything that comes to it, but
+ * a builder that downs tools and runs at a firefight is a builder that isn't building — and it dies
+ * there, because a bucket is not a weapon. Its job is the job.
+ */
+const NO_ASSIST = new Set<UnitKind>(['skid']);
+
 /** Clicking this close to a leg already on the route closes the loop instead of adding a leg. */
 const LOOP_SNAP_M = 1500;
 
@@ -683,6 +718,15 @@ interface Unit {
     reachM: number;
     /** True when every weapon it owns is melee: the units that have to close to matter. */
     meleeOnly: boolean;
+    /**
+     * The field, not the operator, is moving this unit right now — it is answering a call.
+     *
+     * Kept explicitly so the two kinds of order can never be confused. An operator order always
+     * outranks an assist and clears it; an assist only ever takes a unit that had no order at all.
+     */
+    assist?: boolean;
+    /** Where it stood when it left to assist, so it can go back. Cleared when it gets there. */
+    post?: { lon: number; lat: number };
     /** Garrison flag: stand the ground instead of marching on the enemy (Millstone's Nexus guard). */
     hold?: boolean;
     /**
@@ -1427,6 +1471,8 @@ export class UnitField {
   private munitions: Munition[] = [];
   /** Per-structure weapon cooldowns, keyed by the id the scene passes in. */
   private structCd = new Map<number, number>();
+  /** Live calls for help: somewhere friendly took a hit recently. See the automatic-defence note. */
+  private distress: { lon: number; lat: number; ageS: number }[] = [];
 
   /**
    * Arm an existing platform unit for the match — the opening units and everything produced.
@@ -1542,6 +1588,8 @@ export class UnitField {
   private damageUnit(j: number, dmg: number, ev: RtsCombatEvents): void {
     const v = this.units[j];
     if (!v || v.dead || !v.rtsc) return;
+    // Anything of the player's taking a hit is a call for help, wherever it came from.
+    if (v.rtsc.side === 0) this.raiseDistress(v.lon, v.lat);
     v.rtsc.hp -= dmg;
     if (v.rtsc.hp > 0) return;
     v.dead = true;
@@ -1597,6 +1645,7 @@ export class UnitField {
         if (s.side === m.side) continue; // a shell does not raze the base that fired it
         if (this.distLL(m.tlon, m.tlat, s.lon, s.lat) - s.radiusM <= r) {
           ev.hits.push({ id: s.id, dmg: m.dmg, lon: s.lon, lat: s.lat });
+          if (s.side === 0) this.raiseDistress(s.lon, s.lat);
         }
       }
     }
@@ -1639,6 +1688,12 @@ export class UnitField {
       if (!u || u.dead || !u.rtsc) this.rtsCombatants.delete(i);
       else list.push(i);
     }
+    // Calls age out whether or not anyone answered them, so a fight that ends releases the units
+    // that came to it rather than leaving them standing in a field somewhere.
+    if (this.distress.length) {
+      for (const d of this.distress) d.ageS += dt;
+      this.distress = this.distress.filter((d) => d.ageS < DISTRESS_TTL_S);
+    }
     this.stepMunitions(dt, structs, list, ev);
     if (!list.length) return ev;
 
@@ -1648,6 +1703,7 @@ export class UnitField {
       const c = u.rtsc!;
 
       // ---- movement ----------------------------------------------------------------------------
+      let handled = false;
       if (c.side === 1 && !c.hold) {
         // Something to fight, close by, beats a building further off. Without this a melee army
         // walks straight past the army shooting it in order to chew on a supply depot.
@@ -1689,7 +1745,12 @@ export class UnitField {
             u.route = undefined;
           }
         }
-      } else if (c.meleeOnly && u.tlon === undefined) {
+        handled = true;
+      } else if (c.side === 0 && !c.hold) {
+        handled = this.autoAssist(u, c, list);
+      }
+
+      if (!handled && c.meleeOnly && u.tlon === undefined) {
         // A melee unit with no orders takes the last few metres itself. Bounded hard: it will lunge
         // at something already on top of it, and it will not wander off across the map to find one,
         // because that would be the field overriding an operator who chose to hold this ground.
@@ -1754,13 +1815,124 @@ export class UnitField {
           const talt = this.heightAt(ts.lon, ts.lat) + 60;
           this.fireAt(u, c.side, falt, w, ts.lon, ts.lat, talt, ev);
           // A projectile books its damage on arrival, not on firing.
-          if (w.kind !== 'projectile') ev.hits.push({ id: ts.id, dmg: w.dmg, lon: ts.lon, lat: ts.lat });
+          if (w.kind !== 'projectile') {
+            ev.hits.push({ id: ts.id, dmg: w.dmg, lon: ts.lon, lat: ts.lat });
+            if (ts.side === 0) this.raiseDistress(ts.lon, ts.lat);
+          }
         }
       }
     }
 
     this.structFire(dt, structs, list, ev);
     return ev;
+  }
+
+  /** Record that something friendly was hit here — a call for help. Nearby calls merge into one. */
+  private raiseDistress(lon: number, lat: number): void {
+    for (const d of this.distress) {
+      if (this.distLL(d.lon, d.lat, lon, lat) < DISTRESS_MERGE_M) {
+        d.ageS = 0; // the fight is still going; keep the call alive
+        return;
+      }
+    }
+    if (this.distress.length >= DISTRESS_MAX) this.distress.shift();
+    this.distress.push({ lon, lat, ageS: 0 });
+  }
+
+  /**
+   * One unit's automatic defence: answer a call, deal with what is causing it, come back.
+   *
+   * Returns whether the field took control of this unit's movement this frame — the caller uses that
+   * to decide whether the melee lunge should also get a turn.
+   *
+   * The whole design is in what it REFUSES to do. It will not take a unit that has an operator order
+   * (an order always outranks the field, and issuing one cancels an assist outright). It will not
+   * respond to an enemy merely being in view, only to something friendly actually being hit. It will
+   * not chase past {@link ASSIST_CALL_M}. And it remembers where the unit was standing, so a line
+   * that steps out to deal with a raid is a line again afterwards rather than a scatter of units
+   * wherever the last fight happened to end.
+   */
+  private autoAssist(u: Unit, c: NonNullable<Unit['rtsc']>, live: number[]): boolean {
+    if (NO_ASSIST.has(u.kind)) return false;
+    // An operator order outranks the field. Only a unit the field is already moving, or one standing
+    // with nothing to do, is available.
+    if (u.tlon !== undefined && !c.assist) return false;
+
+    // The nearest hostile that is causing a live call within earshot.
+    let tj = -1;
+    let bd = Infinity;
+    for (const d of this.distress) {
+      if (this.distLL(d.lon, d.lat, u.lon, u.lat) > ASSIST_CALL_M) continue;
+      for (const j of live) {
+        const v = this.units[j];
+        if (!v || v.dead || !v.rtsc || v.rtsc.side === c.side) continue;
+        if (this.distLL(d.lon, d.lat, v.lon, v.lat) > ASSIST_ENGAGE_M) continue;
+        const du = this.distM(u, v.lon, v.lat);
+        if (du < bd) {
+          bd = du;
+          tj = j;
+        }
+      }
+    }
+
+    if (tj >= 0) {
+      const v = this.units[tj];
+      if (!c.assist) {
+        c.assist = true;
+        c.post = { lon: u.lon, lat: u.lat };
+      }
+      const stop = Math.max(120, c.reachM * 0.85);
+      if (bd > stop) this.assistDriveTo(u, v.lon, v.lat);
+      else if (u.tlon !== undefined) this.halt(u);
+      return true;
+    }
+
+    if (!c.assist) return false;
+    // Nothing left causing trouble. Back to the post — and once there, hand the unit back.
+    const post = c.post;
+    if (!post) {
+      c.assist = false;
+      return false;
+    }
+    if (this.distLL(post.lon, post.lat, u.lon, u.lat) <= POST_SLOP_M) {
+      c.assist = false;
+      c.post = undefined;
+      this.halt(u);
+      return true;
+    }
+    this.assistDriveTo(u, post.lon, post.lat);
+    return true;
+  }
+
+  /**
+   * Send an assisting unit somewhere, respecting the road grid the same way an operator order does.
+   *
+   * Re-pathed only when the destination has moved materially, because a chased target moves every
+   * frame and running A* per unit per frame to shave a few metres off a route would cost more than
+   * the whole rest of the combat pass. A road-bound unit with no route simply doesn't go — the
+   * constraint holds for the field exactly as it holds for the player.
+   */
+  private assistDriveTo(u: Unit, lon: number, lat: number): void {
+    if (u.tlon !== undefined && this.distLL(u.tlon, u.tlat!, lon, lat) < ASSIST_REPATH_M) return;
+    const drive = this.roadRouteFor(u.kind as PlatformId, u, lon, lat);
+    if (drive === null) return; // road-bound and unreachable: it stays where it is
+    const [first, ...rest] = drive ?? [{ lon, lat }];
+    u.tlon = first.lon;
+    u.tlat = first.lat;
+    u.route = rest;
+    u.loop = false;
+  }
+
+  /** Stop where you are, dropping any route with it. */
+  private halt(u: Unit): void {
+    u.tlon = undefined;
+    u.tlat = undefined;
+    u.route = undefined;
+  }
+
+  /** Whether the FIELD is currently moving this unit rather than the operator — for the unit card. */
+  isAssisting(index: number): boolean {
+    return !!this.units[index]?.rtsc?.assist;
   }
 
   /**
@@ -2805,8 +2977,14 @@ export class UnitField {
     if (drive === null) return false;
 
     // Every accepted order re-states the stance, so an ordinary move ENDS an attack move rather than
-    // leaving the unit quietly still braking for contacts on a route the operator has replaced.
-    if (u.rtsc) u.rtsc.attackMove = attackMove;
+    // leaving the unit quietly still braking for contacts on a route the operator has replaced. It
+    // also ends any AUTOMATIC defence: the operator has said where this unit goes, so the field's
+    // idea of where it was standing is no longer worth returning to.
+    if (u.rtsc) {
+      u.rtsc.attackMove = attackMove;
+      u.rtsc.assist = false;
+      u.rtsc.post = undefined;
+    }
 
     if (!append || u.tlon === undefined) {
       const [first, ...rest] = drive ?? [{ lon, lat }];
