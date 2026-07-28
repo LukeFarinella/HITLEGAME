@@ -253,6 +253,22 @@ function zeroByKind(): Record<UnitKind, number> {
  */
 const WATER_BOUND = new Set<UnitKind>(['naval', 'usv']);
 
+/**
+ * Chassis that take the STREETS for the long haul but leave them for the last stretch, and are never
+ * refused an order.
+ *
+ * Distinct from the catalog's `roadBound`, which is a hard constraint: a road-bound quadruped ordered
+ * across a river simply cannot go, and that refusal is the whole point of the flag. A worker cannot
+ * work that way. It has to reach a construction site, and sites are not chosen for their kerbside
+ * access — an obelisk stands on a surveyed position that may be a mile from the nearest street. A
+ * worker that refused those, or stopped at the kerb and stood there while the build clock never
+ * started, would have quietly undone the rule that an obelisk may go anywhere.
+ *
+ * So: drive the grid where there is one, go direct where there isn't, and always arrive. Which is
+ * also just what a works vehicle does.
+ */
+const ROAD_PREFERRING = new Set<UnitKind>(['skid']);
+
 /** Within this many metres of its ordered destination, a platform is "on station". */
 const ARRIVE_M = 120;
 
@@ -272,6 +288,8 @@ const MILLSTONE_AGGRO_M = 2500;
  * decision. Anything further is the operator's call.
  */
 const MELEE_LUNGE_MULT = 2.5;
+/** Metres up a structure its weapon fires from — the beam leaves the mast, not the pavement. */
+const STRUCT_MUZZLE_M = 170;
 
 /** Clicking this close to a leg already on the route closes the loop instead of adding a leg. */
 const LOOP_SNAP_M = 1500;
@@ -731,6 +749,15 @@ export interface RtsStructTarget {
   lat: number;
   /** Footprint radius — range is measured to the rim, and it's how big the thing is to shoot at. */
   radiusM: number;
+  /**
+   * A weapon the structure itself fires, if it has one.
+   *
+   * Structures were purely targets until the Nexus got a laser. Handed in per frame with the target
+   * rather than stored, so the scene stays the single owner of what a building IS — this module only
+   * owns the shooting. The cooldown is the exception and lives here, keyed by structure id, because
+   * a rate of fire that reset every frame would not be a rate of fire.
+   */
+  weapon?: Weapon;
 }
 
 /** One weapon discharge, for the renderer. `kind` decides how it is drawn. */
@@ -1398,6 +1425,8 @@ export class UnitField {
 
   /** Rounds in the air, both sides. Advanced by the combat pass, drawn by the scene. */
   private munitions: Munition[] = [];
+  /** Per-structure weapon cooldowns, keyed by the id the scene passes in. */
+  private structCd = new Map<number, number>();
 
   /**
    * Arm an existing platform unit for the match — the opening units and everything produced.
@@ -1729,7 +1758,55 @@ export class UnitField {
         }
       }
     }
+
+    this.structFire(dt, structs, list, ev);
     return ev;
+  }
+
+  /**
+   * Armed structures take their shot.
+   *
+   * Runs after the units, so a building never gets to fire at something its own army already killed
+   * this frame. Deliberately simple compared to the unit pass: a structure has one weapon, it does
+   * not move, it does not choose between a unit and a building, and it shoots the NEAREST thing in
+   * reach. A defensive emplacement is not making decisions — it is a tripwire with a barrel on it.
+   */
+  private structFire(dt: number, structs: RtsStructTarget[], live: number[], ev: RtsCombatEvents): void {
+    for (const s of structs) {
+      const w = s.weapon;
+      if (!w) continue;
+      const cd = Math.max(0, (this.structCd.get(s.id) ?? 0) - dt);
+      if (cd > 0) {
+        this.structCd.set(s.id, cd);
+        continue;
+      }
+      // Reach is measured from the RIM, matching how a unit ranges onto a structure, so the width of
+      // the footprint doesn't quietly shorten the gun.
+      let tj = -1;
+      let bd = w.rangeM + s.radiusM;
+      for (const j of live) {
+        const v = this.units[j];
+        if (!v || v.dead || !v.rtsc || v.rtsc.side === s.side) continue;
+        const d = this.distLL(s.lon, s.lat, v.lon, v.lat);
+        if (d <= bd) {
+          bd = d;
+          tj = j;
+        }
+      }
+      if (tj < 0) {
+        this.structCd.set(s.id, 0);
+        continue;
+      }
+      const v = this.units[tj];
+      this.structCd.set(s.id, w.periodS);
+      ev.shots.push({
+        flon: s.lon, flat: s.lat, falt: this.heightAt(s.lon, s.lat) + STRUCT_MUZZLE_M,
+        tlon: v.lon, tlat: v.lat, talt: this.combatAltOf(v),
+        side: s.side,
+        kind: w.kind,
+      });
+      if (w.kind !== 'projectile') this.damageUnit(tj, w.dmg, ev);
+    }
   }
 
   /**
@@ -1798,6 +1875,7 @@ export class UnitField {
   /** Drop every round in the air — a match ending shouldn't rain shells on the next one. */
   clearMunitions(): void {
     this.munitions.length = 0;
+    this.structCd.clear();
   }
 
   /** Platform TYPES currently fielded, in catalog order. */
@@ -2931,7 +3009,8 @@ export class UnitField {
     lon: number,
     lat: number,
   ): { lon: number; lat: number }[] | null | undefined {
-    if (!PLATFORM_BY_ID.get(kind)?.roadBound) return undefined;
+    const prefers = ROAD_PREFERRING.has(kind);
+    if (!prefers && !PLATFORM_BY_ID.get(kind)?.roadBound) return undefined;
     const g = this.routeNet();
     if (!g) return undefined; // no roads in this theater at all: don't strand the unit
     const legs = u.route ?? [];
@@ -2940,7 +3019,13 @@ export class UnitField {
       : u.tlon !== undefined && u.tlat !== undefined
         ? { lon: u.tlon, lat: u.tlat }
         : { lon: u.lon, lat: u.lat };
-    return g.path(tail, { lon, lat });
+    const drive = g.path(tail, { lon, lat });
+    if (!prefers) return drive;
+    // A road-PREFERRING unit is never refused and always arrives. `path` snaps both ends to the
+    // nearest road node, so without the appended destination a worker would stop at the kerb and
+    // stand there — and construction only advances while the builder is on site. And a site with no
+    // road path at all (a remote obelisk, an unroaded ridge) still gets built: it drives direct.
+    return drive ? [...drive, { lon, lat }] : [{ lon, lat }];
   }
 
   /** The routable network for this theater, built on first use. Null when there are no roads. */

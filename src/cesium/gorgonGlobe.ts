@@ -55,7 +55,7 @@ import { RtsGame } from '../game/rts/rtsGame';
 import { RtsBuildLayer, type BuildSite } from './rtsBuild';
 import { RtsCommandBar, type CommandContext } from '../ui/rtsCommand';
 import {
-  STRUCTURES, BUILDABLE, BUILD_RULES, ABILITY_BY_ID, ORBITAL, abilitiesFrom, metresBetween,
+  STRUCTURES, BUILDABLE, BUILD_RULES, ABILITY_BY_ID, NEXUS_LASER, ORBITAL, abilitiesFrom, metresBetween,
   type AbilityId, type StructureType, type Structure,
 } from '../game/rts/structures';
 import { RTS_UNITS, unitsFrom, producesUnits, type RtsUnitId } from '../game/rts/units';
@@ -3550,7 +3550,15 @@ function rtsStructTargets(): RtsStructTarget[] {
   const out: RtsStructTarget[] = [];
   if (rtsGame) {
     for (const s of rtsGame.structures) {
-      out.push({ id: s.id, side: 0, lon: s.lon, lat: s.lat, radiusM: STRUCTURES[s.type].footprintM });
+      out.push({
+        id: s.id,
+        side: 0,
+        lon: s.lon,
+        lat: s.lat,
+        radiusM: STRUCTURES[s.type].footprintM,
+        // The Nexus is the one building that shoots back. See NEXUS_LASER for what it is sized to do.
+        weapon: s.type === 'nexus' ? NEXUS_LASER : undefined,
+      });
     }
   }
   if (millstone && !millstone.destroyed) {

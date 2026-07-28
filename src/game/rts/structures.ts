@@ -69,7 +69,7 @@ export const STRUCTURES: Record<StructureType, StructureDef> = {
   nexus: {
     type: 'nexus',
     name: 'NEXUS',
-    blurb: 'Your main obelisk. Its fall ends the match. Trickles income and sees the ground around it.',
+    blurb: 'Your main obelisk. Its fall ends the match. Trickles income, sees the ground around it, and carries a battery that will see off a raiding party but not a wave.',
     cost: 0,
     maxHp: 2000,
     placement: 'site',
@@ -237,6 +237,29 @@ export const BUILD_RULES = {
    * so making it repel the things it powers was exactly backwards.
    */
   MIN_SPACING_M: 260,
+};
+
+/**
+ * The Nexus' own defensive laser.
+ *
+ * Sized against exactly one job: repelling three or four enemy WORKERS. A drudge has 90 hit points,
+ * so five shots kills one and four of them take about sixteen seconds to clear — during which they
+ * deal roughly 680 damage to a 2000-point Nexus. It wins, and it costs you a third of your main
+ * building, which is the right answer to "I ignored some harassment".
+ *
+ * And it is sized to LOSE to anything real. Three rippers need nine shots each: twenty-two seconds,
+ * in which they deal more than 2000. The Nexus does not defend itself against a wave. It defends
+ * itself against being nibbled to death while your army is somewhere else, and that is all.
+ *
+ * Only the player's Nexus carries it. Millstone's is a target and nothing else — giving the enemy
+ * base a gun would make rushing it a different game, and nobody asked for that.
+ */
+export const NEXUS_LASER = {
+  name: 'NEXUS BATTERY',
+  kind: 'ranged' as const,
+  rangeM: 800,
+  dmg: 22,
+  periodS: 0.8,
 };
 
 /**
