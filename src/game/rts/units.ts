@@ -209,7 +209,7 @@ export const RTS_UNITS: Record<RtsUnitId, RtsUnitDef> = {
     id: 'arachnid',
     name: 'ARACHNID',
     category: 'infantry',
-    blurb: 'Six-legged pursuit walker. Outruns anything on the ground and goes where roads do not.',
+    blurb: 'Six-legged pursuit walker with blade arms. Runs a target down and takes it apart at contact.',
     meshKind: 'spider',
     maxShield: 60,
     maxEnergy: 0,

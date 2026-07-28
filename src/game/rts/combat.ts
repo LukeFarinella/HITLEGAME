@@ -19,6 +19,12 @@ import { BASIC_ATTACK, MOUNT_BY_ID, type RtsLoadout, type Weapon } from './weapo
  * that everything it owns dies quickly at contact range. A Gorgon army that gets to shoot for ten
  * seconds before contact wins; one that gets surprised at 200 m loses regardless of what it cost.
  *   - The QUADRUPED is the line: cheap, short-armed, dies in threes.
+ *   - The ARACHNID is the exception that proves it: the one Gorgon unit that has to close, trading
+ *     the line's standoff for roughly twice its damage once it arrives. It has 220 hit points against
+ *     the flenser's 260 and gets there first, so the trade is decided by whether it reaches contact
+ *     with its health intact — which is your escort's problem, not its own. Note the side effect of
+ *     fitting: a gun in its hardpoint makes it no longer melee-only, and a unit that isn't melee-only
+ *     stops closing on its own. Fitting a lance buys standoff and gives up the chase.
  *   - The INTERCEPTOR outranges the quadruped and hits harder per shot, but its damage-per-second is
  *     barely better — what you're buying is the standoff and the airspeed.
  *   - The GIGA WALKER outranges everything and soaks an obelisk's worth of fire. One giga anchors an

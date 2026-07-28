@@ -63,11 +63,15 @@ export const BASIC_ATTACK: Record<UnitKind, Weapon> = {
 
   // ---- Gorgon ---------------------------------------------------------------------------------
   // The player's line is RANGED by default: precise, standoff, and the thing Millstone has to cross
-  // ground to reach. Two exceptions carry the other kinds, so the player owns all three without
+  // ground to reach. Three exceptions carry the other kinds, so the player owns all three without
   // having to fit anything.
   skid: { name: 'LOADER BUCKET', kind: 'melee', rangeM: 90, dmg: 14, periodS: 1.6 },
   dog: { name: 'SHOULDER GUN', kind: 'ranged', rangeM: 650, dmg: 12, periodS: 0.8 },
-  spider: { name: 'PURSUIT GUN', kind: 'ranged', rangeM: 800, dmg: 18, periodS: 0.7 },
+  // The one Gorgon unit that CHASES. A pursuit walker that then shot from 800 m was a contradiction:
+  // the speed bought nothing the shoulder gun didn't already have. Blades make the legs the point —
+  // it runs something down and takes it apart, which is the only way the player owns the melee corner
+  // of the triangle without fitting a ram to something slow.
+  spider: { name: 'PURSUIT BLADES', kind: 'melee', rangeM: 150, dmg: 42, periodS: 0.8 },
   biped: { name: 'SERVICE CANNON', kind: 'ranged', rangeM: 950, dmg: 26, periodS: 0.9 },
   quad: { name: 'SIDEARM', kind: 'ranged', rangeM: 700, dmg: 8, periodS: 1.0 },
   interceptor: { name: 'STRIKE LANCE', kind: 'ranged', rangeM: 1500, dmg: 30, periodS: 1.5 },
