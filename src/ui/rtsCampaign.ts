@@ -4,9 +4,9 @@ import {
   TIER_NOTE,
   campaignProgress,
   campaignWon,
+  creditFor,
   isComplete,
   missionsInTier,
-  tierUnlocked,
   type MissionDef,
 } from '../game/rts/campaign';
 import { sound } from './sound';
@@ -86,9 +86,8 @@ function render(): void {
     `<div class="gch-legend">` +
     `<span class="gch-key"><i class="k-open"></i>AVAILABLE</span>` +
     `<span class="gch-key"><i class="k-held"></i>HELD</span>` +
-    `<span class="gch-key"><i class="k-locked"></i>SEALED</span>` +
     `</div>` +
-    `<div class="gch-hint">SELECT A MARKER ON THE GLOBE</div>` +
+    `<div class="gch-hint">CLICK ANY GROUND TO DEPLOY · MARKERS ARE THE HEADLINE CONTRACTS</div>` +
     `<button type="button" class="gch-exit" id="gch-exit">EXIT TO TITLE</button>`;
 
   document.getElementById('gch-exit')?.addEventListener('click', () => {
@@ -109,16 +108,17 @@ function render(): void {
  */
 export function showMissionBrief(m: MissionDef): void {
   hideMissionBrief();
-  const held = isComplete(m.id);
-  const open = tierUnlocked(m.tier);
+  // A free contract's own ground has never been fought over, but the rung it fills may already be
+  // held — say so, because that changes whether the win is worth anything to the ladder.
+  const held = isComplete(creditFor(m));
 
   const card = document.createElement('div');
   card.id = BRIEF;
-  card.className = `gmb${held ? ' held' : ''}${open ? '' : ' locked'}`;
+  card.className = `gmb${held ? ' held' : ''}${m.free ? ' free' : ''}`;
   card.innerHTML =
     `<div class="gmb-top">` +
     `<span class="gmb-sub">${m.sub}</span>` +
-    `<span class="gmb-flag">${held ? 'HELD' : open ? 'AVAILABLE' : 'SEALED'}</span>` +
+    `<span class="gmb-flag">${m.free ? 'OPEN GROUND' : held ? 'HELD' : 'AVAILABLE'}</span>` +
     `</div>` +
     `<div class="gmb-name">${m.name}</div>` +
     `<p class="gmb-blurb">${m.blurb}</p>`;
@@ -126,25 +126,18 @@ export function showMissionBrief(m: MissionDef): void {
   const actions = document.createElement('div');
   actions.className = 'gmb-actions';
 
-  if (open) {
-    const go = document.createElement('button');
-    go.type = 'button';
-    go.className = 'gmb-go';
-    go.textContent = held ? 'REDEPLOY' : 'DEPLOY';
-    go.addEventListener('click', () => {
-      sound.play('enter');
-      const h = hooks;
-      const mission = m;
-      hideMissionBrief();
-      h?.onDeploy(mission);
-    });
-    actions.append(go);
-  } else {
-    const why = document.createElement('div');
-    why.className = 'gmb-why';
-    why.textContent = TIER_NOTE[m.tier];
-    actions.append(why);
-  }
+  const go = document.createElement('button');
+  go.type = 'button';
+  go.className = 'gmb-go';
+  go.textContent = held ? 'REDEPLOY' : 'DEPLOY';
+  go.addEventListener('click', () => {
+    sound.play('enter');
+    const h = hooks;
+    const mission = m;
+    hideMissionBrief();
+    h?.onDeploy(mission);
+  });
+  actions.append(go);
 
   const close = document.createElement('button');
   close.type = 'button';

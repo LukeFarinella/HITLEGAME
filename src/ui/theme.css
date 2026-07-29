@@ -1469,10 +1469,11 @@ body:has(#globe-ui) #hint { display: none; }
 .gch-key i.k-held { border-top-color: var(--ok); }
 .gch-key i.k-locked { border-top-color: #3A414A; }
 
+/* Sits above the coordinate readout, which the mission select now keeps — see below. */
 .gch-hint {
   position: absolute;
   left: 50%;
-  bottom: 30px;
+  bottom: 44px;
   transform: translateX(-50%);
   font: 600 9px/1 var(--mono);
   letter-spacing: .3em;
@@ -1519,7 +1520,8 @@ body:has(#globe-ui) #hint { display: none; }
   to { opacity: 1; transform: translate(-50%, 0); }
 }
 #g-mission-brief.held { border-color: rgba(79, 158, 122, .5); border-left-color: var(--ok); }
-#g-mission-brief.locked { border-color: var(--gunmetal); border-left-color: var(--steel); }
+/* A contract the operator drew themselves, rather than one off the ladder. */
+#g-mission-brief.free { border-color: rgba(111, 168, 184, .45); border-left-color: var(--grid, #6FA8B8); }
 
 .gmb-top {
   display: flex;
@@ -1539,7 +1541,7 @@ body:has(#globe-ui) #hint { display: none; }
   white-space: nowrap;
 }
 #g-mission-brief.held .gmb-flag { color: var(--ok); }
-#g-mission-brief.locked .gmb-flag { color: var(--steel); }
+#g-mission-brief.free .gmb-flag { color: #6FA8B8; }
 
 .gmb-name {
   margin-top: 6px;
@@ -1595,11 +1597,13 @@ body:has(#globe-ui) #hint { display: none; }
 .gmb-close:hover { border-color: var(--steel); color: var(--bone); }
 
 /* While the operations HUD is up the globe is a mission select, not the legacy campaign map — the
-   store, the tasking rail and the theater-pick furniture have nothing to say here. */
+   store and the tasking rail have nothing to say here.
+
+   The coordinate readout STAYS. A click anywhere on the globe is a contract now, and where the ring
+   is standing is the single most load-bearing fact on the screen. */
 #globe-ui.mission-select #c2-store,
 #globe-ui.mission-select #c2-tasking,
-#globe-ui.mission-select .g-title,
-#globe-ui.mission-select .g-cursor { display: none; }
+#globe-ui.mission-select .g-title { display: none; }
 
 @media (max-width: 720px) {
   .gch-bar { top: 44px; padding: 11px 14px 10px; }

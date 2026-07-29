@@ -5,7 +5,7 @@ import { mesh, feature } from 'topojson-client';
 import countries50m from 'world-atlas/countries-50m.json';
 import { buildTheaterMap, RIM_FADE_START, type TheaterMap } from './theaterMap';
 import {
-  loadObelisks, withSyntheticSites, createHeatField, buildObeliskPyramids, type ObeliskField,
+  loadObelisks, withSyntheticSites, withExtraSites, createHeatField, buildObeliskPyramids, type ObeliskField,
 } from './obelisks';
 import { fetchRoads, buildRoadPrimitive, type RoadClass, type RoadGroup, type RoadNet } from './roads';
 import { buildBuildings } from './buildings';
@@ -77,13 +77,14 @@ import { showLoading, setStage, hideLoading } from '../ui/loading';
 import { setActiveSlot, activeSlot, migrateLegacySave } from '../game/saves';
 import {
   MISSIONS as CAMPAIGN_MISSIONS, markComplete, markStarted, campaignWon, campaignProgress, isComplete,
-  missionById, tierUnlocked, resetCampaign, TIER_NAME, type MissionDef,
+  missionById, creditFor, resetCampaign, TIER_NAME, type MissionDef,
 } from '../game/rts/campaign';
 import {
   showCampaignHud, hideCampaignHud, campaignHudOpen, refreshCampaignHud,
   showMissionBrief, hideMissionBrief, missionBriefOpen,
 } from '../ui/rtsCampaign';
 import { MissionMarkers, type MissionMarker } from './missionMarkers';
+import { StateLines, loadStateGeometry } from './stateLines';
 import { LaserBeams } from './lasers';
 import { ScanBeams, Blasts, Sparks, Impacts, Cuffs, ViolationPings, Rounds, CameraFlashes } from './effects';
 import { Reactions } from './reactions';
@@ -208,6 +209,61 @@ function clipRing(ring: Pt[], w: number, s: number, e: number, n: number): Pt[] 
   return out.length < 3 ? [] : out;
 }
 
+/**
+ * What is under this point — the free-deploy ground check, and the name a free contract gets.
+ *
+ * Even-odd across every ring of a country polygon, so a lake punches through the same way it does
+ * in the shoreline mask, and bbox-rejected first — which throws out every polygon on the planet but
+ * a handful before any real work happens. Cheap enough to run in a click handler; not run per
+ * mouse-move.
+ */
+let landPolysSync: number[][][][] | undefined;
+/** Country name per entry of {@link landPolysSync} — a MultiPolygon repeats its country's name. */
+let landNamesSync: string[] = [];
+
+/** The country under a point: its name, null for water, undefined while the data is still loading. */
+function landAt(lon: number, lat: number): string | null | undefined {
+  if (!landPolysSync) return undefined;
+  for (let k = 0; k < landPolysSync.length; k++) {
+    const poly = landPolysSync[k];
+    let pw = Infinity;
+    let pe = -Infinity;
+    let ps = Infinity;
+    let pn = -Infinity;
+    for (const p of poly[0]) {
+      if (p[0] < pw) pw = p[0];
+      if (p[0] > pe) pe = p[0];
+      if (p[1] < ps) ps = p[1];
+      if (p[1] > pn) pn = p[1];
+    }
+    if (lon < pw || lon > pe || lat < ps || lat > pn) continue;
+
+    let inside = false;
+    for (const ring of poly) {
+      for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+        const ay = ring[j][1];
+        const by = ring[i][1];
+        if (ay <= lat === by <= lat) continue;
+        const x = ring[j][0] + ((lat - ay) / (by - ay)) * (ring[i][0] - ring[j][0]);
+        if (x > lon) inside = !inside;
+      }
+    }
+    if (inside) return landNamesSync[k] ?? '';
+  }
+  return null;
+}
+
+/**
+ * Is there land under this point?
+ *
+ * Answers TRUE while the 1:10m data is still in flight. A refusal the operator cannot see the
+ * reason for is worse than letting a rare mid-ocean click through during the first few seconds of
+ * a board; the theater builds either way.
+ */
+function isLand(lon: number, lat: number): boolean {
+  return landAt(lon, lat) !== null;
+}
+
 /** Land clipped to the theater box — small enough to rasterise per terrain tile cheaply. */
 function landInBox(landPolys: number[][][][], bbox: [number, number, number, number]): number[][][][] {
   const [w, s, e, n] = bbox;
@@ -272,16 +328,35 @@ function loadDetail(): Promise<Detail> {
     const sTopo = s10.default as unknown as { objects: { states: unknown } };
 
     const fc = feature(cTopo as never, cTopo.objects.countries as never) as unknown as {
-      features: { geometry: { type: string; coordinates: number[][][] | number[][][][] } }[];
+      features: {
+        properties?: { name?: string };
+        geometry: { type: string; coordinates: number[][][] | number[][][][] };
+      }[];
     };
     // Countries tile the land without overlapping, so an even-odd fill of every country polygon
     // is exactly the land union — and inner rings (lakes) still punch through.
     const landPolys: number[][][][] = [];
+    // Names ride alongside, one per polygon, so free deploy on foreign ground can say where it is
+    // instead of calling half the planet "unsurveyed".
+    const landNames: string[] = [];
     for (const f of fc.features) {
       const g = f.geometry;
-      if (g.type === 'Polygon') landPolys.push(g.coordinates as number[][][]);
-      else if (g.type === 'MultiPolygon') landPolys.push(...(g.coordinates as number[][][][]));
+      const name = f.properties?.name ?? '';
+      if (g.type === 'Polygon') {
+        landPolys.push(g.coordinates as number[][][]);
+        landNames.push(name);
+      } else if (g.type === 'MultiPolygon') {
+        for (const poly of g.coordinates as number[][][][]) {
+          landPolys.push(poly);
+          landNames.push(name);
+        }
+      }
     }
+
+    // Hand the land union to the synchronous ground check too — free deploy has to answer "is this
+    // land, and what is it called" inside a click handler, and it is the same data.
+    landPolysSync = landPolys;
+    landNamesSync = landNames;
 
     return {
       countryLines: meshLines(cTopo, cTopo.objects.countries),
@@ -2382,6 +2457,36 @@ let missionSelect = false;
 let missionMarkers: MissionMarkers | undefined;
 /** The marker currently under the pointer, for the hover swap. */
 let hotMission: string | null = null;
+/**
+ * State boundaries under the mission select, with the state the ring's centre falls in pulled out.
+ *
+ * Built lazily on first board open: states-10m is several MB, and the title screen must not pay for
+ * it. Kept afterwards — the lines are static and rebuilding them per board open would stutter.
+ */
+let stateLines: StateLines | undefined;
+let stateLinesLoading = false;
+
+function ensureStateLines(): void {
+  if (stateLines) {
+    stateLines.show = true;
+    return;
+  }
+  if (stateLinesLoading) return;
+  stateLinesLoading = true;
+  // Warm the 1:10m country data at the same time: it is what the water check reads, and the first
+  // deploy needs it anyway. Failures are the loader's own problem — see loadDetail's callers.
+  void loadDetail().catch(() => undefined);
+  void loadStateGeometry()
+    .then((geo) => {
+      stateLines = new StateLines(scene, geo);
+      // The board may have closed while this was in flight — respect where we actually are.
+      stateLines.show = missionSelect;
+    })
+    .catch((e) => console.warn('[GORGON] state lines failed to load:', e))
+    .finally(() => {
+      stateLinesLoading = false;
+    });
+}
 
 /** Where a mission's ARROW stands. Near its ground, but chosen to be readable from orbit. */
 function missionAnchor(m: MissionDef): { lon: number; lat: number } | null {
@@ -2410,15 +2515,141 @@ function missionMarkerSet(): MissionMarker[] {
   for (const m of CAMPAIGN_MISSIONS) {
     const at = missionAnchor(m);
     if (!at) continue;
-    out.push({
-      id: m.id,
-      lon: at.lon,
-      lat: at.lat,
-      label: m.name,
-      state: isComplete(m.id) ? 'held' : tierUnlocked(m.tier) ? 'open' : 'locked',
-    });
+    // No sealed arrows any more: every contract is deployable, because every point on the globe is.
+    // See tierUnlocked.
+    out.push({ id: m.id, lon: at.lon, lat: at.lat, label: m.name, state: isComplete(m.id) ? 'held' : 'open' });
   }
   return out;
+}
+
+// ---- free deploy ------------------------------------------------------------------------------
+//
+// The globe is not a menu of seventeen places. It is a globe: put the ring anywhere, and that is
+// the contract. The ladder's markers stay as the headline jobs — named ground, written briefs — but
+// they are recommendations now rather than the only doors.
+//
+// Two questions have to be answered for an arbitrary point, and both are answered from the CENTRE
+// of the 200-mile ring rather than from what it happens to cover:
+//
+//   which rung does a win here fill in?   -> the state the centre is in, else that state's block,
+//                                            else the nearest overseas theater.
+//   where does the Nexus stand?           -> the surveyed site nearest the centre; and if the
+//                                            survey never reached this ground, a site is MADE there.
+
+/**
+ * How near a click a site must be to serve as its Nexus before one is created instead.
+ *
+ * 4 km — 1% of the theater's radius. Tight on purpose: the operator picked a point, and a Nexus
+ * that quietly relocated ten miles down the road is not the point they picked. It is wide enough to
+ * snap onto a real downtown site when someone clicks a city, which is the case worth snapping for.
+ */
+const FREE_NEXUS_SNAP_M = 4_000;
+/**
+ * Below this many sites inside the disc, a whole synthesised field is grown rather than a single
+ * site — a match needs somewhere to expand to, and one lone obelisk in empty country is a Nexus
+ * with no board around it.
+ */
+const FREE_MIN_SITES = 160;
+
+/** Which block a point's state belongs to, if it isn't one of the nine headline economies. */
+function blockMissionFor(fips: string): MissionDef | undefined {
+  const region = territory?.regionOf(fips);
+  return region ? CAMPAIGN_MISSIONS.find((m) => m.tier === 'block' && m.regionId === region.id) : undefined;
+}
+
+/** The overseas theater whose anchor is nearest — what foreign ground credits. */
+function nearestTheaterMission(lon: number, lat: number): MissionDef | undefined {
+  let best: MissionDef | undefined;
+  let bestD = Infinity;
+  for (const m of CAMPAIGN_MISSIONS) {
+    if (m.tier !== 'theater' || !m.anchor) continue;
+    const d = metresBetween(lon, lat, m.anchor.lon, m.anchor.lat);
+    if (d < bestD) {
+      bestD = d;
+      best = m;
+    }
+  }
+  return best;
+}
+
+const degStr = (lon: number, lat: number) =>
+  `${Math.abs(lat).toFixed(2)}°${lat >= 0 ? 'N' : 'S'} ${Math.abs(lon).toFixed(2)}°${lon >= 0 ? 'E' : 'W'}`;
+
+/** What a click at this point resolves to: the states it lights up, and the rung it fills. */
+function freeResolution(
+  lon: number,
+  lat: number,
+): { credits: MissionDef | undefined; stateId: string | null; blockIds: string[]; where: string } {
+  const st = territory?.stateAt(lon, lat);
+  if (st) {
+    const headline = CAMPAIGN_MISSIONS.find((m) => m.tier === 'state' && m.fips === st.id);
+    if (headline) return { credits: headline, stateId: st.id, blockIds: [], where: st.name.toUpperCase() };
+    const block = blockMissionFor(st.id);
+    const region = territory?.regionOf(st.id);
+    return {
+      credits: block,
+      stateId: st.id,
+      blockIds: region ? region.states.map((s) => s.id) : [],
+      where: st.name.toUpperCase(),
+    };
+  }
+  // Off the survey: name it after the country, and hang the win on the nearest overseas theater —
+  // the five of them are continents, and the nearest one is the one this ground belongs to.
+  const country = landAt(lon, lat);
+  return {
+    credits: nearestTheaterMission(lon, lat),
+    stateId: null,
+    blockIds: [],
+    where: country ? country.toUpperCase() : 'UNSURVEYED GROUND',
+  };
+}
+
+/**
+ * Build the contract for a point on the open globe.
+ *
+ * Its name is the ground, not the rung: an operator who clicked central Nebraska is deploying to
+ * NEBRASKA, and the fact that a win there fills in the NORTHERN BLOCK is a line in the brief rather
+ * than a relabelling of the place they chose.
+ */
+function freeMissionAt(lon: number, lat: number): MissionDef {
+  const r = freeResolution(lon, lat);
+  const credit = r.credits;
+  const coords = degStr(lon, lat);
+  const held = credit ? isComplete(credit.id) : false;
+  // Say what the survey has here before the operator commits, because it decides what they arrive
+  // to: a field of ready sites to expand into, or a Nexus raised on ground nobody has ever covered.
+  const surveyed = sitesWithin(lon, lat, THEATER_RADIUS_M);
+  const survey =
+    surveyed >= FREE_MIN_SITES
+      ? ` ${surveyed.toLocaleString('en-US')} sites in range to build on.`
+      : surveyed > 0
+        ? ` Thin survey here — ${surveyed} site${surveyed === 1 ? '' : 's'} in range, so a Nexus site is ` +
+          `established and the field around it is filled out.`
+        : ' No survey reaches this ground — a Nexus site is established and a field laid around it.';
+  return {
+    // Rounded so re-clicking the same ground yields the same id — the brief and the marker set
+    // compare by it.
+    id: `free:${lon.toFixed(3)},${lat.toFixed(3)}`,
+    tier: credit?.tier ?? 'theater',
+    free: true,
+    credits: credit?.id,
+    name: r.where,
+    sub: `OPEN CONTRACT · ${coords}`,
+    blurb:
+      (credit
+        ? `Ground of your own choosing. The theater is the disc drawn around this point. Razing ` +
+          `Millstone here ${held ? 'is already recorded against' : 'marks off'} ${credit.name} on the ladder.`
+        : `Ground of your own choosing, outside every contract on the board. Nothing on the ladder ` +
+          `moves for it — this one is for its own sake.`) + survey,
+    anchor: { lon, lat },
+  };
+}
+
+/** Light the state (and block) a hovered point resolves to, so the attribution is visible. */
+function highlightGroundAt(lon: number, lat: number): void {
+  if (!stateLines) return;
+  const r = freeResolution(lon, lat);
+  stateLines.highlight(r.stateId, r.blockIds);
 }
 
 /**
@@ -2466,7 +2697,9 @@ function openCampaignBoard(): void {
   missionSelect = true;
   hideMissionBrief();
   el('globe-ui')?.classList.add('mission-select');
-  cursor.show = false; // the 200-mile theater ring is the legacy pick, and it is noise here
+  // The 200-mile ring IS the selection now — it shows exactly what a click is about to buy, and its
+  // centre is what picks the state. State lines go under it for the same reason.
+  ensureStateLines();
 
   // Held ground lights up. This is the same heat field the legacy campaign uses, driven off the
   // ladder instead of off territory purchases.
@@ -2484,10 +2717,10 @@ function openCampaignBoard(): void {
     onExit: () => exitToTitle(),
   });
 
-  // Frame what the player can actually act on: the domestic map until the overseas phase opens,
-  // then the whole planet. Arriving zoomed to a continent you have no contracts on is a worse
-  // opening than one extra camera move.
-  const overseas = tierUnlocked('theater');
+  // Frame where the work is: the domestic map until the domestic ladder is finished, then the whole
+  // planet. Nothing stops the operator flying anywhere from either — this is only the opening shot,
+  // and opening on a hemisphere of ocean is a worse one than a continent with contracts on it.
+  const overseas = CAMPAIGN_MISSIONS.filter((m) => m.tier !== 'theater').every((m) => isComplete(m.id));
   camera.flyTo({
     destination: overseas
       ? Cesium.Cartesian3.fromDegrees(-25, 26, 20_000_000)
@@ -2505,6 +2738,8 @@ function closeCampaignBoard(): void {
   hideCampaignHud();
   el('globe-ui')?.classList.remove('mission-select');
   if (missionMarkers) missionMarkers.show = false;
+  if (stateLines) stateLines.show = false;
+  cursor.show = false;
 }
 
 /**
@@ -2519,7 +2754,6 @@ function currentMission(): MissionDef | null {
   if (rtsMission) return rtsMission;
   if (briefMission && missionBriefOpen()) return briefMission;
   for (const t of ['state', 'block', 'theater'] as const) {
-    if (!tierUnlocked(t)) continue;
     const next = CAMPAIGN_MISSIONS.find((m) => m.tier === t && !isComplete(m.id));
     if (next) return next;
   }
@@ -2528,11 +2762,31 @@ function currentMission(): MissionDef | null {
 /** The mission whose brief is showing, if any. */
 let briefMission: MissionDef | null = null;
 
-/** A marker was clicked: open its brief, or say why it can't be taken yet. */
+/** A marker was clicked: open its brief. */
 function selectMissionMarker(id: string): void {
   const m = missionById(id);
   if (!m) return;
-  sound.play(tierUnlocked(m.tier) ? 'click' : 'denied');
+  sound.play('click');
+  briefMission = m;
+  showMissionBrief(m);
+}
+
+/**
+ * Open ground was clicked: draw a contract for it and brief that.
+ *
+ * Water is the one refusal. A 200-mile disc of open ocean builds a theater with no land in it — no
+ * roads, no buildings, no contacts, nowhere to put a second obelisk — so it is turned away here,
+ * where the answer is instant, rather than after a thirty-second terrain bake.
+ */
+function selectFreeGround(lon: number, lat: number): void {
+  if (!isLand(lon, lat)) {
+    sound.play('denied');
+    toast('◈ NO LAND AT THIS POINT · PICK GROUND');
+    hideMissionBrief();
+    return;
+  }
+  sound.play('click');
+  const m = freeMissionAt(lon, lat);
   briefMission = m;
   showMissionBrief(m);
 }
@@ -2589,11 +2843,10 @@ function refreshDevLadder(): void {
   for (const t of ['state', 'block', 'theater'] as const) {
     const all = CAMPAIGN_MISSIONS.filter((m) => m.tier === t);
     const held = all.filter((m) => isComplete(m.id)).length;
-    const open = tierUnlocked(t);
     html +=
-      `<div class="dev-lad-row${open ? '' : ' sealed'}">` +
+      `<div class="dev-lad-row">` +
       `<span>${TIER_NAME[t].replace(/^PHASE /, 'P')}</span>` +
-      `<span>${open ? `${held}/${all.length}` : 'SEALED'}</span>` +
+      `<span>${held}/${all.length}</span>` +
       `</div>`;
   }
   box.innerHTML = html;
@@ -2661,6 +2914,9 @@ let rtsMission: MissionDef | null = null;
 function resolveMissionSite(m: MissionDef): number {
   if (!obelisks) return -1;
 
+  // Free deploy answers first: the operator named the ground, and no lookup gets to overrule it.
+  if (m.free && m.anchor) return ensureSiteAt(m.anchor.lon, m.anchor.lat);
+
   if (m.tier === 'state') return m.fips ? (territory?.byId.get(m.fips)?.downtown ?? -1) : -1;
 
   if (m.tier === 'block') {
@@ -2682,6 +2938,67 @@ function resolveMissionSite(m: MissionDef): number {
     }
   }
   return best;
+}
+
+/** Nearest site to a point, and how far away it is. Searches the whole field, real and synthetic. */
+function nearestSite(lon: number, lat: number): { index: number; distanceM: number } {
+  let index = -1;
+  let distanceM = Infinity;
+  if (!obelisks) return { index, distanceM };
+  for (let i = 0; i < obelisks.count; i++) {
+    const d = metresBetween(lon, lat, obelisks.lon[i], obelisks.lat[i]);
+    if (d < distanceM) {
+      distanceM = d;
+      index = i;
+    }
+  }
+  return { index, distanceM };
+}
+
+/** How many sites fall inside the theater disc centred here. */
+function sitesWithin(lon: number, lat: number, radiusM: number): number {
+  if (!obelisks) return 0;
+  // Box reject in degrees before the metre distance — this runs over 115k+ sites.
+  const dLat = radiusM / 111_320;
+  const dLon = dLat / Math.max(0.15, Math.cos((lat * Math.PI) / 180));
+  let n = 0;
+  for (let i = 0; i < obelisks.count; i++) {
+    if (Math.abs(obelisks.lat[i] - lat) > dLat || Math.abs(obelisks.lon[i] - lon) > dLon) continue;
+    if (metresBetween(lon, lat, obelisks.lon[i], obelisks.lat[i]) <= radiusM) n++;
+  }
+  return n;
+}
+
+/**
+ * Guarantee a Nexus site at a point, creating one if the survey never reached it.
+ *
+ * This is what makes "click anywhere" true rather than nearly true. Three cases:
+ *
+ *   thin disc      The 200 miles around the click hold almost nothing — foreign ground, or empty
+ *                  country. A whole synthesised field is grown here, pinned so its largest core is
+ *                  the click itself, because a match needs somewhere to EXPAND to as well as
+ *                  somewhere to stand.
+ *   no site near   Sites all around, none within snapping distance of the click. One is made at
+ *                  exactly the coordinates picked.
+ *   site near      Use it. Snapping the Nexus onto real surveyed ground is better than inventing a
+ *                  second obelisk twelve metres from one that already exists.
+ *
+ * The field is grown in place (see withExtraSites — real indices never move), so everything
+ * downstream that addresses sites by index is unaffected, including saves made before the click.
+ */
+function ensureSiteAt(lon: number, lat: number): number {
+  if (!obelisks) return -1;
+
+  if (sitesWithin(lon, lat, THEATER_RADIUS_M) < FREE_MIN_SITES) {
+    obelisks = withSyntheticSites(obelisks, [{ lon, lat }], THEATER_RADIUS_M, true);
+  }
+
+  let near = nearestSite(lon, lat);
+  if (near.index < 0 || near.distanceM > FREE_NEXUS_SNAP_M) {
+    obelisks = withExtraSites(obelisks, [{ lon, lat }]);
+    near = { index: obelisks.count - 1, distanceM: 0 };
+  }
+  return near.index;
 }
 
 /**
@@ -4331,7 +4648,9 @@ function endRtsWith(victory: boolean): void {
   if (rtsEnded) return;
   rtsEnded = true;
   sound.play(victory ? 'success' : 'lost');
-  const wonAll = victory && !!rtsMission && markComplete(rtsMission.id);
+  // creditFor, not the id: a contract drawn on open globe has an id of its own that the ladder has
+  // never heard of, and the rung it fills is the state or block its centre landed in.
+  const wonAll = victory && !!rtsMission && markComplete(creditFor(rtsMission));
   // The HUD may still be alive behind the match in a redeploy loop; keep its counter honest.
   refreshCampaignHud();
   showRtsEnd(victory, wonAll);
@@ -6301,7 +6620,8 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.MotionEvent) => {
     return;
   }
   if (mode !== 'globe') return; // cursor readout is orbit-only
-  // Mission select: the only hover that matters is which arrow is under the pointer.
+  // Mission select: an arrow under the pointer is a headline contract; anywhere else is ground the
+  // operator can take on its own terms, so the ring and the state highlight track the pointer too.
   if (missionSelect) {
     const id = missionMarkers?.pick(m.endPosition) ?? null;
     if (id !== hotMission) {
@@ -6310,6 +6630,23 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.MotionEvent) => {
       if (id) sound.play('hover');
     }
     scene.canvas.style.cursor = id ? 'pointer' : '';
+    const at = pickLonLat(m.endPosition);
+    if (at) {
+      const lon = Cesium.Math.toDegrees(at.longitude);
+      const lat = Cesium.Math.toDegrees(at.latitude);
+      cursor.position = new Cesium.ConstantPositionProperty(Cesium.Cartesian3.fromRadians(at.longitude, at.latitude));
+      // The ring is hidden under an arrow: that click takes the marker's ground, not the pointer's,
+      // and drawing a selection the click won't honour is a lie.
+      cursor.show = !id;
+      if (latEl) latEl.textContent = fmt(at.latitude, 'N', 'S');
+      if (lonEl) lonEl.textContent = fmt(at.longitude, 'E', 'W');
+      highlightGroundAt(lon, lat);
+    } else {
+      cursor.show = false;
+      stateLines?.highlight(null);
+      if (latEl) latEl.textContent = '—';
+      if (lonEl) lonEl.textContent = '—';
+    }
     return;
   }
   const carto = pickLonLat(m.endPosition);
@@ -6361,12 +6698,16 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
     return;
   }
   if (mode === 'globe') {
-    // Mission select owns the globe: a click is either a marker or nothing. Falling through to
-    // tryEnterTheater would drop the player into the LEGACY campaign's theater from a screen that
-    // isn't the legacy campaign.
+    // Mission select owns the globe: a marker opens its brief, and ANY other ground opens a brief
+    // for a contract drawn right there. Never tryEnterTheater — that is the legacy campaign's door.
     if (missionSelect) {
       const id = missionMarkers?.pick(m.position) ?? null;
-      if (id) selectMissionMarker(id);
+      if (id) {
+        selectMissionMarker(id);
+        return;
+      }
+      const at = pickLonLat(m.position);
+      if (at) selectFreeGround(Cesium.Math.toDegrees(at.longitude), Cesium.Math.toDegrees(at.latitude));
       else hideMissionBrief();
       return;
     }
@@ -6941,7 +7282,7 @@ bindInterfaceSounds();
       return;
     }
     sound.play('success');
-    const wonAll = markComplete(m.id);
+    const wonAll = markComplete(creditFor(m));
     refreshMissionSelect();
     toast(wonAll ? '◈ CONTRACT COMPLETE · EVERY THEATER HELD' : `◈ ${m.name} MARKED HELD`);
   };

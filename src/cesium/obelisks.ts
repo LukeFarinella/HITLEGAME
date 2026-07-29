@@ -122,8 +122,18 @@ function hash01(seed: number, salt: number): number {
  *
  * Radius is the theater disc's, less a margin — sites on the rim fall outside the playable circle
  * and would render as build slots nobody can reach.
+ *
+ * `pinAnchor` nails the biggest core to the anchor itself instead of scattering it into the disc.
+ * Free deploy needs it: the operator clicked a specific point and the Nexus has to stand THERE, not
+ * ninety miles off in whichever direction the hash chose.
  */
-function syntheticSitesAt(lon0: number, lat0: number, radiusM: number, seed: number): { lon: number; lat: number }[] {
+function syntheticSitesAt(
+  lon0: number,
+  lat0: number,
+  radiusM: number,
+  seed: number,
+  pinAnchor = false,
+): { lon: number; lat: number }[] {
   const mPerLon = 111_320 * Math.max(0.15, Math.cos((lat0 * Math.PI) / 180));
   const out: { lon: number; lat: number }[] = [];
 
@@ -132,7 +142,7 @@ function syntheticSitesAt(lon0: number, lat0: number, radiusM: number, seed: num
   for (let c = 0; c < SYNTH_CORES; c++) {
     const a = hash01(seed, c * 7 + 1) * Math.PI * 2;
     // sqrt keeps the cores area-uniform instead of bunched at the centre; 0.82 holds them inboard.
-    const r = Math.sqrt(hash01(seed, c * 7 + 2)) * radiusM * 0.82;
+    const r = pinAnchor && c === 0 ? 0 : Math.sqrt(hash01(seed, c * 7 + 2)) * radiusM * 0.82;
     cores.push({
       lon: lon0 + (Math.cos(a) * r) / mPerLon,
       lat: lat0 + (Math.sin(a) * r) / 111_320,
@@ -183,6 +193,7 @@ export function withSyntheticSites(
   field: ObeliskField,
   anchors: { lon: number; lat: number }[],
   radiusM: number,
+  pinAnchor = false,
 ): ObeliskField {
   if (!anchors.length) return field;
   const extra: { lon: number; lat: number }[] = [];
@@ -190,8 +201,21 @@ export function withSyntheticSites(
     // Seed off the anchor's coordinates, so moving a theater regenerates it and two theaters never
     // share a layout.
     const seed = Math.imul(Math.round(anchor.lon * 1000) | 0, 0x27d4eb2d) ^ Math.round(anchor.lat * 1000);
-    extra.push(...syntheticSitesAt(anchor.lon, anchor.lat, radiusM, seed));
+    extra.push(...syntheticSitesAt(anchor.lon, anchor.lat, radiusM, seed, pinAnchor));
   }
+  return withExtraSites(field, extra);
+}
+
+/**
+ * Append arbitrary sites to a field, real indices untouched.
+ *
+ * The one-site case of {@link withSyntheticSites}, and the reason free deploy can promise ground
+ * anywhere: the operator picks a point the survey never covered, and a site is simply MADE there.
+ * Everything downstream addresses sites by index, and no existing index moves, so a field grown at
+ * runtime is indistinguishable from one that shipped that way.
+ */
+export function withExtraSites(field: ObeliskField, extra: { lon: number; lat: number }[]): ObeliskField {
+  if (!extra.length) return field;
 
   const count = field.count + extra.length;
   const lon = new Float32Array(count);

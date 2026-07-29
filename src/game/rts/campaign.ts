@@ -35,9 +35,9 @@ export const TIER_NAME: Record<MissionTier, string> = {
 };
 
 export const TIER_NOTE: Record<MissionTier, string> = {
-  state: 'Nine headline economies. Take them in any order.',
-  block: 'The rest of the map, in blocks. Opens when every state is held.',
-  theater: 'Foreign ground. Opens when every block is held.',
+  state: 'Nine headline economies. Click any ground on the globe to deploy.',
+  block: 'The rest of the map, in blocks. Click any ground on the globe to deploy.',
+  theater: 'Foreign ground. Click any ground on the globe to deploy.',
 };
 
 export interface MissionDef {
@@ -76,6 +76,23 @@ export interface MissionDef {
    * inside each block instead, because two overlapping arrows is two missions you cannot click.
    */
   pin?: { lon: number; lat: number };
+  /**
+   * The ladder mission a win here fills in, when that isn't this mission itself.
+   *
+   * FREE DEPLOY only. A click on open globe builds a contract that is about the ground under the
+   * pointer — its own name, its own coordinates, its own Nexus — but the ladder is still seventeen
+   * fixed rungs, so the win has to land on one of them. The centre of the selection picks it: the
+   * state it falls in, or the block that state belongs to, or the nearest overseas theater. See
+   * `freeMissionAt` in cesium/gorgonGlobe.
+   */
+  credits?: string;
+  /** True for a contract the operator drew on the globe rather than one off the ladder. */
+  free?: boolean;
+}
+
+/** Which ladder rung a win on this mission marks off. */
+export function creditFor(m: MissionDef): string {
+  return m.credits ?? m.id;
 }
 
 /**
@@ -321,11 +338,25 @@ export function markComplete(id: string): boolean {
   return campaignWon();
 }
 
-/** A tier is open once every mission in the tier before it is cleared. The first is always open. */
-export function tierUnlocked(tier: MissionTier): boolean {
-  const at = TIERS.indexOf(tier);
-  if (at <= 0) return true;
-  return missionsInTier(TIERS[at - 1]).every((m) => done.has(m.id));
+/**
+ * Every tier is open, always.
+ *
+ * The tiers used to gate: blocks sealed until all nine states were held, overseas sealed until all
+ * three blocks were. That structure died the moment the globe became a place you can click
+ * ANYWHERE — a sealed marker sitting on ground that a click two pixels to its left deploys into is
+ * not a rule, it is a bug the operator has to work around. The three phases survive as what they
+ * were always best at: a way to read progress and to name where you are in the contract.
+ *
+ * Kept as a function rather than deleted at every call site, because "is this tier open" is still
+ * the honest question — the answer just stopped being conditional.
+ */
+export function tierUnlocked(_tier: MissionTier): boolean {
+  return true;
+}
+
+/** Whether a tier has anything left to take. What the phase readout is actually asking. */
+export function tierOutstanding(tier: MissionTier): number {
+  return missionsInTier(tier).filter((m) => !done.has(m.id)).length;
 }
 
 export function isUnlocked(id: string): boolean {
