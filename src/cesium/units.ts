@@ -10,7 +10,7 @@ import {
   type UnitKind,
 } from './unitModels';
 import { PLATFORM_BY_ID, type PlatformId } from '../game/platforms';
-import type { AttackKind, Weapon } from '../game/rts/weapons';
+import { AERIAL_KINDS, canHitAir, type AttackKind, type Weapon } from '../game/rts/weapons';
 import type { RoadNet, RoadClass } from './roads';
 import { makeViolation, VIOLATION_TTL_S, type LiveViolation } from '../game/violations';
 import { RouteGraph } from './routeGraph';
@@ -901,6 +901,8 @@ interface Munition {
   flightS: number;
   dmg: number;
   splashM: number;
+  /** Whether its splash catches AERIAL units. A shell bursting on the ground does not. */
+  air: boolean;
   /** Unit index that fired it, or -1 for anything with no unit behind it. Splash victims blame this. */
   by: number;
   look: MunitionLook;
@@ -1708,6 +1710,7 @@ export class UnitField {
       for (const j of live) {
         const v = this.units[j];
         if (!v || v.dead || !v.rtsc) continue;
+        if (!m.air && AERIAL_KINDS.has(v.kind)) continue; // burst on the ground; the flyer is not on it
         if (this.distLL(m.tlon, m.tlat, v.lon, v.lat) <= r) this.damageUnit(j, m.dmg, ev, m.by);
       }
       for (const s of structs) {
@@ -1858,10 +1861,13 @@ export class UnitField {
         // scout while something else takes it apart is not fighting back in any sense worth the name.
         let tj = -1;
         let bd = w.rangeM;
+        // A weapon that cannot shoot upward simply has no answer to a flyer, grudge or not: being
+        // shot by a censer does not teach a siege battery how to elevate.
+        const hitsAir = canHitAir(w);
         const grudge = c.threat?.index ?? -1;
         if (grudge >= 0) {
           const a = this.units[grudge];
-          if (a && !a.dead && a.rtsc && a.rtsc.side !== c.side) {
+          if (a && !a.dead && a.rtsc && a.rtsc.side !== c.side && (hitsAir || !AERIAL_KINDS.has(a.kind))) {
             const d = this.distM(u, a.lon, a.lat);
             if (d <= bd) {
               bd = d;
@@ -1875,6 +1881,7 @@ export class UnitField {
             if (j === i) continue;
             const v = this.units[j];
             if (v.dead || !v.rtsc || v.rtsc.side === c.side) continue;
+            if (!hitsAir && AERIAL_KINDS.has(v.kind)) continue;
             const d = this.distM(u, v.lon, v.lat);
             if (d <= bd) {
               bd = d;
@@ -1947,6 +1954,9 @@ export class UnitField {
     if (!t || c.hold || NO_ASSIST.has(u.kind)) return false;
     const a = this.units[t.index];
     if (!a || a.dead || !a.rtsc || a.rtsc.side === c.side) return false;
+    // Nothing on this chassis can touch a flyer, so walking at one would be a unit marching to its
+    // death with no way to answer. It holds and lets something that CAN shoot up deal with it.
+    if (AERIAL_KINDS.has(a.kind) && !c.weapons.some((s) => canHitAir(s.w))) return false;
     // An operator order outranks the field here exactly as it does for an assist.
     if (u.tlon !== undefined && !c.assist) return false;
 
@@ -2003,6 +2013,8 @@ export class UnitField {
       for (const j of live) {
         const v = this.units[j];
         if (!v || v.dead || !v.rtsc || v.rtsc.side === c.side) continue;
+        // No point sending a unit to a fight it cannot join.
+        if (AERIAL_KINDS.has(v.kind) && !c.weapons.some((sl) => canHitAir(sl.w))) continue;
         if (this.distLL(d.lon, d.lat, v.lon, v.lat) > ASSIST_ENGAGE_M) continue;
         const du = this.distM(u, v.lon, v.lat);
         if (du < bd) {
@@ -2093,9 +2105,11 @@ export class UnitField {
       // the footprint doesn't quietly shorten the gun.
       let tj = -1;
       let bd = w.rangeM + s.radiusM;
+      const structHitsAir = canHitAir(w);
       for (const j of live) {
         const v = this.units[j];
         if (!v || v.dead || !v.rtsc || v.rtsc.side === s.side) continue;
+        if (!structHitsAir && AERIAL_KINDS.has(v.kind)) continue;
         const d = this.distLL(s.lon, s.lat, v.lon, v.lat);
         if (d <= bd) {
           bd = d;
@@ -2150,6 +2164,7 @@ export class UnitField {
       flightS: Math.max(0.15, d / speed),
       dmg: w.dmg,
       splashM: w.splashM ?? 0,
+      air: canHitAir(w),
       by: from,
       // Speed decides the look, which is the honest tell: anything doing 1000 m/s or better is
       // rocket-propelled and reads as one, and everything slower is a shell out of a tube. It keeps
@@ -2187,6 +2202,9 @@ export class UnitField {
       flightS: Math.max(0.5, o.dropFromM / o.speedMps),
       dmg: o.dmg,
       splashM: o.splashM,
+      // A round from orbit lands on the ground and everything standing on it. An aircraft in transit
+      // is not standing on anything.
+      air: false,
       by: -1,
       look: 'orbital',
       trail: [],

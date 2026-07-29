@@ -47,6 +47,39 @@ export interface Weapon {
    * does not check flags, which is the cost of firing one into a melee.
    */
   splashM?: number;
+  /**
+   * Whether this weapon can engage AERIAL targets. Omitted means the default rule below.
+   *
+   * Set explicitly only where the default is wrong — a missile rack is a projectile and hits air
+   * anyway, because that is what a missile is for.
+   */
+  air?: boolean;
+}
+
+/**
+ * Chassis that FLY, and can therefore only be answered by something that can shoot upward.
+ *
+ * Listed rather than derived: the player's aerial platforms carry a cruise altitude in the campaign
+ * catalog, but Millstone's have no catalog entry at all, and a rule that worked for half the board
+ * would be worse than no rule. `air` is the ambient civilian aircraft, which nothing ever shoots.
+ */
+export const AERIAL_KINDS = new Set<UnitKind>(['quad', 'interceptor', 'drone', 'mote', 'shrike', 'censer', 'air']);
+
+/**
+ * Whether a weapon can hit something in the air.
+ *
+ * THE RULE: if it arcs, it cannot. Hitscan weapons traverse and lead instantly, so they answer a
+ * flyer; lobbed shells are aimed at a patch of ground and a flyer is not standing on one; and you
+ * cannot claw an aircraft. So RANGED yes, PROJECTILE and MELEE no — unless the weapon says otherwise,
+ * which in practice means missiles.
+ *
+ * This is deliberately a rule the player can learn from watching rather than from a table, and it is
+ * what stops "ranged" and "can shoot down a censer" being the same statement. The giga's siege
+ * battery is the clearest case: 1900 m of reach, 60 damage a shell, and completely helpless against
+ * a mote drifting over it — which is exactly the hole FLAK DOCTRINE exists to fill.
+ */
+export function canHitAir(w: Weapon): boolean {
+  return w.air ?? w.kind === 'ranged';
 }
 
 // ---- basic attacks ------------------------------------------------------------------------------
@@ -82,7 +115,8 @@ export const BASIC_ATTACK: Record<UnitKind, Weapon> = {
   // worker, nowhere near enough to trade with a hull.
   usv: { name: 'PICKET GUN', kind: 'ranged', rangeM: 600, dmg: 9, periodS: 0.8 },
   // The hull's gun is the player's basic projectile: it lobs, so it reaches past anything on the
-  // shore that could answer it, and it lands late.
+  // shore that could answer it, and it lands late. No answer to air — that is what the hull's flak
+  // upgrade is for.
   naval: { name: 'DECK GUN', kind: 'projectile', rangeM: 1200, dmg: 22, periodS: 1.1, speedMps: 900, splashM: 90 },
   drone: { name: 'ALTITUDE LANCE', kind: 'ranged', rangeM: 1700, dmg: 20, periodS: 1.2 },
   walker: { name: 'SIEGE BATTERY', kind: 'projectile', rangeM: 1900, dmg: 60, periodS: 1.4, speedMps: 800, splashM: 140 },

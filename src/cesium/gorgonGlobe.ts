@@ -59,7 +59,7 @@ import {
   type AbilityId, type StructureType, type Structure,
 } from '../game/rts/structures';
 import { RTS_UNITS, RTS_UNIT_LIST, unitsFrom, producesUnits, type RtsUnitId } from '../game/rts/units';
-import { RESEARCH, researchFrom, type ResearchId } from '../game/rts/research';
+import { RESEARCH, ALL_RESEARCH, researchFrom, type ResearchId } from '../game/rts/research';
 import { RTS_COMBAT, armamentOf } from '../game/rts/combat';
 import { MILLSTONE_BY_KIND, MILLSTONE_UNIT_LIST } from '../game/rts/millstoneUnits';
 import { MillstoneDirector, MILLSTONE } from '../game/rts/millstone';
@@ -1702,7 +1702,9 @@ function openMillstoneSpawnMenu(screenX: number, screenY: number, lon: number, l
     b.disabled = !inMatch;
     b.innerHTML =
       `<span class="gc-label">${u.name} · ${u.category.toUpperCase()}</span>` +
-      (inMatch ? `<span class="gc-why">${u.supply} SUPPLY</span>` : `<span class="gc-why">NO ACTIVE SKIRMISH</span>`);
+      (inMatch
+        ? `<span class="gc-why">FULLY UPGRADED · ${u.supply} SUPPLY</span>`
+        : `<span class="gc-why">NO ACTIVE SKIRMISH</span>`);
     b.title = u.blurb;
     if (inMatch) {
       b.addEventListener('click', () => {
@@ -2698,11 +2700,14 @@ function rtsAuthority(): AuthorityLevel {
 /**
  * DEV ONLY — drop one of YOUR OWN units on a spot, free.
  *
- * Deliberately identical to a unit rolling off a production line in every respect that matters: it
- * is registered in the roster (so it costs supply, carries a unit card and can be selected), and it
- * is armed from {@link armamentOf} with the company's current research, so what you drop is what
- * your factory would ship right now rather than a stripped copy of it. The only thing skipped is the
- * money and the queue — which is the entire point of a spawn menu.
+ * Registered in the roster like anything else — it costs supply, carries a unit card, and can be
+ * selected and ordered — and armed FULLY UPGRADED, with every project in the catalog applied,
+ * whatever the company has actually researched.
+ *
+ * That last part is the point of the menu. You reach for it to answer "what is this machine when it
+ * is finished"; dropping the stock version answers a question you can already get by building one,
+ * and quietly misrepresents what your army becomes. So a menu quadruped arrives with its barrels
+ * rebored, its pack link, and a flak battery on top.
  *
  * Water chassis get the same treatment the harbor gives them: a hull dropped on a forecourt can
  * never move, so it launches from the nearest sea or says why not.
@@ -2730,9 +2735,10 @@ function spawnGorgonAt(unit: RtsUnitId, lon: number, lat: number): void {
   // Charges supply — a free unit that was also free of supply would quietly break the one economy
   // the spawn menu is most often used to test against.
   rtsGame.registerUnit(idx, unit, true);
-  unitField.armRtsCombat(idx, 0, armamentOf(def.meshKind, rtsGame.researched));
+  const arms = armamentOf(def.meshKind, ALL_RESEARCH);
+  unitField.armRtsCombat(idx, 0, arms);
   sound.play('confirm');
-  toast(`◈ ${def.name} FIELDED`);
+  toast(`◈ ${def.name} FIELDED · FULLY UPGRADED · ${arms.weapons.map((w) => w.name).join(' + ')}`);
   updateUnitHud();
   updateRtsHud();
 }

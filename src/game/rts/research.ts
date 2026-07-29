@@ -280,12 +280,15 @@ export const RESEARCH: Record<ResearchId, ResearchDef> = {
   'flak-doctrine': {
     id: 'flak-doctrine',
     name: 'FLAK DOCTRINE',
-    blurb: 'Every ground chassis carries a flak battery. The answer to an army that keeps losing to air.',
+    blurb: 'A flak battery on every ground chassis and every hull. The answer to an army that keeps losing to air.',
     cost: 550,
     timeS: 45,
     producedBy: 'skyhook',
     hotkey: 'Y',
-    applies: ['dog', 'spider', 'biped', 'walker'],
+    // The littoral is on this list because without it the hull has NO answer to air at any tech
+    // level, while the hulk it is meant to answer carries deck flak from the factory — an asymmetry
+    // that was an oversight rather than a decision.
+    applies: ['dog', 'spider', 'biped', 'walker', 'naval'],
     adds: { name: 'FLAK BATTERY', kind: 'ranged', rangeM: 1100, dmg: 14, periodS: 0.5 },
   },
 
@@ -360,7 +363,7 @@ export const RESEARCH: Record<ResearchId, ResearchDef> = {
     // Deliberately a SMALLER weapon than the interceptor's rack — shorter, weaker, tighter burst.
     // The kite is a tier-1 unit out of robotics and should not be carrying a skyhook-tier missile;
     // what this buys is a scout with teeth, not a second strike aircraft.
-    adds: { name: 'LIGHT RACK', kind: 'projectile', rangeM: 900, dmg: 18, periodS: 2.0, speedMps: 1200, splashM: 45 },
+    adds: { name: 'LIGHT RACK', kind: 'projectile', rangeM: 900, dmg: 18, periodS: 2.0, speedMps: 1200, splashM: 45, air: true },
   },
   'serrated-arms': {
     id: 'serrated-arms',
@@ -407,7 +410,9 @@ export const RESEARCH: Record<ResearchId, ResearchDef> = {
     producedBy: 'skyhook',
     hotkey: 'C',
     applies: ['interceptor'],
-    adds: { name: 'MISSILE RACK', kind: 'projectile', rangeM: 1300, dmg: 32, periodS: 1.5, speedMps: 1400, splashM: 60 },
+    // Explicitly anti-air: a missile is the one projectile that tracks, and an interceptor whose
+    // rack could not answer another aircraft would be a strange aeroplane.
+    adds: { name: 'MISSILE RACK', kind: 'projectile', rangeM: 1300, dmg: 32, periodS: 1.5, speedMps: 1400, splashM: 60, air: true },
   },
   'phased-emitter': {
     id: 'phased-emitter',
@@ -447,6 +452,15 @@ export const RESEARCH: Record<ResearchId, ResearchDef> = {
 };
 
 export const RESEARCH_LIST: ResearchDef[] = Object.values(RESEARCH);
+
+/**
+ * Every project, as a completed set.
+ *
+ * What the DEV SPAWN MENU arms a unit with. A menu unit is for answering "what is this machine when
+ * it is finished" — dropping the stock version would answer a question you can already get by
+ * building one, and would make the menu quietly misleading about what your army becomes.
+ */
+export const ALL_RESEARCH: ReadonlySet<ResearchId> = new Set(RESEARCH_LIST.map((r) => r.id));
 
 /** What a building can research, in order — its command card offers these alongside any units. */
 export function researchFrom(type: StructureType): ResearchDef[] {
