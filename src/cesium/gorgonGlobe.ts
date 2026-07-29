@@ -1508,6 +1508,136 @@ function closeMillstoneMenu() {
   document.getElementById('g-millstone-menu')?.remove();
 }
 
+/** Close the dev build menu, if one is up. */
+function closeBuildMenu() {
+  document.getElementById('g-build-menu')?.remove();
+}
+
+/**
+ * DEV ONLY — put a structure up instantly, free, wherever you asked for.
+ *
+ * Skips the three things that make building a game — the money, the tech chain, and the worker's
+ * walk and clock — because those are exactly what you do NOT want to sit through when the question
+ * is "what does a skyhook do" or "does the harbor read at this zoom".
+ *
+ * It does NOT skip the two rules whose violation would leave broken state rather than a fast test.
+ * An obelisk has to occupy a surveyed SITE, because its index is what registers it in the obelisk
+ * mask and the sensor net — one placed off-site would be a structure the network cannot see. And
+ * nothing goes in the sea, because a building under the waterline is not a building you can look at.
+ */
+function debugBuildAt(type: StructureType, lon: number, lat: number): void {
+  if (!rtsGame || !rtsBuild || rtsEnded) {
+    sound.play('denied');
+    toast('◈ START A SKIRMISH FIRST');
+    return;
+  }
+  if (theaterMap && theaterMap.heightAt(lon, lat) < 1) {
+    sound.play('denied');
+    toast('◈ AT SEA · PICK DRY GROUND');
+    return;
+  }
+
+  if (STRUCTURES[type].placement === 'site') {
+    // Snap to the nearest site that is still free, however far — this is the debug menu, and
+    // "nowhere near a site" is a more useful answer than silently building nothing.
+    let best: BuildSite | null = null;
+    let bd = Infinity;
+    for (const st of rtsSites) {
+      if (rtsBuiltSites.has(st.index)) continue;
+      const d = metresBetween(lon, lat, st.lon, st.lat);
+      if (d < bd) {
+        bd = d;
+        best = st;
+      }
+    }
+    if (!best) {
+      sound.play('denied');
+      toast('◈ NO FREE SURVEYED SITE');
+      return;
+    }
+    buildObeliskAt(best.index, best.lon, best.lat);
+    maybeOpenAllSites();
+    sound.play('success');
+    toast(`◈ OBELISK · SNAPPED ${Math.round(bd)} m TO A SITE`);
+    refreshPowerLines();
+    updateRtsHud();
+    return;
+  }
+
+  // Everything else goes up through the real completion path, so it gets its mesh, its marker, its
+  // power tether and its command card exactly as a worker-built one would.
+  finishConstruction({
+    id: rtsConstructionId++,
+    type,
+    lon,
+    lat,
+    remainingS: 0,
+    totalS: 0,
+    workerIndex: -1,
+  });
+}
+
+/**
+ * DEV ONLY — the build menu.
+ *
+ * Press 7 over theater ground for the whole catalog, free and ungated. Same shape as the unit spawn
+ * menu on 8, for the same reason: the fastest way to find out whether something works is to have
+ * one, and playing eleven minutes of build order to get there answers a different question.
+ *
+ * Each item names the prerequisite it is SKIPPING rather than hiding it, so the menu doubles as a
+ * readout of the tech chain you are stepping over.
+ */
+function openDebugBuildMenu(screenX: number, screenY: number, lon: number, lat: number) {
+  closeBuildMenu();
+
+  function done() {
+    closeBuildMenu();
+    window.removeEventListener('pointerdown', dismiss, true);
+  }
+  function dismiss(e: PointerEvent) {
+    if (!box.contains(e.target as Node)) done();
+  }
+
+  const box = document.createElement('div');
+  box.id = 'g-build-menu';
+  box.className = 'g-context g-spawn';
+  box.innerHTML =
+    `<div class="gc-head">DEV ONLY · BUILD A STRUCTURE` +
+    `<span class="gc-sub">${lat.toFixed(4)}, ${lon.toFixed(4)}</span></div>`;
+
+  const inMatch = !!rtsGame && !rtsEnded;
+  for (const type of BUILDABLE) {
+    const def = STRUCTURES[type];
+    const gate = rtsGame?.structureBlocker(type) ?? null;
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'gc-item own';
+    b.disabled = !inMatch;
+    b.innerHTML =
+      `<span class="gc-label">${def.name}</span>` +
+      `<span class="gc-why">${
+        !inMatch ? 'NO ACTIVE SKIRMISH' : `FREE · ◈ ${def.cost}${gate ? ` · SKIPS ${gate}` : ''}`
+      }</span>`;
+    b.title = def.blurb;
+    if (inMatch) {
+      b.addEventListener('click', () => {
+        done();
+        debugBuildAt(type, lon, lat);
+      });
+    }
+    box.append(b);
+  }
+
+  box.style.left = `${screenX}px`;
+  box.style.top = `${screenY}px`;
+  document.body.append(box);
+  const r = box.getBoundingClientRect();
+  const pad = 8;
+  if (r.bottom > window.innerHeight - pad) box.style.top = `${Math.max(pad, window.innerHeight - pad - r.height)}px`;
+  if (r.right > window.innerWidth - pad) box.style.left = `${Math.max(pad, window.innerWidth - pad - r.width)}px`;
+  window.setTimeout(() => window.addEventListener('pointerdown', dismiss, true), 0);
+}
+
 /**
  * DEV ONLY — the Millstone spawn menu.
  *
@@ -6081,6 +6211,7 @@ const onRightUp = (m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
     closeContactMenu();
     closeGroundMenu();
     closeMillstoneMenu();
+    closeBuildMenu();
     if (unitField.orderSelection(g.lon, g.lat, append, null, undefined, true)) {
       cancelConstructionsFor(unitField.selectedPlatforms());
       sound.play('orderLethal');
@@ -6698,16 +6829,16 @@ window.addEventListener('keydown', (e) => {
     return;
   }
 
-  // DEV ONLY — 8 opens the unit spawn menu on the ground under the cursor. Ahead of the RTS hotkey
-  // table because no command card claims a digit outside the acquisitions research row, and this
-  // should work from every context rather than only some of them.
-  if (e.key === '8' && mode === 'theater' && !e.repeat) {
+  // DEV ONLY — 7 builds anything, 8 fields any unit, both on the ground under the cursor. A pair on
+  // purpose: they are the same gesture asking the two halves of "let me see this thing now".
+  if ((e.key === '7' || e.key === '8') && mode === 'theater' && !e.repeat) {
     const at = lastMouse;
     const g = at ? groundAt(at) : undefined;
     if (g) {
       closeContactMenu();
       closeGroundMenu();
-      openMillstoneSpawnMenu(at!.x, at!.y, g.lon, g.lat);
+      if (e.key === '7') openDebugBuildMenu(at!.x, at!.y, g.lon, g.lat);
+      else openMillstoneSpawnMenu(at!.x, at!.y, g.lon, g.lat);
     } else {
       sound.play('denied');
       toast('◈ POINT AT GROUND FIRST');
@@ -6720,9 +6851,14 @@ window.addEventListener('keydown', (e) => {
       // Escape backs out of the INNERMOST thing and stops there. An open sheet is the innermost:
       // closing the inspect card should not also quit the match, which is exactly what it did when
       // these were three statements in a row rather than a ladder.
-      if (document.getElementById('g-inspect') || document.getElementById('g-millstone-menu')) {
+      if (
+        document.getElementById('g-inspect') ||
+        document.getElementById('g-millstone-menu') ||
+        document.getElementById('g-build-menu')
+      ) {
         closeInspectCard();
         closeMillstoneMenu();
+        closeBuildMenu();
         return;
       }
       if (rtsPlacing) cancelPlacement();
@@ -6872,6 +7008,8 @@ if (import.meta.env.DEV) {
     spawnMillstoneAt,
     spawnGorgonAt,
     openMillstoneSpawnMenu,
+    openDebugBuildMenu,
+    debugBuildAt,
     groundAt,
     setMillstoneEnabled: (on: boolean) => {
       millstoneEnabled = on;
