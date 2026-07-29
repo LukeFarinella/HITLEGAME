@@ -1344,188 +1344,246 @@ body:has(#globe-ui) #hint { display: none; }
   color: #4a5057;
 }
 
-/* ===== OPERATIONS BOARD =========================================================================
-   The campaign's mission select, between the save slot and a match. Same equipment as the title
-   screen (carbon, scanlines, mono caps) but SCROLLABLE and wider — it has to show seventeen
-   theaters at once, because "how much is left" is the thing the player came here to read. */
-.gc-back {
+/* ===== OPERATIONS HUD ===========================================================================
+   The chrome around the mission markers on the globe. The mission LIST is the globe itself — these
+   are the parts of a mission select that a map cannot say: which phase you are in, how much of the
+   contract is held, what the arrow colours mean, and the brief for whatever you just selected.
+
+   Everything here sits ABOVE the globe UI (z 300) and BELOW the title screen and loading overlay
+   (z 400), so exiting to title always covers it. */
+#g-campaign-hud {
   position: fixed;
   inset: 0;
-  z-index: 400;
-  overflow-y: auto;
-  background:
-    radial-gradient(120% 90% at 50% 0%, #16191f 0%, var(--carbon) 62%),
-    var(--carbon);
-  animation: gt-in .5s ease both;
+  z-index: 300;
+  /* The globe underneath is the control surface — the HUD must not eat clicks aimed at a marker.
+     Individual pieces opt back in. */
+  pointer-events: none;
+  animation: gt-in .4s ease both;
 }
 
-.gc-inner {
-  position: relative;
-  width: min(1080px, 92vw);
-  margin: 0 auto;
-  padding: 42px 0 60px;
+.gch-bar {
+  position: absolute;
+  top: 54px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(460px, 84vw);
+  text-align: center;
+  padding: 14px 20px 13px;
+  border: 1px solid var(--gunmetal);
+  border-top: 1px solid var(--red-dim);
+  background: linear-gradient(180deg, rgba(14, 16, 19, .93), rgba(14, 16, 19, .78));
+  backdrop-filter: blur(3px);
 }
 
-.gc-head { text-align: center; margin-bottom: 34px; }
-
-.gc-eyebrow {
-  font: 600 10px/1 var(--mono);
-  letter-spacing: .34em;
+.gch-eyebrow {
+  font: 600 9px/1 var(--mono);
+  letter-spacing: .3em;
   color: var(--ash);
 }
 
-.gc-title {
-  margin: 12px 0 0;
-  font: 700 clamp(26px, 4.2vw, 40px)/1 var(--sans);
-  letter-spacing: .18em;
+.gch-phase {
+  margin-top: 9px;
+  font: 700 15px/1.1 var(--mono);
+  letter-spacing: .2em;
   color: var(--bone);
-  text-indent: .18em;
 }
 
-/* Progress as a bar rather than a fraction alone: seventeen is enough that "11/17" doesn't land
-   as a shape, and the bar is the only thing on this screen that has to be readable at a glance. */
-.gc-bar {
-  width: min(420px, 70%);
+.gch-note {
+  margin-top: 7px;
+  font: 400 11px/1.5 var(--sans);
+  color: var(--ash);
+}
+
+/* Progress as a bar, not only a fraction: seventeen is enough that "11/17" doesn't land as a shape,
+   and this is the one number the player checks every time they come back here. */
+.gch-track {
+  margin: 12px auto 7px;
+  width: 78%;
   height: 3px;
-  margin: 18px auto 8px;
   background: var(--graphite-2);
   border: 1px solid var(--gunmetal);
 }
-.gc-bar span {
+.gch-track span {
   display: block;
   height: 100%;
   background: var(--red);
   box-shadow: 0 0 10px var(--red-glow);
-  transition: width .3s ease;
+  transition: width .35s ease;
 }
 
-.gc-count {
-  font: 600 10px/1 var(--mono);
-  letter-spacing: .28em;
-  color: var(--ash);
-}
-
-.gc-won {
-  border: 1px solid var(--red-dim);
-  background: linear-gradient(180deg, rgba(226, 58, 46, .12), rgba(226, 58, 46, .03));
-  padding: 18px 22px;
-  margin-bottom: 30px;
-  text-align: center;
-}
-.gc-won-mark {
-  font: 700 14px/1 var(--mono);
-  letter-spacing: .3em;
-  color: var(--bone);
-}
-.gc-won-p {
-  margin: 10px auto 0;
-  max-width: 62ch;
-  font: 400 12px/1.7 var(--sans);
-  color: var(--ash);
-}
-
-/* ---- a phase ---- */
-.gc-tier { margin-bottom: 34px; }
-/* A sealed phase is shown, not hidden — you should be able to see the whole contract from mission
-   one. Dimmed to about a third so it reads as "later" rather than "unavailable forever". */
-.gc-tier.locked { opacity: .38; }
-
-.gc-tier-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  border-bottom: 1px solid var(--gunmetal);
-  padding-bottom: 8px;
-}
-.gc-tier-name {
-  font: 700 12px/1 var(--mono);
+.gch-count {
+  font: 600 9px/1 var(--mono);
   letter-spacing: .26em;
-  color: var(--bone);
+  color: var(--ash);
 }
-.gc-tier-n {
-  font: 600 10px/1 var(--mono);
+
+/* ---- legend ---- */
+.gch-legend {
+  position: absolute;
+  left: 22px;
+  bottom: 26px;
+  display: grid;
+  gap: 7px;
+}
+.gch-key {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: 600 9px/1 var(--mono);
   letter-spacing: .2em;
   color: var(--ash);
 }
-.gc-tier-note {
-  margin-top: 8px;
-  font: 400 11px/1.6 var(--sans);
+/* The swatch is a triangle so it reads as the same object as the marker it explains. */
+.gch-key i {
+  width: 0;
+  height: 0;
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-top: 10px solid var(--gunmetal);
+}
+.gch-key i.k-open { border-top-color: var(--red); }
+.gch-key i.k-held { border-top-color: var(--ok); }
+.gch-key i.k-locked { border-top-color: #3A414A; }
+
+.gch-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 30px;
+  transform: translateX(-50%);
+  font: 600 9px/1 var(--mono);
+  letter-spacing: .3em;
   color: var(--ash);
+  opacity: .8;
 }
 
-.gc-grid {
-  margin-top: 14px;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 10px;
-}
-
-/* ---- one theater ---- */
-.gc-card {
+.gch-exit {
+  position: absolute;
+  right: 22px;
+  bottom: 24px;
+  pointer-events: auto;
   appearance: none;
-  text-align: left;
   border: 1px solid var(--gunmetal);
-  background: var(--graphite-2);
-  color: inherit;
-  padding: 13px 14px 15px;
+  background: rgba(14, 16, 19, .8);
+  color: var(--ash);
+  font: 600 9px/1 var(--mono);
+  letter-spacing: .24em;
+  padding: 11px 20px;
   cursor: pointer;
-  display: grid;
-  gap: 6px;
-  align-content: start;
-  transition: border-color .16s ease, background .16s ease, box-shadow .16s ease;
+  transition: border-color .16s ease, color .16s ease;
 }
-.gc-card:hover:not(:disabled) {
-  border-color: var(--red-dim);
-  background: var(--graphite);
-  box-shadow: 0 0 22px rgba(226, 58, 46, .18);
-}
-.gc-card:disabled { cursor: default; }
-/* Held ground keeps a red edge so a cleared phase reads as a solid block of colour. */
-.gc-card.done { border-color: var(--red-dim); background: rgba(226, 58, 46, .06); }
+.gch-exit:hover { border-color: var(--steel); color: var(--bone); }
 
-.gc-card-top {
+/* ===== MISSION BRIEF ============================================================================
+   Slides up from the bottom when a marker is selected. Not a modal: the marker you just clicked has
+   to stay visible above it, because the decision is being made on the map. */
+#g-mission-brief {
+  position: fixed;
+  z-index: 301;
+  left: 50%;
+  bottom: 68px;
+  transform: translateX(-50%);
+  width: min(520px, 90vw);
+  border: 1px solid var(--red-dim);
+  border-left: 3px solid var(--red);
+  background: linear-gradient(180deg, rgba(16, 18, 22, .96), rgba(12, 14, 17, .92));
+  backdrop-filter: blur(4px);
+  padding: 15px 18px 14px;
+  animation: gmb-in .22s ease both;
+}
+@keyframes gmb-in {
+  from { opacity: 0; transform: translate(-50%, 10px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+#g-mission-brief.held { border-color: rgba(79, 158, 122, .5); border-left-color: var(--ok); }
+#g-mission-brief.locked { border-color: var(--gunmetal); border-left-color: var(--steel); }
+
+.gmb-top {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
 }
-.gc-card-sub {
+.gmb-sub {
   font: 600 9px/1.2 var(--mono);
-  letter-spacing: .18em;
+  letter-spacing: .2em;
   color: var(--ash);
 }
-.gc-card-flag {
+.gmb-flag {
   font: 700 9px/1 var(--mono);
-  letter-spacing: .18em;
-  color: var(--ash);
+  letter-spacing: .2em;
+  color: var(--red);
   white-space: nowrap;
 }
-.gc-card.done .gc-card-flag { color: var(--red); }
+#g-mission-brief.held .gmb-flag { color: var(--ok); }
+#g-mission-brief.locked .gmb-flag { color: var(--steel); }
 
-.gc-card-name {
-  font: 700 17px/1.1 var(--sans);
+.gmb-name {
+  margin-top: 6px;
+  font: 700 22px/1.05 var(--sans);
   letter-spacing: .06em;
   color: var(--bone);
 }
-.gc-card-blurb {
-  font: 400 11px/1.55 var(--sans);
+.gmb-blurb {
+  margin: 8px 0 0;
+  font: 400 12px/1.6 var(--sans);
   color: var(--ash);
 }
 
-.gc-foot { text-align: center; margin-top: 10px; }
-.gc-exit {
+.gmb-actions {
+  margin-top: 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.gmb-go {
+  flex: 1;
+  appearance: none;
+  border: 1px solid var(--red-dim);
+  background: linear-gradient(180deg, rgba(226, 58, 46, .2), rgba(226, 58, 46, .06));
+  color: var(--bone);
+  font: 700 12px/1 var(--mono);
+  letter-spacing: .26em;
+  padding: 13px 18px;
+  cursor: pointer;
+  transition: background .16s ease, border-color .16s ease, box-shadow .16s ease;
+}
+.gmb-go:hover {
+  background: linear-gradient(180deg, rgba(226, 58, 46, .34), rgba(226, 58, 46, .12));
+  border-color: var(--red);
+  box-shadow: 0 0 24px var(--red-glow);
+}
+.gmb-why {
+  flex: 1;
+  font: 400 11px/1.5 var(--sans);
+  color: var(--steel);
+}
+.gmb-close {
   appearance: none;
   border: 1px solid var(--gunmetal);
   background: none;
   color: var(--ash);
-  font: 600 10px/1 var(--mono);
-  letter-spacing: .26em;
-  padding: 12px 26px;
+  font: 600 9px/1 var(--mono);
+  letter-spacing: .2em;
+  padding: 13px 16px;
   cursor: pointer;
   transition: border-color .16s ease, color .16s ease;
 }
-.gc-exit:hover { border-color: var(--steel); color: var(--bone); }
+.gmb-close:hover { border-color: var(--steel); color: var(--bone); }
+
+/* While the operations HUD is up the globe is a mission select, not the legacy campaign map — the
+   store, the tasking rail and the theater-pick furniture have nothing to say here. */
+#globe-ui.mission-select #c2-store,
+#globe-ui.mission-select #c2-tasking,
+#globe-ui.mission-select .g-title,
+#globe-ui.mission-select .g-cursor { display: none; }
+
+@media (max-width: 720px) {
+  .gch-bar { top: 44px; padding: 11px 14px 10px; }
+  .gch-phase { font-size: 12px; }
+  .gch-legend { display: none; }
+  .gch-hint { display: none; }
+  .gmb-name { font-size: 18px; }
+}
 
 /* ===== LOADING SCREEN ===========================================================================
    Covers the scene entirely while a world or a theater is built. Below the title screen in stacking

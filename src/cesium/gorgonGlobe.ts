@@ -77,9 +77,13 @@ import { showLoading, setStage, hideLoading } from '../ui/loading';
 import { setActiveSlot, activeSlot, migrateLegacySave } from '../game/saves';
 import {
   MISSIONS as CAMPAIGN_MISSIONS, markComplete, markStarted, campaignWon, campaignProgress, isComplete,
-  type MissionDef,
+  missionById, tierUnlocked, type MissionDef,
 } from '../game/rts/campaign';
-import { showCampaignBoard, hideCampaignBoard, campaignBoardOpen } from '../ui/rtsCampaign';
+import {
+  showCampaignHud, hideCampaignHud, campaignHudOpen, refreshCampaignHud,
+  showMissionBrief, hideMissionBrief, missionBriefOpen,
+} from '../ui/rtsCampaign';
+import { MissionMarkers, type MissionMarker } from './missionMarkers';
 import { LaserBeams } from './lasers';
 import { ScanBeams, Blasts, Sparks, Impacts, Cuffs, ViolationPings, Rounds, CameraFlashes } from './effects';
 import { Reactions } from './reactions';
@@ -1303,6 +1307,9 @@ scene.preUpdate.addEventListener(() => {
   const now = performance.now();
   const dt = (now - lastTickMs) / 1000;
   lastTickMs = now;
+  // Mission select runs with no unit field behind it — the globe is the whole screen — so the
+  // markers breathe from out here rather than inside the sim branch.
+  if (missionSelect) missionMarkers?.update(dt);
   if (unitField) {
     unitField.tick(dt);
     if (sensorField) {
@@ -2247,7 +2254,12 @@ function applyOwnership(rebuildScene: boolean): void {
     unitField.hvtDesignate = missions.hasChosen('defend', 'hvt');
   }
 
-  if (obelisks && territory) obeliskMask = progression.obeliskMask(territory, obelisks.count);
+  // In mission select the mask belongs to the LADDER, not to the legacy campaign's territory
+  // purchases — the lit ground is which theaters you have taken. Letting a progression change
+  // reach in here would blank the map the player is reading their progress off.
+  if (obelisks && territory && !missionSelect) {
+    obeliskMask = progression.obeliskMask(territory, obelisks.count);
+  }
 
   const sig = ownershipSignature();
   const changed = sig !== appliedOwnership;
@@ -2356,11 +2368,93 @@ async function openCampaign(slot: number): Promise<void> {
   openCampaignBoard();
 }
 
+// ---- mission select --------------------------------------------------------------------------
+//
+// The ladder is picked ON THE GLOBE. Seventeen arrows stand over the ground their contracts are
+// fought on; every theater you hold lights its obelisks underneath them. That means "which contract
+// next" and "how far have I got" are the same act of looking, which a grid of cards could never do:
+// a list can tell you 4/17, only the map can show you which quarter of the country is lit.
+
+/** True while the globe IS the mission select. Gates the legacy theater-pick click. */
+let missionSelect = false;
+/** The arrow layer. Built on first use and kept — seventeen billboards cost nothing to leave live. */
+let missionMarkers: MissionMarkers | undefined;
+/** The marker currently under the pointer, for the hover swap. */
+let hotMission: string | null = null;
+
+/** Where a mission's ARROW stands. Near its ground, but chosen to be readable from orbit. */
+function missionAnchor(m: MissionDef): { lon: number; lat: number } | null {
+  if (m.pin) return m.pin; // hand-placed, so a block's arrow never lands on a state's
+  if (m.anchor) return m.anchor;
+  if (m.tier === 'state') {
+    const s = m.fips ? territory?.byId.get(m.fips) : undefined;
+    return s ? s.center : null;
+  }
+  const region = territory?.regions.find((r) => r.id === m.regionId);
+  if (!region?.states.length) return null;
+  // A block's arrow goes at the mean of its members, weighted by nothing — the point is "roughly
+  // here", and weighting by site count dragged the western block's marker onto the coast.
+  let lon = 0;
+  let lat = 0;
+  for (const s of region.states) {
+    lon += s.center.lon;
+    lat += s.center.lat;
+  }
+  return { lon: lon / region.states.length, lat: lat / region.states.length };
+}
+
+/** The whole ladder as markers, in the state the save says they're in. */
+function missionMarkerSet(): MissionMarker[] {
+  const out: MissionMarker[] = [];
+  for (const m of CAMPAIGN_MISSIONS) {
+    const at = missionAnchor(m);
+    if (!at) continue;
+    out.push({
+      id: m.id,
+      lon: at.lon,
+      lat: at.lat,
+      label: m.name,
+      state: isComplete(m.id) ? 'held' : tierUnlocked(m.tier) ? 'open' : 'locked',
+    });
+  }
+  return out;
+}
+
 /**
- * Show the mission ladder for the open slot.
+ * The obelisk mask the ladder implies: every site inside a theater you hold.
  *
- * The single place the board is constructed, so every route back to it — finishing a mission, losing
- * one, quitting one — lands on the same hooks.
+ * This is the progression display. A cleared state lights its whole field, a cleared block lights
+ * every member state, and a cleared overseas theater lights the synthesised ground it was fought on
+ * — so the map fills in as the contract does, and an empty continent is a to-do list.
+ */
+function campaignObeliskMask(): Uint8Array | undefined {
+  if (!obelisks) return undefined;
+  const mask = new Uint8Array(obelisks.count);
+  for (const m of CAMPAIGN_MISSIONS) {
+    if (!isComplete(m.id)) continue;
+    if (m.tier === 'state') {
+      const s = m.fips ? territory?.byId.get(m.fips) : undefined;
+      if (s) for (const i of s.all) mask[i] = 1;
+    } else if (m.tier === 'block') {
+      const region = territory?.regions.find((r) => r.id === m.regionId);
+      if (region) for (const s of region.states) for (const i of s.all) mask[i] = 1;
+    } else if (m.anchor) {
+      // Overseas has no survey to enumerate — light the synthesised sites inside the theater disc.
+      for (let i = obelisks.realCount; i < obelisks.count; i++) {
+        if (metresBetween(m.anchor.lon, m.anchor.lat, obelisks.lon[i], obelisks.lat[i]) <= THEATER_RADIUS_M) {
+          mask[i] = 1;
+        }
+      }
+    }
+  }
+  return mask;
+}
+
+/**
+ * Put the globe into mission select for the open slot.
+ *
+ * The single place it is entered, so every route back — finishing a mission, losing one, quitting
+ * one — lands in the same state.
  */
 function openCampaignBoard(): void {
   const slot = activeSlot();
@@ -2368,10 +2462,55 @@ function openCampaignBoard(): void {
     bootTitle();
     return;
   }
-  showCampaignBoard(slot, {
+  missionSelect = true;
+  hideMissionBrief();
+  el('globe-ui')?.classList.add('mission-select');
+  cursor.show = false; // the 200-mile theater ring is the legacy pick, and it is noise here
+
+  // Held ground lights up. This is the same heat field the legacy campaign uses, driven off the
+  // ladder instead of off territory purchases.
+  obeliskMask = campaignObeliskMask();
+  rebuildHeatField();
+  if (orbitHomeRings) orbitHomeRings.show = false;
+
+  missionMarkers ??= new MissionMarkers(scene);
+  missionMarkers.set(missionMarkerSet());
+  missionMarkers.show = true;
+  updateChrome();
+
+  showCampaignHud(slot, {
     onDeploy: (m) => void startRtsMatch(m),
     onExit: () => exitToTitle(),
   });
+
+  // Frame what the player can actually act on: the domestic map until the overseas phase opens,
+  // then the whole planet. Arriving zoomed to a continent you have no contracts on is a worse
+  // opening than one extra camera move.
+  const overseas = tierUnlocked('theater');
+  camera.flyTo({
+    destination: overseas
+      ? Cesium.Cartesian3.fromDegrees(-25, 26, 20_000_000)
+      : Cesium.Cartesian3.fromDegrees(-96, 39, 6_600_000),
+    duration: 2.0,
+  });
+}
+
+/** Leave mission select — for a match, or for the title. */
+function closeCampaignBoard(): void {
+  missionSelect = false;
+  hotMission = null;
+  hideMissionBrief();
+  hideCampaignHud();
+  el('globe-ui')?.classList.remove('mission-select');
+  if (missionMarkers) missionMarkers.show = false;
+}
+
+/** A marker was clicked: open its brief, or say why it can't be taken yet. */
+function selectMissionMarker(id: string): void {
+  const m = missionById(id);
+  if (!m) return;
+  sound.play(tierUnlocked(m.tier) ? 'click' : 'denied');
+  showMissionBrief(m);
 }
 
 /**
@@ -2382,7 +2521,7 @@ function openCampaignBoard(): void {
  * panel via `__gorgon.openLegacyCampaign(slot)`.
  */
 async function openLegacyCampaign(slot: number): Promise<void> {
-  hideCampaignBoard();
+  closeCampaignBoard();
   setActiveSlot(slot);
   showLoading({ title: 'LOADING MAP', subtitle: `CAMPAIGN SLOT ${slot}` });
   setStage('READING CAMPAIGN RECORD');
@@ -2457,7 +2596,7 @@ function resolveMissionSite(m: MissionDef): number {
  * platformStations / addUnits, which branch on `rtsGame`), and the economy tick begins.
  */
 async function startRtsMatch(mission: MissionDef): Promise<void> {
-  hideCampaignBoard();
+  closeCampaignBoard();
   rtsMission = mission;
   showLoading({ title: 'DEPLOYING', subtitle: `${mission.name} · ${mission.sub}` });
   setStage('SURVEYING GROUND');
@@ -4097,6 +4236,8 @@ function endRtsWith(victory: boolean): void {
   rtsEnded = true;
   sound.play(victory ? 'success' : 'lost');
   const wonAll = victory && !!rtsMission && markComplete(rtsMission.id);
+  // The HUD may still be alive behind the match in a redeploy loop; keep its counter honest.
+  refreshCampaignHud();
   showRtsEnd(victory, wonAll);
 }
 
@@ -4205,7 +4346,7 @@ function exitToTitle(): void {
   if (mode === 'theater') exitTheater();
   hideLoading();
   hideUnitPanel();
-  hideCampaignBoard();
+  closeCampaignBoard();
   setActiveSlot(null);
   applyOwnership(true); // nothing owned at the menu — clear the orbit heat
   bootTitle();
@@ -4215,7 +4356,7 @@ function bootTitle(): void {
   // The score belongs to the menus and the world map — bring it up as the title goes on. (The first
   // fadeIn before any click is blocked by autoplay policy; music.ts starts it on the first gesture.)
   music.fadeIn();
-  hideCampaignBoard();
+  closeCampaignBoard();
   showTitle({ onPlay: (slot) => void openCampaign(slot) });
 }
 
@@ -5748,7 +5889,10 @@ function refreshRoster() {
 }
 
 function updateChrome() {
-  setText('g-mode', mode === 'globe' ? 'ORBITAL · SELECT THEATER' : 'THEATER · C2 ACTIVE');
+  setText(
+    'g-mode',
+    mode !== 'globe' ? 'THEATER · C2 ACTIVE' : missionSelect ? 'ORBITAL · SELECT CONTRACT' : 'ORBITAL · SELECT THEATER',
+  );
   const title = el('g-title');
   if (title) title.style.display = mode === 'globe' ? '' : 'none';
   const exit = el('g-exit');
@@ -6061,6 +6205,17 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.MotionEvent) => {
     return;
   }
   if (mode !== 'globe') return; // cursor readout is orbit-only
+  // Mission select: the only hover that matters is which arrow is under the pointer.
+  if (missionSelect) {
+    const id = missionMarkers?.pick(m.endPosition) ?? null;
+    if (id !== hotMission) {
+      hotMission = id;
+      missionMarkers?.setHot(id);
+      if (id) sound.play('hover');
+    }
+    scene.canvas.style.cursor = id ? 'pointer' : '';
+    return;
+  }
   const carto = pickLonLat(m.endPosition);
   if (carto) {
     cursor.position = new Cesium.ConstantPositionProperty(Cesium.Cartesian3.fromRadians(carto.longitude, carto.latitude));
@@ -6110,6 +6265,15 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
     return;
   }
   if (mode === 'globe') {
+    // Mission select owns the globe: a click is either a marker or nothing. Falling through to
+    // tryEnterTheater would drop the player into the LEGACY campaign's theater from a screen that
+    // isn't the legacy campaign.
+    if (missionSelect) {
+      const id = missionMarkers?.pick(m.position) ?? null;
+      if (id) selectMissionMarker(id);
+      else hideMissionBrief();
+      return;
+    }
     const carto = pickLonLat(m.position);
     if (carto) tryEnterTheater(carto);
     return;
@@ -7051,6 +7215,13 @@ window.addEventListener('keydown', (e) => {
       }
     }
   }
+  // In mission select Escape closes the brief and stops there — the same innermost-first ladder the
+  // match uses. It must never fall through to exitTheater, which from here would do nothing visible
+  // and leave the player pressing a dead key.
+  if (e.key === 'Escape' && missionSelect) {
+    if (missionBriefOpen()) hideMissionBrief();
+    return;
+  }
   if (e.key === 'Escape') exitTheater();
   // I cycles the infection: spread it to more units so the red state is easy to watch, then reset.
   // Campaign only — in a match I is the INSPECT modifier, and a debug shortcut that scrambled the
@@ -7103,7 +7274,13 @@ if (import.meta.env.DEV) {
       won: campaignWon(),
       cleared: CAMPAIGN_MISSIONS.filter((m) => isComplete(m.id)).map((m) => m.id),
     }),
-    campaignBoardOpen,
+    campaignHudOpen,
+    get missionSelect() {
+      return missionSelect;
+    },
+    selectMissionMarker,
+    missionMarkerSet,
+    campaignObeliskMask,
     get rtsGame() {
       return rtsGame;
     },

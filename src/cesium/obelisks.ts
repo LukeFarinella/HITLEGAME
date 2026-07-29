@@ -332,9 +332,13 @@ export function createHeatField(
   mask?: Uint8Array,
 ): Cesium.Primitive | undefined {
   const live: number[] = [];
-  // realCount, not count: synthesised overseas sites exist so a foreign theater has ground to build
-  // on, and splatting them would put orange over Europe on the world map.
-  for (let i = 0; i < field.realCount; i++) if (!mask || mask[i]) live.push(i);
+  // With no mask, stop at realCount: the synthesised overseas sites exist so a foreign theater has
+  // ground to build on, and splatting them unasked would put orange over Europe on the world map.
+  // WITH a mask, honour it all the way to the end — that is how a held overseas theater lights up.
+  for (let i = 0; i < field.count; i++) {
+    if (mask ? !mask[i] : i >= field.realCount) continue;
+    live.push(i);
+  }
   if (!live.length) return undefined;
 
   const positions = new Float64Array(live.length * 3);
