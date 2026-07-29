@@ -69,6 +69,7 @@ import { inspectContact, fineBlockedBy, AUTHORITY_TIERS, type AuthorityLevel } f
 import { showInspectCard, closeInspectCard } from '../ui/rtsInspect';
 import { mandateState } from '../game/rts/mandate';
 import { RtsObjectivePanel } from '../ui/rtsObjectives';
+import { RtsGroupBar, type GroupCard } from '../ui/rtsGroups';
 import { RtsUnitCard, type RtsCardUnit, type RtsCardStructure } from '../ui/rtsUnitCard';
 import { showLoading, setStage, hideLoading } from '../ui/loading';
 import { setActiveSlot, migrateLegacySave } from '../game/saves';
@@ -597,18 +598,25 @@ function updateAttackPulse() {
 function updateRouteLayer() {
   if (!routes) return;
   if (!unitField || !theaterMap || mode !== 'theater') return routes.clear();
-  const sel = unitField.selectedPlatform();
-  if (!sel) return routes.clear();
-  const st = unitField.platformStatus(sel.index);
-  const legs = unitField.routeOf(sel.index);
-  if (!st || !legs.length) return routes.clear();
-  routes.draw(
-    { lon: st.lon, lat: st.lat },
-    legs,
-    unitField.routeActionOf(sel.index),
-    unitField.routeLoops(sel.index),
-    theaterMap.heightAt,
-  );
+  // EVERY selected platform's route, not just a single selection's. Ordering a group to a ridge and
+  // seeing one line was the old behaviour and it was actively misleading — it looked like one unit
+  // had been given the order. Twelve threads converging is the picture, and it is also how you spot
+  // the two that could not path there.
+  const sel = unitField.selectedPlatforms();
+  if (!sel.length) return routes.clear();
+  const draw = [];
+  for (const i of sel) {
+    const st = unitField.platformStatus(i);
+    const legs = unitField.routeOf(i);
+    if (!st || !legs.length) continue;
+    draw.push({
+      from: { lon: st.lon, lat: st.lat },
+      legs,
+      action: unitField.routeActionOf(i),
+      loops: unitField.routeLoops(i),
+    });
+  }
+  routes.drawMany(draw, theaterMap.heightAt);
 }
 
 /**
@@ -1332,6 +1340,8 @@ scene.preUpdate.addEventListener(() => {
       }
       rebuildRoster();
       refreshRoster();
+      // Cheap: the bar signature-compares and only rebuilds when a group or the selection changes.
+      rtsGroupBar?.render();
       updateRouteLayer();
       updateUnitPanel(); // in a match this renders the RTS unit card (see the guard inside)
     } else {
@@ -1361,6 +1371,8 @@ scene.preUpdate.addEventListener(() => {
       updateAlertHud();
       rebuildRoster();
       refreshRoster();
+      // Cheap: the bar signature-compares and only rebuilds when a group or the selection changes.
+      rtsGroupBar?.render();
       updateRouteLayer();
       updateUnitPanel(); // keep the selection panel + reticle tracking the live unit
     }
@@ -2417,6 +2429,9 @@ function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
   rtsObjectives = new RtsObjectivePanel();
   rtsObjectives.show();
   rtsObjectives.render(rtsObjectivesDone);
+  rtsControlGroups.clear();
+  rtsGroupBar = new RtsGroupBar({ cards: controlGroupCards, onPick: (n) => selectControlGroup(n) });
+  rtsGroupBar.show();
   // The command card greys chips by affordability and shows queue progress, so it repaints on every
   // economy/production change (and per-frame while a queue runs — see the RTS update branch).
   rtsGame.onChange(() => rtsCmd?.render());
@@ -2461,6 +2476,9 @@ function teardownRtsBuild(): void {
   rtsCmd = null;
   rtsObjectives?.hide();
   rtsObjectives = null;
+  rtsGroupBar?.hide();
+  rtsGroupBar = null;
+  rtsControlGroups.clear();
   rtsObjectivesDone.clear();
   rtsOrbitalFired = false;
   rtsSites = [];
@@ -2587,6 +2605,76 @@ function spawnGorgonAt(unit: RtsUnitId, lon: number, lat: number): void {
   toast(`◈ ${def.name} FIELDED`);
   updateUnitHud();
   updateRtsHud();
+}
+
+// ---- control groups ------------------------------------------------------------------------------
+
+/** Live members of a group, dead ones dropped. */
+function groupMembers(n: number): number[] {
+  const raw = rtsControlGroups.get(n);
+  if (!raw || !unitField) return [];
+  const live = raw.filter((i) => unitField!.isAlive(i));
+  if (live.length !== raw.length) rtsControlGroups.set(n, live);
+  return live;
+}
+
+/** Assign the current selection to a group. An empty selection CLEARS it, which is the useful undo. */
+function assignControlGroup(n: number): void {
+  if (!unitField || !rtsGame) return;
+  const sel = unitField.selectedPlatforms();
+  if (!sel.length) {
+    rtsControlGroups.delete(n);
+    sound.play('click');
+    toast(`◈ CONTROL GROUP ${n} CLEARED`);
+  } else {
+    rtsControlGroups.set(n, [...sel]);
+    sound.play('confirm');
+    toast(`◈ CONTROL GROUP ${n} · ${sel.length} UNIT${sel.length > 1 ? 'S' : ''}`);
+  }
+  rtsGroupBar?.render();
+}
+
+/** Recall a group: it becomes the selection. */
+function selectControlGroup(n: number): void {
+  if (!unitField) return;
+  const live = groupMembers(n);
+  if (!live.length) {
+    sound.play('denied');
+    toast(`◈ CONTROL GROUP ${n} IS EMPTY`);
+    return;
+  }
+  clearStructureSelection();
+  unitField.selectIndices(live);
+  sound.play('click');
+  updateUnitPanel();
+  rtsCmd?.render();
+  rtsGroupBar?.render();
+  updateRouteLayer();
+}
+
+/** What the bar draws — one card per ASSIGNED group, in number order. */
+function controlGroupCards(): GroupCard[] {
+  if (!rtsGame || !unitField) return [];
+  const selected = new Set(unitField.selectedPlatforms());
+  const out: GroupCard[] = [];
+  for (let n = 1; n <= CONTROL_GROUPS; n++) {
+    if (!rtsControlGroups.has(n)) continue;
+    const live = groupMembers(n);
+    const tally = new Map<RtsUnitId, number>();
+    for (const i of live) {
+      const id = rtsGame.unitIdOf(i);
+      if (id) tally.set(id, (tally.get(id) ?? 0) + 1);
+    }
+    const makeup = [...tally.entries()]
+      .map(([unit, k]) => ({ unit, n: k }))
+      .sort((a, b) => b.n - a.n);
+    // "Active" means the selection IS this group — not merely overlaps it. A card that lit up
+    // whenever one of its members happened to be selected would light up constantly.
+    const active =
+      live.length > 0 && live.length === selected.size && live.every((i) => selected.has(i));
+    out.push({ n, count: live.length, makeup, active });
+  }
+  return out;
 }
 
 /** Whether the currently selected unit is a worker drone — the only unit that opens the build menu. */
@@ -5072,6 +5160,18 @@ let rtsBuild: RtsBuildLayer | null = null;
 let rtsCmd: RtsCommandBar | null = null;
 /** The objective chain panel, or null outside a match. */
 let rtsObjectives: RtsObjectivePanel | null = null;
+/** The control-group bar, or null outside a match. */
+let rtsGroupBar: RtsGroupBar | null = null;
+/**
+ * Control groups 1–6, each a list of unit-field indices.
+ *
+ * Indices rather than ids because that is what every selection and order path already speaks. Dead
+ * members are pruned on read rather than tracked, so a group whose units died degrades to whoever is
+ * left instead of needing a subscription to every kill.
+ */
+const rtsControlGroups = new Map<number, number[]>();
+/** How many groups there are. Six is what fits across the top and what a hand reaches without moving. */
+const CONTROL_GROUPS = 6;
 /** Objectives cleared this match. */
 const rtsObjectivesDone = new Set<ObjectiveId>();
 /** Whether an orbital strike has been fired this match — an objective nothing else records. */
@@ -5310,7 +5410,10 @@ let rosterSignature = '';
 function rebuildRoster() {
   const box = el('g-roster');
   if (!box) return;
-  if (mode !== 'theater' || !unitField) {
+  // In an RTS match the control-group bar owns this spot. The per-unit chips are a campaign
+  // affordance — the campaign fields a handful of named platforms and listing them is useful; an
+  // army of forty is not a list, it is six groups.
+  if (mode !== 'theater' || !unitField || rtsGame) {
     (box as HTMLElement).hidden = true;
     rosterSignature = '';
     return;
@@ -6584,6 +6687,17 @@ window.addEventListener('keydown', (e) => {
   // branch's per-context lookup would swallow the I in some contexts and not others.
   if (rtsGame && (e.key === 'i' || e.key === 'I')) inspectHeld = true;
 
+  // CONTROL GROUPS take 1-6 before anything else in a match. Ctrl assigns, bare recalls. Ahead of
+  // the command-card table because a control group is a global gesture — it has to mean the same
+  // thing whatever happens to be selected, which is the entire point of it.
+  if (rtsGame && !e.repeat && /^[1-6]$/.test(e.key)) {
+    const n = Number(e.key);
+    if (e.ctrlKey || e.metaKey) assignControlGroup(n);
+    else selectControlGroup(n);
+    e.preventDefault();
+    return;
+  }
+
   // DEV ONLY — 8 opens the unit spawn menu on the ground under the cursor. Ahead of the RTS hotkey
   // table because no command card claims a digit outside the acquisitions research row, and this
   // should work from every context rather than only some of them.
@@ -6718,6 +6832,10 @@ if (import.meta.env.DEV) {
     RTS_COMBAT,
     startResearchAt,
     refreshPowerLines,
+    updateRouteLayer,
+    controlGroupCards,
+    assignControlGroup,
+    selectControlGroup,
     get rounds() {
       return rounds;
     },

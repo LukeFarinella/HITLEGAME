@@ -3123,6 +3123,24 @@ export class UnitField {
     return [...this.selection].filter((i) => PLATFORM_KINDS.includes(this.units[i].kind));
   }
 
+  /**
+   * Replace the selection with exactly these units — what recalling a control group does.
+   *
+   * Anything dead or gone is dropped rather than refused, so a group whose members died is still
+   * usable for whoever is left. Returns how many were actually selected, so the caller can tell
+   * "recalled four" from "that group is gone".
+   */
+  selectIndices(list: number[]): number {
+    this.selection.clear();
+    for (const i of list) {
+      const u = this.units[i];
+      if (!u || u.dead || !PLATFORM_KINDS.includes(u.kind)) continue;
+      this.selection.add(i);
+    }
+    this.rebuildMarks();
+    return this.selection.size;
+  }
+
   /** How many of the current selection are orderable platforms. */
   selectedPlatformCount(): number {
     return this.selectedPlatforms().length;

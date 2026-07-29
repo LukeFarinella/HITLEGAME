@@ -249,7 +249,9 @@ export const RESEARCH: Record<ResearchId, ResearchDef> = {
     cost: 300,
     timeS: 26,
     producedBy: 'acquisitions',
-    hotkey: '1',
+    // Not a digit: 1-6 are control groups now, and a research chip that silently stopped responding
+    // would be a worse bug than an unmemorable letter.
+    hotkey: 'S',
     effects: { incomePerObelisk: 4, capMult: 1.25 },
   },
   'funding-ii': {
@@ -259,7 +261,7 @@ export const RESEARCH: Record<ResearchId, ResearchDef> = {
     cost: 500,
     timeS: 34,
     producedBy: 'acquisitions',
-    hotkey: '2',
+    hotkey: 'B',
     requires: 'funding-i',
     effects: { incomePerObelisk: 6, capMult: 1.3 },
   },
@@ -270,7 +272,7 @@ export const RESEARCH: Record<ResearchId, ResearchDef> = {
     cost: 800,
     timeS: 44,
     producedBy: 'acquisitions',
-    hotkey: '3',
+    hotkey: 'C',
     requires: 'funding-ii',
     effects: { incomePerObelisk: 8, capMult: 1.4 },
   },

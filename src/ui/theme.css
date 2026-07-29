@@ -2176,3 +2176,55 @@ body.dev-open #c2-tasking { display: none; }
 .ruc-mfoot { display: flex; justify-content: space-between; gap: 8px; }
 .ruc-mfoot span { font: 500 7px/1.3 var(--mono); letter-spacing: .08em; color: var(--steel); }
 .ruc-mfoot .mnext { color: #6FA8C7; text-align: right; }
+
+/* ---- RTS control groups ------------------------------------------------------------------------
+   Sits exactly where the per-unit roster chips did, at the same weight — it is the replacement for
+   them, not an addition, so it inherits their place in the eye's scan order. */
+#g-rts-groups {
+  position: absolute;
+  /* Clear of the RTS HUD stack, which is five lines tall now (money, obelisks/supply, authority,
+     unrest, threat) — the roster chips this replaced only ever had to clear the campaign's shorter
+     header, and inheriting their 58px put the cards straight through the readout. */
+  top: calc(104px + env(safe-area-inset-top, 0px));
+  left: 50%; transform: translateX(-50%);
+  z-index: 62; pointer-events: auto;
+  display: flex; flex-direction: row; gap: 5px; justify-content: center;
+  max-width: min(720px, 70vw);
+  font-family: var(--mono);
+}
+#g-rts-groups[hidden] { display: none; }
+.grg-hint {
+  padding: 5px 10px;
+  background: rgba(11, 12, 14, .74); backdrop-filter: blur(6px);
+  border: 1px solid var(--gunmetal);
+  font: 600 8px/1 var(--mono); letter-spacing: .16em; color: var(--steel);
+}
+.grg-card {
+  display: flex; align-items: stretch; gap: 6px;
+  padding: 4px 8px 4px 4px; cursor: pointer;
+  background: rgba(11, 12, 14, .78); backdrop-filter: blur(6px);
+  border: 1px solid var(--gunmetal); border-bottom: 2px solid var(--cat, #B7BDC5);
+  font-family: var(--mono); text-align: left;
+}
+.grg-card:hover { border-color: var(--cat, #B7BDC5); background: rgba(24, 26, 30, .86); }
+.grg-card.active { background: rgba(24, 26, 30, .95); border-color: var(--cat, #B7BDC5); box-shadow: 0 0 12px rgba(255, 255, 255, .08); }
+.grg-card.empty { opacity: .42; }
+.grg-card:focus-visible { outline: 2px solid var(--cat, #B7BDC5); outline-offset: 2px; }
+.grg-n {
+  display: flex; align-items: center; justify-content: center; flex: none;
+  min-width: 16px; padding: 0 3px;
+  background: var(--cat, #B7BDC5); color: var(--void);
+  font: 700 10px/1 var(--mono);
+}
+.grg-body { display: flex; flex-direction: column; gap: 2px; min-width: 34px; }
+.grg-count { font: 700 11px/1 var(--mono); color: var(--bone); letter-spacing: .06em; }
+.grg-makeup { font: 500 7px/1 var(--mono); color: var(--steel); letter-spacing: .1em; white-space: nowrap; }
+.grg-card.active .grg-makeup { color: var(--bone); }
+
+@media (max-width: 500px) {
+  #g-rts-groups {
+    top: calc(132px + env(safe-area-inset-top, 0px));
+    max-width: calc(100vw - 24px);
+    overflow-x: auto; justify-content: flex-start;
+  }
+}
