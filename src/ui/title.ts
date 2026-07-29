@@ -1,4 +1,5 @@
 import { SLOT_COUNT, summariseAll, deleteSlot, type SlotSummary } from '../game/saves';
+import { readCampaignRecord, TIER_NAME } from '../game/rts/campaign';
 import type { Territory } from '../game/territory';
 import { icon } from './icons';
 import { sound } from './sound';
@@ -12,17 +13,17 @@ import { sound } from './sound';
  *
  * Three slots, because three is enough to keep a serious campaign, an experiment, and a fresh start
  * without turning the menu into file management. Each card shows enough to recognise a campaign at
- * a glance — where it was founded, how far the chain has gone, what it's worth — and deleting one
- * asks twice, because there is no undo behind it.
+ * a glance — which phase of the ladder it is in and how many of the seventeen theaters it holds —
+ * and deleting one asks twice, because there is no undo behind it.
+ *
+ * ONE button. There were two — a campaign and a separate RTS skirmish — and asking the player to
+ * pick a game mode before they had seen either was a decision with nothing behind it. START GAME
+ * opens the slot list, a slot opens the operations board, and the board is where the game starts.
  */
-
-const fmt = new Intl.NumberFormat('en-US');
 
 export interface TitleHooks {
   /** A slot was opened. The campaign has been loaded by the time this fires. */
   onPlay(slot: number, summary: SlotSummary): void;
-  /** The RTS skirmish was chosen — a separate game entirely, no campaign slot involved. */
-  onPlayRts(): void;
 }
 
 let hooks: TitleHooks | null = null;
@@ -61,9 +62,11 @@ export function showTitle(h: TitleHooks): void {
     `<div class="gt-sub">// SENTINEL C2</div>` +
     `<p class="gt-blurb">A private contractor has been retained to identify threats inside the ` +
     `civilian population. You are the operator. Everything you do here is on the record.</p>` +
+    // One way in. There used to be two buttons — a campaign and a separate RTS skirmish — which
+    // asked the player to choose a game mode before they had seen either. The RTS match IS the game
+    // now, so START GAME goes straight to the save slots and the slots go to the operations board.
     `<div class="gt-actions">` +
-    `<button type="button" class="gt-start" id="gt-start">START</button>` +
-    `<button type="button" class="gt-start gt-rts" id="gt-rts">RTS GAME</button>` +
+    `<button type="button" class="gt-start" id="gt-start">START GAME</button>` +
     `</div>` +
     `<div class="gt-slots" id="gt-slots" hidden></div>` +
     `</div>` +
@@ -80,20 +83,12 @@ export function showTitle(h: TitleHooks): void {
     slots.hidden = false;
     renderSlots();
   });
-
-  // RTS skirmish: no slot picker, no campaign. Straight into a match — the scene resolves Washington,
-  // stands up the Nexus and the opening dog, and starts the economy.
-  document.getElementById('gt-rts')?.addEventListener('click', () => {
-    sound.play('enter');
-    document.getElementById('g-title-screen')?.remove();
-    hooks?.onPlayRts();
-  });
 }
 
 function renderSlots(): void {
   const wrap = document.getElementById('gt-slots');
   if (!wrap) return;
-  wrap.innerHTML = `<div class="gt-slots-head">SELECT CAMPAIGN</div>`;
+  wrap.innerHTML = `<div class="gt-slots-head">SELECT CONTRACT</div>`;
 
   for (const s of summariseAll()) {
     wrap.append(slotCard(s));
@@ -107,17 +102,22 @@ function slotCard(s: SlotSummary): HTMLElement {
   const open = document.createElement('button');
   open.type = 'button';
   open.className = 'gt-slot-open';
+  // The card is named after the CONTRACT, not the campaign's founding state — the ladder is the
+  // progression now, so "how far through the seventeen" is the fact worth surfacing. A legacy save
+  // with no ladder record still shows its founding state, which is all it has.
+  const rec = readCampaignRecord(s.slot);
+  const title = rec.won ? 'CONTRACT COMPLETE' : rec.started ? TIER_NAME[rec.phase] : homeName(s.homeState);
   open.innerHTML = s.empty
     ? `<span class="gt-slot-n">SLOT ${s.slot}</span>` +
-      `<span class="gt-slot-title">NEW CAMPAIGN</span>` +
-      `<span class="gt-slot-meta">Empty · founding deployment not yet chosen</span>`
+      `<span class="gt-slot-title">NEW CONTRACT</span>` +
+      `<span class="gt-slot-meta">Empty · no theaters assigned</span>`
     : `<span class="gt-slot-n">SLOT ${s.slot}</span>` +
-      `<span class="gt-slot-title">${homeName(s.homeState)}</span>` +
+      `<span class="gt-slot-title">${title}</span>` +
       `<span class="gt-slot-meta">` +
-      `${icon('surveil')}${s.missionsComplete}/6 TASKINGS · ` +
-      `${fmt.format(s.tokens)} TOKENS · ` +
-      `${s.territories} ${s.territories === 1 ? 'TERRITORY' : 'TERRITORIES'}` +
-      `</span>`;
+      // Deliberately only the ladder. Funding tokens belong to the pre-ladder campaign and are
+      // per-match in a match, so a token count here was a number from a game the player isn't
+      // playing.
+      `${icon('surveil')}${rec.done}/${rec.total} THEATERS HELD</span>`;
   open.addEventListener('click', () => {
     sound.play('purchase');
     document.getElementById('g-title-screen')?.remove();

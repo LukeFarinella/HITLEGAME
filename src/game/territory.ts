@@ -399,7 +399,10 @@ export function surveyTerritory(field: ObeliskField): Promise<Territory> {
 
     // Assign every obelisk to a state.
     const buckets: number[][] = meta.map(() => []);
-    for (let i = 0; i < field.count; i++) {
+    // realCount, not count: anything past it is a synthesised overseas site, which is not US
+    // territory and must never end up inside a state's roster. (The raster would reject them on
+    // bounds anyway — this states the intent rather than relying on that.)
+    for (let i = 0; i < field.realCount; i++) {
       const v = cellAt(field.lon[i], field.lat[i]);
       if (v > 0) buckets[v - 1].push(i);
     }

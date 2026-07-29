@@ -39,6 +39,14 @@ export interface ObeliskField {
   /** 1 where the heading came from the source rather than being invented. */
   headingIsReal: Uint8Array;
   realHeadings: number;
+  /**
+   * How many of the sites came out of `obelisks.bin` — i.e. are REAL surveyed ground.
+   *
+   * Everything from this index up is synthesised overseas ground (see {@link withSyntheticSites}).
+   * The orbit heatmap and the HUD count both stop here, so the world map looks exactly as it always
+   * did; only a theater standing on top of a synthesised anchor ever sees the rest.
+   */
+  realCount: number;
 }
 
 /**
@@ -78,7 +86,129 @@ export async function loadObelisks(): Promise<ObeliskField> {
     if (real) realHeadings++;
     heading[i] = h >= 0 ? h : stableHeading(lon[i], lat[i]);
   }
-  return { count, lon, lat, heading, headingIsReal, realHeadings };
+  return { count, lon, lat, heading, headingIsReal, realHeadings, realCount: count };
+}
+
+// --- synthesised overseas ground ----------------------------------------------------------------
+//
+// `obelisks.bin` is domestic. Measured across all 115,502 records it spans lon [-159.58, -64.67],
+// lat [17.70, 48.90] — CONUS plus Hawaii and Puerto Rico. Every other layer a theater needs is
+// already global: terrain is Cesium's, the land mask comes from world-atlas countries-10m, and the
+// road network is OpenFreeMap vector tiles. The SITE CATALOG is the one domestic thing, and without
+// it a foreign theater has nowhere to build.
+//
+// So the campaign's overseas theaters bring their own. The sites below are invented, but they are
+// invented the way the real ones are ARRANGED — a handful of dense cores with a thinning skirt —
+// because everything downstream reads density: `clusterCentres` picks expansion nodes out of it,
+// `pickCities` finds a downtown in it, and a uniform scatter would produce forty identical nodes in
+// a grid. They are deterministic (hashed off the anchor, no Math.random) so a given theater has the
+// same field every time it is entered, on every machine.
+
+/** Sites per synthesised theater. Roughly a mid-density US metro's worth inside the disc. */
+const SYNTH_SITES = 1400;
+/** Dense cores per theater — the "cities" the skirt scatters around. */
+const SYNTH_CORES = 9;
+
+/** Deterministic 0..1 from an integer stream. Same seed, same field, forever. */
+function hash01(seed: number, salt: number): number {
+  let h = Math.imul(seed ^ 0x9e3779b9, 0x85ebca6b);
+  h = Math.imul(h ^ salt ^ (h >>> 13), 0xc2b2ae35);
+  h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+
+/**
+ * Build one theater's worth of sites around an anchor.
+ *
+ * Radius is the theater disc's, less a margin — sites on the rim fall outside the playable circle
+ * and would render as build slots nobody can reach.
+ */
+function syntheticSitesAt(lon0: number, lat0: number, radiusM: number, seed: number): { lon: number; lat: number }[] {
+  const mPerLon = 111_320 * Math.max(0.15, Math.cos((lat0 * Math.PI) / 180));
+  const out: { lon: number; lat: number }[] = [];
+
+  // Cores first, spread over the disc so the metros don't stack.
+  const cores: { lon: number; lat: number; w: number }[] = [];
+  for (let c = 0; c < SYNTH_CORES; c++) {
+    const a = hash01(seed, c * 7 + 1) * Math.PI * 2;
+    // sqrt keeps the cores area-uniform instead of bunched at the centre; 0.82 holds them inboard.
+    const r = Math.sqrt(hash01(seed, c * 7 + 2)) * radiusM * 0.82;
+    cores.push({
+      lon: lon0 + (Math.cos(a) * r) / mPerLon,
+      lat: lat0 + (Math.sin(a) * r) / 111_320,
+      // The first core is always the biggest, so there is an unambiguous downtown.
+      w: c === 0 ? 3 : 1 + hash01(seed, c * 7 + 3) * 1.6,
+    });
+  }
+  const totalW = cores.reduce((n, c) => n + c.w, 0);
+
+  for (let i = 0; i < SYNTH_SITES; i++) {
+    // Pick a core by weight, then fall off from it. The cube keeps most of a core's sites tight and
+    // trails the rest outward, which is what a real metro's site density looks like.
+    let pick = hash01(seed, i * 5 + 11) * totalW;
+    let core = cores[0];
+    for (const c of cores) {
+      pick -= c.w;
+      if (pick <= 0) {
+        core = c;
+        break;
+      }
+    }
+    const a = hash01(seed, i * 5 + 12) * Math.PI * 2;
+    const t = hash01(seed, i * 5 + 13);
+    const spread = radiusM * 0.16 * core.w * (t * t * t * 3 + 0.08);
+    const p = {
+      lon: core.lon + (Math.cos(a) * spread) / mPerLon,
+      lat: core.lat + (Math.sin(a) * spread) / 111_320,
+    };
+    // Anything that drifted outside the disc is dropped rather than clamped — clamping piles sites
+    // onto the rim in a visible ring.
+    const dx = (p.lon - lon0) * mPerLon;
+    const dy = (p.lat - lat0) * 111_320;
+    if (dx * dx + dy * dy > radiusM * radiusM) continue;
+    out.push(p);
+  }
+  return out;
+}
+
+/**
+ * Return a field with synthesised sites appended for each anchor, leaving the real ones untouched.
+ *
+ * The returned field's `realCount` still points at the end of the surveyed data, and the indices of
+ * every real site are unchanged — which is what makes this safe to do unconditionally at load: the
+ * territory survey, the ownership mask, the orbit heatmap and the campaign all address sites by
+ * index and none of them can tell the difference.
+ */
+export function withSyntheticSites(
+  field: ObeliskField,
+  anchors: { lon: number; lat: number }[],
+  radiusM: number,
+): ObeliskField {
+  if (!anchors.length) return field;
+  const extra: { lon: number; lat: number }[] = [];
+  for (const anchor of anchors) {
+    // Seed off the anchor's coordinates, so moving a theater regenerates it and two theaters never
+    // share a layout.
+    const seed = Math.imul(Math.round(anchor.lon * 1000) | 0, 0x27d4eb2d) ^ Math.round(anchor.lat * 1000);
+    extra.push(...syntheticSitesAt(anchor.lon, anchor.lat, radiusM, seed));
+  }
+
+  const count = field.count + extra.length;
+  const lon = new Float32Array(count);
+  const lat = new Float32Array(count);
+  const heading = new Float32Array(count);
+  const headingIsReal = new Uint8Array(count);
+  lon.set(field.lon);
+  lat.set(field.lat);
+  heading.set(field.heading);
+  headingIsReal.set(field.headingIsReal);
+  for (let k = 0; k < extra.length; k++) {
+    const i = field.count + k;
+    lon[i] = extra[k].lon;
+    lat[i] = extra[k].lat;
+    heading[i] = stableHeading(extra[k].lon, extra[k].lat);
+  }
+  return { count, lon, lat, heading, headingIsReal, realHeadings: field.realHeadings, realCount: field.realCount };
 }
 
 // --- orbit: additive heat splats ---------------------------------------------------------------
@@ -202,7 +332,9 @@ export function createHeatField(
   mask?: Uint8Array,
 ): Cesium.Primitive | undefined {
   const live: number[] = [];
-  for (let i = 0; i < field.count; i++) if (!mask || mask[i]) live.push(i);
+  // realCount, not count: synthesised overseas sites exist so a foreign theater has ground to build
+  // on, and splatting them would put orange over Europe on the world map.
+  for (let i = 0; i < field.realCount; i++) if (!mask || mask[i]) live.push(i);
   if (!live.length) return undefined;
 
   const positions = new Float64Array(live.length * 3);

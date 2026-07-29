@@ -66,6 +66,15 @@ export interface SlotSummary {
   territories: number;
 }
 
+/**
+ * The RTS campaign ladder's storage key, duplicated rather than imported.
+ *
+ * This module is the one thing in the save layer that imports NOTHING from the game, which is what
+ * keeps it free of cycles — `rts/campaign.ts` imports `slotKey` from here, so the arrow cannot point
+ * back. The cost is one string that has to stay in step with {@link ../game/rts/campaign CAMPAIGN_KEY}.
+ */
+const RTS_CAMPAIGN_BASE = 'rts.campaign.v1';
+
 /** Read a slot's headline numbers WITHOUT opening it — this is what the menu cards show. */
 export function summarise(slot: number): SlotSummary {
   const empty: SlotSummary = {
@@ -78,7 +87,10 @@ export function summarise(slot: number): SlotSummary {
     territories: 0,
   };
   const prog = readJSON(`gorgon.s${slot}.progression.v2`);
-  if (!prog) return empty;
+  // A slot is in use if EITHER record exists: the RTS ladder is what a new campaign writes, and the
+  // legacy progression record is what a pre-ladder save left behind. Neither alone is sufficient.
+  const rts = readJSON(`gorgon.s${slot}.${RTS_CAMPAIGN_BASE}`);
+  if (!prog) return rts ? { ...empty, empty: false } : empty;
   const missions = readJSON(`gorgon.s${slot}.missions.v2`);
   return {
     slot,

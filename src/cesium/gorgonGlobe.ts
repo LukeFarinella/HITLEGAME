@@ -4,7 +4,9 @@ import { mesh, feature } from 'topojson-client';
 // the main thread on startup — it's dynamically imported the first time a theater is entered.
 import countries50m from 'world-atlas/countries-50m.json';
 import { buildTheaterMap, RIM_FADE_START, type TheaterMap } from './theaterMap';
-import { loadObelisks, createHeatField, buildObeliskPyramids, type ObeliskField } from './obelisks';
+import {
+  loadObelisks, withSyntheticSites, createHeatField, buildObeliskPyramids, type ObeliskField,
+} from './obelisks';
 import { fetchRoads, buildRoadPrimitive, type RoadClass, type RoadGroup, type RoadNet } from './roads';
 import { buildBuildings } from './buildings';
 import { generateBuildings } from './procBuildings';
@@ -72,7 +74,12 @@ import { RtsObjectivePanel } from '../ui/rtsObjectives';
 import { RtsGroupBar, type GroupCard } from '../ui/rtsGroups';
 import { RtsUnitCard, type RtsCardUnit, type RtsCardStructure } from '../ui/rtsUnitCard';
 import { showLoading, setStage, hideLoading } from '../ui/loading';
-import { setActiveSlot, migrateLegacySave } from '../game/saves';
+import { setActiveSlot, activeSlot, migrateLegacySave } from '../game/saves';
+import {
+  MISSIONS as CAMPAIGN_MISSIONS, markComplete, markStarted, campaignWon, campaignProgress, isComplete,
+  type MissionDef,
+} from '../game/rts/campaign';
+import { showCampaignBoard, hideCampaignBoard, campaignBoardOpen } from '../ui/rtsCampaign';
 import { LaserBeams } from './lasers';
 import { ScanBeams, Blasts, Sparks, Impacts, Cuffs, ViolationPings, Rounds, CameraFlashes } from './effects';
 import { Reactions } from './reactions';
@@ -2293,7 +2300,7 @@ function rebuildHeatField(): void {
   heat.show = mode === 'globe';
   scene.primitives.add(heat);
   heatField = heat;
-  setText('g-obelisks', territory ? String(progression.activeObelisks(territory)) : String(obelisks.count));
+  setText('g-obelisks', territory ? String(progression.activeObelisks(territory)) : String(obelisks.realCount));
 }
 
 /**
@@ -2306,9 +2313,18 @@ function rebuildHeatField(): void {
  * makes that safe: nothing here depends on which save is open.
  */
 const worldReady: Promise<void> = loadObelisks()
-  .then(async (field) => {
+  .then(async (rawField) => {
+    // The surveyed field is domestic. The campaign's overseas theaters need a site catalog on ground
+    // it has never covered, so each one's anchor gets a synthesised field appended — real indices
+    // untouched, `realCount` still pointing at the end of the survey, so nothing that reads the
+    // world map can tell the difference. See withSyntheticSites.
+    const field = withSyntheticSites(
+      rawField,
+      CAMPAIGN_MISSIONS.map((m) => m.anchor).filter((a): a is { lon: number; lat: number } => !!a),
+      THEATER_RADIUS_M * 0.86,
+    );
     obelisks = field;
-    setText('g-obelisks', String(field.count));
+    setText('g-obelisks', String(field.realCount));
 
     // The survey is what turns 115k anonymous points into ownable territory, so the heat field
     // waits for it — drawing every site first and then blanking most of them would flash the whole
@@ -2323,13 +2339,50 @@ const worldReady: Promise<void> = loadObelisks()
   });
 
 /**
- * Bring a campaign up: open the slot, wait for the world, then reveal the map.
+ * Open a save slot and put the operations board up.
  *
- * Ownership can only be applied AFTER both halves are in — the survey (what territory exists) and
- * the slot (what of it is owned) — so this is the one place both are known to be ready. Doing it
- * any earlier is what used to flash the whole map as owned for a frame.
+ * This is the whole "start game" path now: title -> slot -> board -> a match. The world still has to
+ * be ready first, because the board's missions resolve to surveyed ground and a mission clicked
+ * before the survey lands would have nowhere to deploy.
  */
 async function openCampaign(slot: number): Promise<void> {
+  setActiveSlot(slot);
+  showLoading({ title: 'LOADING CONTRACT', subtitle: `SAVE SLOT ${slot}` });
+  setStage('READING CAMPAIGN RECORD');
+  await worldReady;
+  setStage('READY');
+  hideLoading();
+  markStarted();
+  openCampaignBoard();
+}
+
+/**
+ * Show the mission ladder for the open slot.
+ *
+ * The single place the board is constructed, so every route back to it — finishing a mission, losing
+ * one, quitting one — lands on the same hooks.
+ */
+function openCampaignBoard(): void {
+  const slot = activeSlot();
+  if (slot === null) {
+    bootTitle();
+    return;
+  }
+  showCampaignBoard(slot, {
+    onDeploy: (m) => void startRtsMatch(m),
+    onExit: () => exitToTitle(),
+  });
+}
+
+/**
+ * The pre-ladder campaign: the world map, the store, the tasking chain.
+ *
+ * No longer reachable from the menu — the RTS match is the game and the board is how you pick one —
+ * but entirely intact, and the pieces the ladder will borrow from live here. Reachable from the dev
+ * panel via `__gorgon.openLegacyCampaign(slot)`.
+ */
+async function openLegacyCampaign(slot: number): Promise<void> {
+  hideCampaignBoard();
   setActiveSlot(slot);
   showLoading({ title: 'LOADING MAP', subtitle: `CAMPAIGN SLOT ${slot}` });
   setStage('READING CAMPAIGN RECORD');
@@ -2349,34 +2402,73 @@ async function openCampaign(slot: number): Promise<void> {
   presentPendingForks();
 }
 
-// ---- RTS skirmish ------------------------------------------------------------------------------
+// ---- the match ---------------------------------------------------------------------------------
 //
-// A separate game that reuses the theater scene. It does not touch the campaign singletons — no slot
-// is opened, progression/missions are left where they sit — so an RTS match and a campaign never
-// bleed into each other. Everything RTS-specific hangs off the `rtsGame` flag.
+// One mission off the ladder, played in the theater scene. It does not touch the LEGACY campaign
+// singletons — progression/missions are left where they sit — so the two never bleed into each
+// other; the only thing a match writes is the mission it cleared. Everything RTS-specific hangs off
+// the `rtsGame` flag.
 
-/** Washington's FIPS. The skirmish always deploys here, the way the design sheet asks. */
-const RTS_HOME_FIPS = '53';
+/** The mission being played, so the end-of-match modal knows what to mark and where to go back to. */
+let rtsMission: MissionDef | null = null;
 
 /**
- * Start (or restart) an RTS skirmish over Washington.
+ * Where a mission deploys, as a global obelisk index — or -1 if it can't be resolved.
  *
- * Resolves Washington's downtown obelisk as the Nexus, masks the theater down to that single site,
- * and enters the theater. buildTheater then stands up the mesh, the lone obelisk and the opening dog
- * (see platformStations / addUnits, which branch on `rtsGame`), and the economy tick begins.
+ * Three shapes, because the ladder has three:
+ *   STATE    the state's downtown site. One metro, the survey already picked it.
+ *   BLOCK    the downtown of the block's LARGEST member, so a regional contract still opens on
+ *            ground worth opening on rather than in whichever state sorted first.
+ *   THEATER  the synthesised site nearest the anchor. Foreign ground has no survey (see
+ *            withSyntheticSites), so the search is deliberately confined to the synthetic tail —
+ *            a domestic site can never win it, whatever the distances say.
  */
-async function startRtsMatch(): Promise<void> {
-  showLoading({ title: 'RTS SKIRMISH', subtitle: 'DEPLOYING TO WASHINGTON' });
+function resolveMissionSite(m: MissionDef): number {
+  if (!obelisks) return -1;
+
+  if (m.tier === 'state') return m.fips ? (territory?.byId.get(m.fips)?.downtown ?? -1) : -1;
+
+  if (m.tier === 'block') {
+    const region = territory?.regions.find((r) => r.id === m.regionId);
+    if (!region?.states.length) return -1;
+    let best = region.states[0];
+    for (const s of region.states) if (s.all.length > best.all.length) best = s;
+    return best.downtown;
+  }
+
+  if (!m.anchor) return -1;
+  let best = -1;
+  let bestD = Infinity;
+  for (let i = obelisks.realCount; i < obelisks.count; i++) {
+    const d = metresBetween(m.anchor.lon, m.anchor.lat, obelisks.lon[i], obelisks.lat[i]);
+    if (d < bestD) {
+      bestD = d;
+      best = i;
+    }
+  }
+  return best;
+}
+
+/**
+ * Deploy to a mission.
+ *
+ * Resolves its ground to a single obelisk index, makes that the Nexus, masks the theater down to it,
+ * and enters. buildTheater then stands up the mesh, the lone obelisk and the opening dog (see
+ * platformStations / addUnits, which branch on `rtsGame`), and the economy tick begins.
+ */
+async function startRtsMatch(mission: MissionDef): Promise<void> {
+  hideCampaignBoard();
+  rtsMission = mission;
+  showLoading({ title: 'DEPLOYING', subtitle: `${mission.name} · ${mission.sub}` });
   setStage('SURVEYING GROUND');
   await worldReady;
-  const wa = territory?.byId.get(RTS_HOME_FIPS);
-  if (!obelisks || !wa) {
+  const nexusIndex = resolveMissionSite(mission);
+  if (!obelisks || nexusIndex < 0) {
     hideLoading();
-    toast('◈ WASHINGTON SURVEY UNAVAILABLE');
-    bootTitle();
+    toast(`◈ ${mission.name} SURVEY UNAVAILABLE`);
+    openCampaignBoard();
     return;
   }
-  const nexusIndex = wa.downtown;
   rtsGame = new RtsGame(nexusIndex, obelisks.lon[nexusIndex], obelisks.lat[nexusIndex]);
 
   // The match opens with the Nexus alone live; every other obelisk site in the theater is a build
@@ -2399,19 +2491,26 @@ async function startRtsMatch(): Promise<void> {
   enterTheater(Cesium.Cartographic.fromDegrees(obelisks.lon[nexusIndex], obelisks.lat[nexusIndex]));
 }
 
-/** End the current RTS match and return to the title screen. */
+/**
+ * Leave the current match and go back to the operations board.
+ *
+ * The board, not the title: a mission is one rung of a ladder now, and being dumped all the way out
+ * to the main menu after every win would make the campaign feel like seventeen separate games.
+ */
 function endRtsMatch(): void {
   if (!rtsGame) return;
   // Tear the build layer down first (it owns primitives exitTheater doesn't know about), then the
-  // theater the normal way, then clear RTS state and re-show the menu.
+  // theater the normal way, then clear RTS state and re-show the board.
   teardownRtsBuild();
   if (mode === 'theater') exitTheater();
   rtsGame = null;
+  rtsMission = null;
   obeliskMask = undefined;
   el('g-rts')?.setAttribute('hidden', '');
-  // exitTheater flew the camera to the world map; pull straight back to the title instead.
+  // exitTheater flew the camera to the world map; the board covers it either way.
   hideUnitPanel();
-  bootTitle();
+  if (activeSlot() === null) bootTitle();
+  else openCampaignBoard();
 }
 
 /** Push the RTS economy numbers into the match HUD. Cheap; called on every economy change. */
@@ -3987,40 +4086,84 @@ function onMillstoneRazed(): void {
   endRtsWith(true);
 }
 
-/** Decide the match, once. The world keeps rendering behind the modal; the directors stop. */
+/**
+ * Decide the match, once. The world keeps rendering behind the modal; the directors stop.
+ *
+ * A win is also where the LADDER moves: the mission is marked here rather than in the modal, so it
+ * is recorded whether or not the player ever clicks the button.
+ */
 function endRtsWith(victory: boolean): void {
   if (rtsEnded) return;
   rtsEnded = true;
   sound.play(victory ? 'success' : 'lost');
-  showRtsEnd(victory);
+  const wonAll = victory && !!rtsMission && markComplete(rtsMission.id);
+  showRtsEnd(victory, wonAll);
 }
 
-/** The end-of-match modal: one line on what happened, one button back to the title. */
-function showRtsEnd(victory: boolean): void {
+/**
+ * The end-of-match modal.
+ *
+ * Three outcomes, not two. A win that finishes the seventeenth theater is the END OF THE GAME and
+ * has to say so — dropping the player back onto a board with nothing left to click would be the
+ * quietest possible way to win a campaign.
+ */
+function showRtsEnd(victory: boolean, wonCampaign = false): void {
   if (document.getElementById('c2-rts-end')) return;
   const back = document.createElement('div');
   back.className = 'c2-modal-back';
   back.id = 'c2-rts-end';
+  const p = campaignProgress();
 
   const box = document.createElement('div');
   box.className = 'c2-modal' + (victory ? ' c2-complete' : '');
+  const head = wonCampaign ? 'CONTRACT COMPLETE' : victory ? 'MILLSTONE RAZED' : 'NEXUS LOST';
+  const flag = wonCampaign ? 'GAME WON' : victory ? 'THEATER HELD' : 'DEFEAT';
   box.innerHTML =
     `<div class="c2-modal-head">` +
-    `<span class="c2-name">${victory ? 'MILLSTONE RAZED' : 'NEXUS LOST'}</span>` +
-    `<span class="c2-order ${victory ? 'order-investigate' : 'order-execute'}">${victory ? 'VICTORY' : 'DEFEAT'}</span>` +
+    `<span class="c2-name">${head}</span>` +
+    `<span class="c2-order ${victory ? 'order-investigate' : 'order-execute'}">${flag}</span>` +
     `</div>` +
     `<p class="c2-modal-p">${
-      victory
-        ? 'Their Nexus is rubble and the waves have stopped. The theater is yours — such as it is.'
-        : 'Your Nexus is down. A network with no heart is scrap with good sightlines; Millstone will strip the rest at its leisure.'
+      wonCampaign
+        ? 'Every theater on the board is held. There is nowhere left that Millstone still operates, ' +
+          'and nowhere left that isn\'t watched. The contract is closed.'
+        : victory
+          ? `Their Nexus is rubble and the waves have stopped. ${rtsMission?.name ?? 'The theater'} is ` +
+            `yours — such as it is. ${p.done} of ${p.total} theaters held.`
+          : 'Your Nexus is down. A network with no heart is scrap with good sightlines; Millstone will ' +
+            'strip the rest at its leisure.'
     }</p>`;
 
   const actions = document.createElement('div');
   actions.className = 'c2-modal-actions';
+
+  // A loss offers the mission again on the spot. It is the same ground and the same opening, and
+  // making the player walk back out to the board to click the card they just clicked is friction
+  // with nothing on the other side of it.
+  const retryMission = rtsMission;
+  if (!victory && retryMission) {
+    const again = document.createElement('button');
+    again.type = 'button';
+    again.className = 'c2-buy ghost';
+    again.textContent = 'REDEPLOY';
+    again.addEventListener('click', () => {
+      back.remove();
+      // Tear the match down without routing to the board, then stand the same mission back up.
+      teardownRtsBuild();
+      if (mode === 'theater') exitTheater();
+      rtsGame = null;
+      obeliskMask = undefined;
+      el('g-rts')?.setAttribute('hidden', '');
+      hideUnitPanel();
+      void startRtsMatch(retryMission);
+    });
+    actions.append(again);
+  }
+
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'c2-buy';
-  btn.textContent = 'RETURN TO TITLE';
+  btn.textContent = 'OPERATIONS BOARD';
   btn.addEventListener('click', () => {
     back.remove();
     endRtsMatch();
@@ -4062,6 +4205,7 @@ function exitToTitle(): void {
   if (mode === 'theater') exitTheater();
   hideLoading();
   hideUnitPanel();
+  hideCampaignBoard();
   setActiveSlot(null);
   applyOwnership(true); // nothing owned at the menu — clear the orbit heat
   bootTitle();
@@ -4071,10 +4215,8 @@ function bootTitle(): void {
   // The score belongs to the menus and the world map — bring it up as the title goes on. (The first
   // fadeIn before any click is blocked by autoplay policy; music.ts starts it on the first gesture.)
   music.fadeIn();
-  showTitle({
-    onPlay: (slot) => void openCampaign(slot),
-    onPlayRts: () => void startRtsMatch(),
-  });
+  hideCampaignBoard();
+  showTitle({ onPlay: (slot) => void openCampaign(slot) });
 }
 
 migrateLegacySave();
@@ -5344,12 +5486,16 @@ let rtsUnitCard: RtsUnitCard | null = null;
 /**
  * Whether Millstone fights this match.
  *
- * Off while the economy and tech tree are being tuned: waves landing at 150 s make it impossible to
- * judge whether the build order itself feels good. Nothing about the enemy is deleted — the base
- * simply isn't seeded and the wave clock never runs. Toggle in the dev panel (RTS ▸ MILLSTONE) or
- * via `__gorgon.setMillstoneEnabled(true)`; it takes effect on the NEXT match.
+ * ON, now that the ladder exists. It was held off while the economy and tech tree were being tuned —
+ * an attacker arriving at 150 s makes it impossible to judge whether the BUILD ORDER feels good —
+ * but razing Millstone's Nexus is the only thing that clears a mission, so with the enemy absent
+ * every theater on the board is unwinnable and the campaign has no end.
+ *
+ * Nothing about the enemy is conditional beyond this flag: with it off the base simply isn't seeded
+ * and the wave clock never runs. Toggle in the dev panel (RTS ▸ MILLSTONE) or via
+ * `__gorgon.setMillstoneEnabled(false)`; it takes effect on the NEXT match.
  */
-let millstoneEnabled = false;
+let millstoneEnabled = true;
 /** Screen-space radius for clicking a structure. */
 const STRUCTURE_PICK_PX = 30;
 
@@ -5606,7 +5752,12 @@ function updateChrome() {
   const title = el('g-title');
   if (title) title.style.display = mode === 'globe' ? '' : 'none';
   const exit = el('g-exit');
-  if (exit) (exit as HTMLButtonElement).hidden = mode !== 'theater';
+  if (exit) {
+    (exit as HTMLButtonElement).hidden = mode !== 'theater';
+    // In a match this button abandons the mission and goes to the ladder, not to the world map —
+    // name it after where it actually lands.
+    exit.textContent = rtsGame ? '◀ OPERATIONS BOARD' : '◀ WORLD MAP';
+  }
   el('globe-ui')?.classList.toggle('in-theater', mode === 'theater');
   updateTaskingHud();
   updateSiegeHud();
@@ -6936,6 +7087,23 @@ if (import.meta.env.DEV) {
     exitTheater,
     startRtsMatch,
     endRtsMatch,
+    // The ladder, and the seams around it. `openLegacyCampaign` is the only way back into the
+    // pre-ladder world-map game now that the title screen has one button.
+    openCampaign,
+    openCampaignBoard,
+    openLegacyCampaign,
+    resolveMissionSite,
+    campaignMissions: CAMPAIGN_MISSIONS,
+    get rtsMission() {
+      return rtsMission;
+    },
+    campaignState: () => ({
+      held: campaignProgress().done,
+      total: campaignProgress().total,
+      won: campaignWon(),
+      cleared: CAMPAIGN_MISSIONS.filter((m) => isComplete(m.id)).map((m) => m.id),
+    }),
+    campaignBoardOpen,
     get rtsGame() {
       return rtsGame;
     },
@@ -6971,6 +7139,7 @@ if (import.meta.env.DEV) {
     rtsStructTargets,
     applyStructureHit,
     showRtsEnd,
+    endRtsWith,
     RTS_COMBAT,
     startResearchAt,
     refreshPowerLines,

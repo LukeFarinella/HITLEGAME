@@ -1344,6 +1344,189 @@ body:has(#globe-ui) #hint { display: none; }
   color: #4a5057;
 }
 
+/* ===== OPERATIONS BOARD =========================================================================
+   The campaign's mission select, between the save slot and a match. Same equipment as the title
+   screen (carbon, scanlines, mono caps) but SCROLLABLE and wider — it has to show seventeen
+   theaters at once, because "how much is left" is the thing the player came here to read. */
+.gc-back {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  overflow-y: auto;
+  background:
+    radial-gradient(120% 90% at 50% 0%, #16191f 0%, var(--carbon) 62%),
+    var(--carbon);
+  animation: gt-in .5s ease both;
+}
+
+.gc-inner {
+  position: relative;
+  width: min(1080px, 92vw);
+  margin: 0 auto;
+  padding: 42px 0 60px;
+}
+
+.gc-head { text-align: center; margin-bottom: 34px; }
+
+.gc-eyebrow {
+  font: 600 10px/1 var(--mono);
+  letter-spacing: .34em;
+  color: var(--ash);
+}
+
+.gc-title {
+  margin: 12px 0 0;
+  font: 700 clamp(26px, 4.2vw, 40px)/1 var(--sans);
+  letter-spacing: .18em;
+  color: var(--bone);
+  text-indent: .18em;
+}
+
+/* Progress as a bar rather than a fraction alone: seventeen is enough that "11/17" doesn't land
+   as a shape, and the bar is the only thing on this screen that has to be readable at a glance. */
+.gc-bar {
+  width: min(420px, 70%);
+  height: 3px;
+  margin: 18px auto 8px;
+  background: var(--graphite-2);
+  border: 1px solid var(--gunmetal);
+}
+.gc-bar span {
+  display: block;
+  height: 100%;
+  background: var(--red);
+  box-shadow: 0 0 10px var(--red-glow);
+  transition: width .3s ease;
+}
+
+.gc-count {
+  font: 600 10px/1 var(--mono);
+  letter-spacing: .28em;
+  color: var(--ash);
+}
+
+.gc-won {
+  border: 1px solid var(--red-dim);
+  background: linear-gradient(180deg, rgba(226, 58, 46, .12), rgba(226, 58, 46, .03));
+  padding: 18px 22px;
+  margin-bottom: 30px;
+  text-align: center;
+}
+.gc-won-mark {
+  font: 700 14px/1 var(--mono);
+  letter-spacing: .3em;
+  color: var(--bone);
+}
+.gc-won-p {
+  margin: 10px auto 0;
+  max-width: 62ch;
+  font: 400 12px/1.7 var(--sans);
+  color: var(--ash);
+}
+
+/* ---- a phase ---- */
+.gc-tier { margin-bottom: 34px; }
+/* A sealed phase is shown, not hidden — you should be able to see the whole contract from mission
+   one. Dimmed to about a third so it reads as "later" rather than "unavailable forever". */
+.gc-tier.locked { opacity: .38; }
+
+.gc-tier-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--gunmetal);
+  padding-bottom: 8px;
+}
+.gc-tier-name {
+  font: 700 12px/1 var(--mono);
+  letter-spacing: .26em;
+  color: var(--bone);
+}
+.gc-tier-n {
+  font: 600 10px/1 var(--mono);
+  letter-spacing: .2em;
+  color: var(--ash);
+}
+.gc-tier-note {
+  margin-top: 8px;
+  font: 400 11px/1.6 var(--sans);
+  color: var(--ash);
+}
+
+.gc-grid {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+/* ---- one theater ---- */
+.gc-card {
+  appearance: none;
+  text-align: left;
+  border: 1px solid var(--gunmetal);
+  background: var(--graphite-2);
+  color: inherit;
+  padding: 13px 14px 15px;
+  cursor: pointer;
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  transition: border-color .16s ease, background .16s ease, box-shadow .16s ease;
+}
+.gc-card:hover:not(:disabled) {
+  border-color: var(--red-dim);
+  background: var(--graphite);
+  box-shadow: 0 0 22px rgba(226, 58, 46, .18);
+}
+.gc-card:disabled { cursor: default; }
+/* Held ground keeps a red edge so a cleared phase reads as a solid block of colour. */
+.gc-card.done { border-color: var(--red-dim); background: rgba(226, 58, 46, .06); }
+
+.gc-card-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.gc-card-sub {
+  font: 600 9px/1.2 var(--mono);
+  letter-spacing: .18em;
+  color: var(--ash);
+}
+.gc-card-flag {
+  font: 700 9px/1 var(--mono);
+  letter-spacing: .18em;
+  color: var(--ash);
+  white-space: nowrap;
+}
+.gc-card.done .gc-card-flag { color: var(--red); }
+
+.gc-card-name {
+  font: 700 17px/1.1 var(--sans);
+  letter-spacing: .06em;
+  color: var(--bone);
+}
+.gc-card-blurb {
+  font: 400 11px/1.55 var(--sans);
+  color: var(--ash);
+}
+
+.gc-foot { text-align: center; margin-top: 10px; }
+.gc-exit {
+  appearance: none;
+  border: 1px solid var(--gunmetal);
+  background: none;
+  color: var(--ash);
+  font: 600 10px/1 var(--mono);
+  letter-spacing: .26em;
+  padding: 12px 26px;
+  cursor: pointer;
+  transition: border-color .16s ease, color .16s ease;
+}
+.gc-exit:hover { border-color: var(--steel); color: var(--bone); }
+
 /* ===== LOADING SCREEN ===========================================================================
    Covers the scene entirely while a world or a theater is built. Below the title screen in stacking
    order: exiting to title from inside a load should never leave the loader on top. */
