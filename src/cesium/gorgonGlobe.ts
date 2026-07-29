@@ -86,6 +86,7 @@ import {
 import { MissionMarkers, type MissionMarker } from './missionMarkers';
 import { StateLines, loadStateGeometry } from './stateLines';
 import { LaserBeams } from './lasers';
+import { CombatAudio } from './combatAudio';
 import { ScanBeams, Blasts, Sparks, Impacts, Cuffs, ViolationPings, Rounds, CameraFlashes } from './effects';
 import { Reactions } from './reactions';
 import { ActionMarks, type ActionKind } from './actionMarks';
@@ -647,6 +648,37 @@ let blasts: Blasts | undefined;
 let sparks: Sparks | undefined;
 /** Artillery and missiles in the air. Positions come from the combat sim, not from this layer. */
 let rounds: Rounds | undefined;
+/**
+ * The battle mix: which of the frame's combat events are audible from where the camera is.
+ *
+ * Holds no primitives — it is a scheduler in front of the cue book — but it lives and dies with the
+ * theater anyway, so a queued volley can never carry into the next one.
+ */
+let combatAudio: CombatAudio | undefined;
+/**
+ * Damage per shot at which a hitscan weapon gets the heavy report instead of the light crack.
+ *
+ * Damage is the honest axis: a big noise should mean a big hit, not a big model. At 20 the split
+ * across the ranged roster is fan gun (7), sidearm (8), picket gun (9), shoulder gun (12) and
+ * censer emitter (18) cracking, against altitude lance (20), nexus battery (22), service cannon
+ * (26) and strike lance (30) booming — five light to four heavy, which keeps the common sound of a
+ * fight the small one.
+ */
+const HEAVY_SHOT_DMG = 20;
+/**
+ * Splash radius at which a detonation gets the building-sized explosion instead of the shell.
+ *
+ * Measured against the UPGRADED roster, not the base one. Every shell in the catalog tops out at
+ * 160 m (the deck mortar), and the only splash multiplier in the tree is SIEGE ROUNDS at 1.5 —
+ * which takes the giga's siege battery from 140 to 210 and, on a hull carrying the deck mortar,
+ * 160 to 240. The orbital strike is 420. So 300 is the only gap that separates "artillery" from
+ * "the thing you waited ten seconds for".
+ *
+ * This was 200 first, which is above every printed number in weapons.ts and wrong anyway: dev-
+ * dropped units arrive fully researched, and the first upgraded giga shell that landed came in at
+ * 210 and sounded like a building collapsing.
+ */
+const BIG_BLAST_M = 300;
 /** Obelisk camera flashes — fires where a violation was recorded. RTS mode only. */
 let flashes: CameraFlashes | undefined;
 /**
@@ -936,6 +968,7 @@ function addUnits(center: { lon: number; lat: number }, map: TheaterMap, net: Ro
   rounds = new Rounds();
   scene.primitives.add(rounds.trails); // trails under the heads, so a head is never hidden by its own smoke
   scene.primitives.add(rounds.collection);
+  combatAudio = new CombatAudio(scene);
   flashes = new CameraFlashes();
   scene.primitives.add(flashes.collection);
   impacts = new Impacts();
@@ -1341,6 +1374,8 @@ function removeUnits() {
     scene.primitives.remove(rounds.trails);
     rounds = undefined;
   }
+  combatAudio?.reset();
+  combatAudio = undefined;
   if (flashes) {
     scene.primitives.remove(flashes.collection);
     flashes = undefined;
@@ -4541,34 +4576,47 @@ function runRtsCombat(dt: number): void {
   // Each attack kind gets its own vocabulary, so what is happening to you reads without reading
   // the numbers: a BEAM means damage has already landed, a round in the air means it hasn't yet,
   // and a flurry of sparks at contact means something is being taken apart by hand.
+  // Sound is reported per EVENT, at the place it happened, and the mix decides what survives —
+  // distance, merging and spacing all live in CombatAudio. This used to be one `laser` and one
+  // `commit` per frame no matter what happened or how far away it was, which meant a firefight on
+  // the far rim was as loud as one under the camera and a volley of twenty sounded like one rifle.
+  combatAudio?.begin(dt);
   for (const s of ev.shots) {
     const from = Cesium.Cartesian3.fromDegrees(s.flon, s.flat, s.falt);
     const to = Cesium.Cartesian3.fromDegrees(s.tlon, s.tlat, s.talt);
     const color = s.side === 1 ? MILLSTONE_BEAM : undefined;
     if (s.kind === 'ranged') {
       lasers?.fire(from, to, color);
+      // Heard at the MUZZLE, not the target: that is where the noise was made, and it is what makes
+      // a line of your own units firing outward read as coming from your own position.
+      combatAudio?.at(s.dmg >= HEAVY_SHOT_DMG ? 'shotHeavy' : 'shot', from);
     } else if (s.kind === 'melee') {
       // No beam: there is no shot to draw. Sparks at the point of contact instead — the same
       // vocabulary a siege attacker cutting into an obelisk uses, because it is the same act.
       sparks?.emit(to, 3);
+      combatAudio?.at('clash', to);
     } else {
       // The muzzle event only. The round itself is drawn from ev.rounds until it arrives, which is
       // the whole point of a projectile: for a second or two it is a thing in the world.
       sparks?.emit(from, 1);
+      combatAudio?.at('launch', from);
     }
   }
   // The round list is authoritative and rebuilt every frame, so this is a straight redraw.
   rounds?.show(ev.rounds);
   for (const im of ev.impacts) {
-    blasts?.fire(im.lon, im.lat, theaterMap?.heightAt(im.lon, im.lat) ?? 0, im.radiusM);
+    const h = theaterMap?.heightAt(im.lon, im.lat) ?? 0;
+    blasts?.fire(im.lon, im.lat, h, im.radiusM);
+    // Splash radius is the honest measure of how big a detonation was. A mortar throws 130 m and
+    // gets the shell; an orbital round throws 420 m and gets the building-sized one, which is the
+    // only thing that makes the strike you waited ten seconds for land like it cost something.
+    combatAudio?.at(im.radiusM >= BIG_BLAST_M ? 'boomBig' : 'boom', Cesium.Cartesian3.fromDegrees(im.lon, im.lat, h));
   }
-  // One report per frame, however thick the volley — per-shot playback stacks into a screech.
-  if (ev.shots.some((s) => s.kind === 'ranged')) sound.play('laser');
-  if (ev.impacts.length) sound.play('commit');
 
   for (const k of ev.kills) {
     const h = theaterMap?.heightAt(k.lon, k.lat) ?? 0;
     blasts?.fire(k.lon, k.lat, h, 90);
+    combatAudio?.at('wreck', Cesium.Cartesian3.fromDegrees(k.lon, k.lat, h));
     if (k.side === 0) {
       // One of ours. Dropping it from the roster releases its supply too; the field already took it
       // off the board.
@@ -4587,6 +4635,8 @@ function runRtsCombat(dt: number): void {
     }
     applyStructureHit(hit);
   }
+  // One flush per frame, after everything is queued — the mix can only merge what it has all of.
+  combatAudio?.flush();
 }
 
 /** Land one hit on a structure — the player's or Millstone's Nexus — and handle its fall. */
@@ -4604,7 +4654,12 @@ function applyStructureHit(hit: { id: number; dmg: number }): void {
 /** A player structure has fallen: blast, teardown, and whatever the loss means. */
 function destroyPlayerStructure(s: Structure): void {
   if (!rtsGame) return;
-  blasts?.fire(s.lon, s.lat, theaterMap?.heightAt(s.lon, s.lat) ?? 0, STRUCTURES[s.type].footprintM);
+  const h = theaterMap?.heightAt(s.lon, s.lat) ?? 0;
+  blasts?.fire(s.lon, s.lat, h, STRUCTURES[s.type].footprintM);
+  // Two layers on purpose: the explosion is an event on the ground and obeys the distance mix, and
+  // `lost` is the console telling you about it, which it should do at any altitude.
+  combatAudio?.at('boomBig', Cesium.Cartesian3.fromDegrees(s.lon, s.lat, h));
+  combatAudio?.flush();
   sound.play('lost');
   rtsGame.removeStructure(s.id);
   if (rtsSelectedStructure?.id === s.id) clearStructureSelection();
@@ -7920,6 +7975,12 @@ if (import.meta.env.DEV) {
     armamentOf,
     spawnMillstoneAt,
     spawnGorgonAt,
+    sound,
+    get combatAudio() {
+      return combatAudio;
+    },
+    rtsUnitList: RTS_UNIT_LIST,
+    millstoneUnitList: MILLSTONE_UNIT_LIST,
     openMillstoneSpawnMenu,
     openDebugBuildMenu,
     debugBuildAt,

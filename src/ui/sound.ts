@@ -227,6 +227,87 @@ const CUES: Record<string, Cue> = {
     k.tone({ freq: 330, at: 0.3, dur: 0.36, gain: 0.04, fm: { ratio: 3, index: 260 }, attack: 0.03, space: 0.6 });
   },
 
+  // --- combat ------------------------------------------------------------------------------
+  //
+  // These are the only cues in the book that are EVENTS IN THE WORLD rather than noises the console
+  // made, and they are written differently for it. Interface cues are pitched, deliberate and want
+  // to be noticed once; a firefight is dozens of these a second and has to stay listenable, so:
+  //
+  //   - transients over tones. Almost all of the energy is a filtered noise burst with a very fast
+  //     decay. Pitched content is a short body under it, never a melody — forty melodic voices is a
+  //     chord nobody asked for, forty transients is a battle.
+  //   - short. Nothing here rings for more than a third of a second except the big explosion, so
+  //     voices stop overlapping into mud.
+  //   - reverb by SIZE, not by taste. A rifle is dry; a shell is wet. That difference is most of
+  //     what makes one sound small and the other sound big.
+  //
+  // They are always played through `place`, so the mix is doing the rest of the work: how far away
+  // it happened, and where on the screen.
+
+  // Small arms — a dog's shoulder gun, a picket gun. A hard crack and almost nothing else: a tight
+  // high noise transient, a short crushed body, and a click of air. The bread-and-butter sound of a
+  // fight, so it is the driest and shortest thing in the book.
+  shot: (k) => {
+    k.noise({ dur: 0.035, gain: 0.08, filter: 'highpass', freq: 1800 });
+    k.tone({ freq: 320, to: 120, dur: 0.05, gain: 0.05, type: 'square', bus: 'grit' });
+    k.noise({ at: 0.02, dur: 0.07, gain: 0.02, filter: 'bandpass', freq: 900, to: 260, q: 1.5 });
+  },
+
+  // A heavy weapon — a service cannon, a strike lance, a nexus battery. The same shape an octave
+  // down with more body and a breath of room, so weight reads as weight without a new vocabulary.
+  shotHeavy: (k) => {
+    k.noise({ dur: 0.05, gain: 0.09, filter: 'highpass', freq: 900 });
+    k.tone({ freq: 150, to: 52, dur: 0.14, gain: 0.085, type: 'square', bus: 'grit' });
+    k.tone({ freq: 62, to: 40, dur: 0.2, gain: 0.06, type: 'sine' });
+    k.noise({ at: 0.03, dur: 0.16, gain: 0.022, filter: 'lowpass', freq: 700, to: 180, q: 1, space: 0.18 });
+  },
+
+  // Contact. Metal being opened by other metal: a bright inharmonic FM clang, ring-soured so it
+  // never lands on a note, over a crushed scrape. Two of these a second is a machine being taken
+  // apart, which is exactly what a melee unit is doing.
+  clash: (k) => {
+    k.noise({ dur: 0.03, gain: 0.06, filter: 'highpass', freq: 3200 });
+    k.tone({ freq: 540, dur: 0.13, gain: 0.06, type: 'square', fm: { ratio: 3.7, index: 900 }, ring: { freq: 210, depth: 0.7 }, bus: 'grit' });
+    k.tone({ freq: 190, to: 130, dur: 0.1, gain: 0.04, type: 'triangle' });
+  },
+
+  // A shell leaving the tube. Deliberately NOT a bang — it is the front half of an explosion with
+  // the crack taken off: a sub thump and a lowpassed cough of air. What it does is tell you a round
+  // is now in the sky, which is the one fact a projectile weapon has that the others do not.
+  launch: (k) => {
+    k.tone({ freq: 92, to: 44, dur: 0.2, gain: 0.1, type: 'sine' });
+    k.noise({ dur: 0.14, gain: 0.045, filter: 'lowpass', freq: 1100, to: 220, q: 0.8 });
+    k.noise({ at: 0.05, dur: 0.3, gain: 0.016, filter: 'bandpass', freq: 400, to: 1600, q: 0.9, space: 0.2 });
+  },
+
+  // A round landing. The real explosion: a sub that drops most of an octave, a broadband body that
+  // decays fast, and a longer debris tail sent to the reverb so it has somewhere to happen. The tail
+  // is what stops it sounding like a click with bass on it.
+  boom: (k) => {
+    k.tone({ freq: 110, to: 34, dur: 0.42, gain: 0.13, type: 'sine' });
+    k.noise({ dur: 0.16, gain: 0.085, filter: 'lowpass', freq: 2600, to: 300, q: 0.7, space: 0.3 });
+    k.noise({ at: 0.04, dur: 0.5, gain: 0.03, filter: 'bandpass', freq: 1500, to: 380, q: 0.8, space: 0.6 });
+    k.tone({ freq: 74, to: 41, dur: 0.3, gain: 0.05, type: 'sawtooth', bus: 'grit' });
+  },
+
+  // A building coming down. The same explosion given room to be big: lower, longer, wetter, with a
+  // rubble stutter on the crushed bus after the initial hit. Reserved for structures — if every
+  // shell sounded like this the mix would have nowhere left to go.
+  boomBig: (k) => {
+    k.tone({ freq: 90, to: 24, dur: 0.9, gain: 0.15, type: 'sine' });
+    k.noise({ dur: 0.3, gain: 0.1, filter: 'lowpass', freq: 3000, to: 180, q: 0.6, space: 0.45 });
+    k.noise({ at: 0.06, dur: 1.1, gain: 0.04, filter: 'bandpass', freq: 1200, to: 200, q: 0.7, space: 0.8 });
+    k.stutter({ at: 0.18, times: 6, step: 0.07, freq: 180, drop: 0.86, gain: 0.03, bus: 'grit' });
+  },
+
+  // Something of yours dying, at close range. Short, dry, mechanical: a failing whine falling away
+  // under a crushed rattle. Distinct from `boomBig` because a unit is not a building.
+  wreck: (k) => {
+    k.noise({ dur: 0.1, gain: 0.06, filter: 'lowpass', freq: 1800, to: 260, q: 0.8 });
+    k.tone({ freq: 260, to: 60, dur: 0.34, gain: 0.06, type: 'sawtooth', ring: { freq: 48, depth: 0.5 }, bus: 'grit' });
+    k.tone({ freq: 58, to: 36, dur: 0.4, gain: 0.055, type: 'sine', space: 0.25 });
+  },
+
   // Back out: a powering-down — descending sub and FM, noise sweeping the other way, a short glitch.
   exit: (k) => {
     k.noise({ dur: 0.3, gain: 0.03, filter: 'bandpass', freq: 3600, to: 500, q: 1.2, space: 0.3 });
@@ -371,7 +452,15 @@ class SoundBoard {
     return buf;
   }
 
-  play(name: CueName): void {
+  /**
+   * Fire a cue.
+   *
+   * `place` is what makes a cue an event IN THE WORLD rather than a noise the interface made:
+   * `gain` scales the whole cue (how far away it happened) and `pan` puts it where it happened on
+   * screen. Omitting it is the interface path and is byte-for-byte the graph it always built — a
+   * button click has no position and should not pay for one.
+   */
+  play(name: CueName, place?: { gain?: number; pan?: number }): void {
     const cue = CUES[name];
     if (!cue || !this.ensure() || !this.ctx || !this.dry || !this.grit || !this.space) return;
 
@@ -383,7 +472,37 @@ class SoundBoard {
 
     const ac = this.ctx;
     const t0 = ac.currentTime + 0.001;
-    const busOf = (b: Bus | undefined): GainNode => (b === 'grit' ? this.grit! : this.dry!);
+
+    // Placement is per-CUE, not per-voice: one gain and one panner in front of each bus, shared by
+    // every voice this cue schedules. Doing it per-voice would let the layers of an explosion drift
+    // apart in the stereo field, which is exactly the artefact that makes synthesised audio sound
+    // synthesised.
+    let dryIn = this.dry;
+    let gritIn = this.grit;
+    let spaceIn = this.space;
+    if (place && (place.gain !== undefined || place.pan !== undefined)) {
+      const g = Math.max(0, place.gain ?? 1);
+      if (g <= 0.001) return; // inaudible — do not build a graph for silence
+      const pan = Math.max(-1, Math.min(1, place.pan ?? 0));
+      const tap = (dest: AudioNode): GainNode => {
+        const level = ac.createGain();
+        level.gain.value = g;
+        const panner = ac.createStereoPanner();
+        panner.pan.value = pan;
+        level.connect(panner);
+        panner.connect(dest);
+        return level;
+      };
+      dryIn = tap(this.dry);
+      gritIn = tap(this.grit);
+      // The reverb send is deliberately NOT panned — a tail that sits hard left is a tail that
+      // sounds like a bug. It is still scaled, so a distant blast has a distant-sized tail.
+      const sLevel = ac.createGain();
+      sLevel.gain.value = g;
+      sLevel.connect(this.space);
+      spaceIn = sLevel;
+    }
+    const busOf = (b: Bus | undefined): GainNode => (b === 'grit' ? gritIn! : dryIn!);
 
     const kit: Kit = {
       tone: (o) => {
@@ -436,11 +555,11 @@ class SoundBoard {
         }
 
         outNode.connect(busOf(o.bus));
-        if (o.space && this.space) {
+        if (o.space && spaceIn) {
           const send = ac.createGain();
           send.gain.setValueAtTime(o.space, start);
           outNode.connect(send);
-          send.connect(this.space);
+          send.connect(spaceIn);
         }
 
         const stop = start + dur + 0.05;
@@ -477,11 +596,11 @@ class SoundBoard {
         src.connect(filter);
         filter.connect(env);
         env.connect(busOf(o.bus));
-        if (o.space && this.space) {
+        if (o.space && spaceIn) {
           const send = ac.createGain();
           send.gain.setValueAtTime(o.space, start);
           env.connect(send);
-          send.connect(this.space);
+          send.connect(spaceIn);
         }
 
         src.start(start);

@@ -837,6 +837,14 @@ export interface RtsShot {
    * the round itself is in {@link RtsCombatEvents.rounds} until it arrives.
    */
   kind: AttackKind;
+  /**
+   * Damage per shot of the weapon that fired.
+   *
+   * Carried so the presentation layer can tell a sidearm from a siege battery without re-deriving
+   * the armament: the battle mix picks a light or heavy report off this, and "how hard did that
+   * hit" is the only thing that distinction can honestly be based on.
+   */
+  dmg: number;
 }
 
 /** What one frame of RTS combat did, for the scene to render and score. */
@@ -2127,6 +2135,7 @@ export class UnitField {
         tlon: v.lon, tlat: v.lat, talt: this.combatAltOf(v),
         side: s.side,
         kind: w.kind,
+        dmg: w.dmg,
       });
       if (w.kind !== 'projectile') this.damageUnit(tj, w.dmg, ev);
     }
@@ -2152,6 +2161,7 @@ export class UnitField {
       tlon, tlat, talt,
       side,
       kind: w.kind,
+      dmg: w.dmg,
     });
     if (w.kind !== 'projectile') return;
     const d = this.distLL(u.lon, u.lat, tlon, tlat);
