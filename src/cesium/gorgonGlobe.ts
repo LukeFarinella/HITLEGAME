@@ -77,7 +77,7 @@ import { showLoading, setStage, hideLoading } from '../ui/loading';
 import { setActiveSlot, activeSlot, migrateLegacySave } from '../game/saves';
 import {
   MISSIONS as CAMPAIGN_MISSIONS, markComplete, markStarted, campaignWon, campaignProgress, isComplete,
-  missionById, tierUnlocked, type MissionDef,
+  missionById, tierUnlocked, resetCampaign, TIER_NAME, type MissionDef,
 } from '../game/rts/campaign';
 import {
   showCampaignHud, hideCampaignHud, campaignHudOpen, refreshCampaignHud,
@@ -1310,6 +1310,7 @@ scene.preUpdate.addEventListener(() => {
   // Mission select runs with no unit field behind it — the globe is the whole screen — so the
   // markers breathe from out here rather than inside the sim branch.
   if (missionSelect) missionMarkers?.update(dt);
+  tickDevLadder();
   if (unitField) {
     unitField.tick(dt);
     if (sensorField) {
@@ -2499,18 +2500,113 @@ function openCampaignBoard(): void {
 function closeCampaignBoard(): void {
   missionSelect = false;
   hotMission = null;
+  briefMission = null;
   hideMissionBrief();
   hideCampaignHud();
   el('globe-ui')?.classList.remove('mission-select');
   if (missionMarkers) missionMarkers.show = false;
 }
 
+/**
+ * The mission the operator is looking at, whichever screen they're on.
+ *
+ * In a match it is the one being played; on the globe it is whichever marker's brief is open, and
+ * failing that the first unclaimed mission in the open phase. This is what the dev panel means by
+ * "current" — there is always an answer as long as a slot is open, which is what makes one button
+ * enough.
+ */
+function currentMission(): MissionDef | null {
+  if (rtsMission) return rtsMission;
+  if (briefMission && missionBriefOpen()) return briefMission;
+  for (const t of ['state', 'block', 'theater'] as const) {
+    if (!tierUnlocked(t)) continue;
+    const next = CAMPAIGN_MISSIONS.find((m) => m.tier === t && !isComplete(m.id));
+    if (next) return next;
+  }
+  return null;
+}
+/** The mission whose brief is showing, if any. */
+let briefMission: MissionDef | null = null;
+
 /** A marker was clicked: open its brief, or say why it can't be taken yet. */
 function selectMissionMarker(id: string): void {
   const m = missionById(id);
   if (!m) return;
   sound.play(tierUnlocked(m.tier) ? 'click' : 'denied');
+  briefMission = m;
   showMissionBrief(m);
+}
+
+/**
+ * Redraw everything mission select shows, after the ladder moved underneath it.
+ *
+ * The markers, the lit ground and the HUD counter are three views of one set, so they are refreshed
+ * together or not at all — a dev grant that moved the arrows but not the map would be worse than no
+ * grant at all.
+ */
+function refreshMissionSelect(): void {
+  if (!missionSelect) return;
+  obeliskMask = campaignObeliskMask();
+  rebuildHeatField();
+  missionMarkers?.set(missionMarkerSet());
+  refreshCampaignHud();
+}
+
+/**
+ * Repaint the dev panel's ladder readout: a row per phase, and what the one button will act on.
+ *
+ * Naming the target explicitly is the whole point. "COMPLETE CURRENT MISSION" is only trustworthy
+ * if you can see which mission it thinks is current before you press it.
+ */
+let devLadderSig = '';
+
+/**
+ * Repaint the ladder readout when what it says has changed, from the frame loop.
+ *
+ * Scattering explicit refresh calls over every route that moves the ladder was wrong twice over:
+ * one of them is always forgotten (the panel sat open through a deploy still naming the previous
+ * mission), and the panel is shut most of the time anyway. A signature compare while it is open
+ * costs nothing and cannot go stale.
+ */
+function tickDevLadder(): void {
+  if (el('dev-panel')?.hasAttribute('hidden') !== false) return;
+  const sig = `${activeSlot()}|${campaignProgress().done}|${currentMission()?.id ?? '-'}|${rtsMission?.id ?? '-'}|${rtsEnded}`;
+  if (sig === devLadderSig) return;
+  devLadderSig = sig;
+  refreshDevLadder();
+}
+
+function refreshDevLadder(): void {
+  const box = el('dev-ladder');
+  if (!box) return;
+  if (activeSlot() === null) {
+    box.innerHTML = `<div class="dev-lad-row"><span>NO CONTRACT OPEN</span><span></span></div>`;
+    setText('dev-mission-note', 'Open a save slot to work on the ladder.');
+    return;
+  }
+  const p = campaignProgress();
+  let html = `<div class="dev-lad-row total"><span>${p.done} / ${p.total} THEATERS HELD</span><span></span></div>`;
+  for (const t of ['state', 'block', 'theater'] as const) {
+    const all = CAMPAIGN_MISSIONS.filter((m) => m.tier === t);
+    const held = all.filter((m) => isComplete(m.id)).length;
+    const open = tierUnlocked(t);
+    html +=
+      `<div class="dev-lad-row${open ? '' : ' sealed'}">` +
+      `<span>${TIER_NAME[t].replace(/^PHASE /, 'P')}</span>` +
+      `<span>${open ? `${held}/${all.length}` : 'SEALED'}</span>` +
+      `</div>`;
+  }
+  box.innerHTML = html;
+
+  const m = currentMission();
+  setText(
+    'dev-mission-note',
+    !m
+      ? 'Every theater is held — nothing left to clear.'
+      : rtsGame && rtsMission?.id === m.id && !rtsEnded
+        ? `Wins ${m.name} outright — the real victory path, modal and all.`
+        : `Marks ${m.name} held without playing it.`,
+  );
 }
 
 /**
@@ -6784,7 +6880,12 @@ bindInterfaceSounds();
     gear?.classList.toggle('active', open);
     document.body.classList.toggle('dev-open', open);
   };
-  gear?.addEventListener('click', () => setDev(!!panel?.hidden));
+  gear?.addEventListener('click', () => {
+    // Paint immediately on open so the panel is never blank for a frame; tickDevLadder keeps it
+    // honest from then on.
+    if (panel?.hidden) refreshDevLadder();
+    setDev(!!panel?.hidden);
+  });
   el('dev-close')?.addEventListener('click', () => setDev(false));
 
   // wire one slider: reflect its value into a label live, and run `commit` when released
@@ -6826,6 +6927,125 @@ bindInterfaceSounds();
     (v) => (devSettings.maxHeight = v),
     regenerateBuildings,
   );
+
+  // ---- contract: the mission ladder ------------------------------------------------------------
+  //
+  // One button does the thing that was asked for: clear whatever mission you are looking at. In a
+  // match that means WINNING it — the real victory path, so the modal fires, the ladder records and
+  // the return lands on the globe exactly as it would after a fought win. Outside a match it marks
+  // the mission directly, which is the only sensible reading of "complete it" when there is nothing
+  // running to complete.
+  const clearMission = (m: MissionDef): void => {
+    if (rtsGame && rtsMission?.id === m.id && !rtsEnded) {
+      endRtsWith(true);
+      return;
+    }
+    sound.play('success');
+    const wonAll = markComplete(m.id);
+    refreshMissionSelect();
+    toast(wonAll ? '◈ CONTRACT COMPLETE · EVERY THEATER HELD' : `◈ ${m.name} MARKED HELD`);
+  };
+
+  el('dev-mission-clear')?.addEventListener('click', () => {
+    const m = currentMission();
+    if (!m) {
+      sound.play('denied');
+      toast('◈ OPEN A CONTRACT FIRST');
+      return;
+    }
+    clearMission(m);
+  });
+
+  // Clear the rest of the phase you're in — the fastest way to the NEXT phase, which is usually the
+  // thing being tested rather than the missions themselves.
+  el('dev-mission-phase')?.addEventListener('click', () => {
+    const m = currentMission();
+    if (!m) {
+      sound.play('denied');
+      toast('◈ OPEN A CONTRACT FIRST');
+      return;
+    }
+    sound.play('success');
+    for (const x of CAMPAIGN_MISSIONS) if (x.tier === m.tier) markComplete(x.id);
+    refreshMissionSelect();
+    toast(`◈ ${TIER_NAME[m.tier]} CLEARED`);
+  });
+
+  el('dev-mission-all')?.addEventListener('click', () => {
+    sound.play('success');
+    for (const x of CAMPAIGN_MISSIONS) markComplete(x.id);
+    refreshMissionSelect();
+    toast('◈ CONTRACT COMPLETE · EVERY THEATER HELD');
+  });
+
+  el('dev-mission-reset')?.addEventListener('click', () => {
+    sound.play('denied');
+    resetCampaign();
+    refreshMissionSelect();
+    toast('◈ LADDER RESET · 0 / 17 HELD');
+  });
+
+  // ---- match ------------------------------------------------------------------------------------
+  const inMatch = (): boolean => {
+    if (rtsGame && !rtsEnded) return true;
+    sound.play('denied');
+    toast('◈ DEPLOY TO A THEATER FIRST');
+    return false;
+  };
+
+  for (const [id, amount] of [
+    ['dev-rts-5k', 5_000],
+    ['dev-rts-50k', 50_000],
+  ] as const) {
+    el(id)?.addEventListener('click', () => {
+      if (!inMatch()) return;
+      rtsGame!.devGrantMoney(amount);
+      sound.play('purchase');
+      updateRtsHud();
+      rtsCmd?.render();
+      toast(`◈ +${amount.toLocaleString('en-US')} BANKED`);
+    });
+  }
+
+  el('dev-rts-research')?.addEventListener('click', () => {
+    if (!inMatch()) return;
+    // Routed through applyResearch, the same call a finished project makes, so every live unit is
+    // re-armed and every company effect (full survey, hardened masts) actually lands.
+    const done = rtsGame!.devGrantAllResearch(ALL_RESEARCH);
+    for (const d of done) applyResearch(d.id, d.kinds);
+    sound.play('success');
+    updateRtsHud();
+    rtsCmd?.render();
+    toast(`◈ ${done.length} PROJECTS COMPLETE`);
+  });
+
+  el('dev-rts-sites')?.addEventListener('click', () => {
+    if (!inMatch()) return;
+    rtsSitesAllOpen = true;
+    rtsSites = inTheaterObeliskSites();
+    rtsBuild?.setSites(rtsSites, rtsBuiltSites);
+    sound.play('success');
+    toast(`◈ ${rtsSites.length} SITES OPEN`);
+  });
+
+  el('dev-rts-win')?.addEventListener('click', () => {
+    if (!inMatch()) return;
+    endRtsWith(true);
+  });
+  el('dev-rts-lose')?.addEventListener('click', () => {
+    if (!inMatch()) return;
+    endRtsWith(false);
+  });
+
+  el('dev-board')?.addEventListener('click', () => {
+    el('dev-panel')?.setAttribute('hidden', '');
+    if (rtsGame) endRtsMatch();
+    else if (activeSlot() !== null) openCampaignBoard();
+    else {
+      sound.play('denied');
+      toast('◈ NO CONTRACT OPEN');
+    }
+  });
 
   const strict = el('dev-strict') as HTMLInputElement | null;
   if (strict) {

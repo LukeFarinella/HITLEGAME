@@ -1031,6 +1031,30 @@ body:has(#globe-ui) #hint { display: none; }
 .dev-mini.on { color: var(--carbon); background: var(--orange); border-color: var(--orange); }
 .dev-mini.done { color: var(--ok); border-color: rgba(79, 158, 122, .45); }
 
+/* ---------- contract ladder readout ----------
+   A row per phase above the one button that acts on it. The button names its target in the note
+   underneath, so "complete the current mission" is checkable before it is pressed rather than
+   after. */
+.dev-ladder { display: flex; flex-direction: column; gap: 2px; }
+.dev-lad-row {
+  display: flex; justify-content: space-between; gap: 8px;
+  font-family: var(--mono); font-size: 9px; letter-spacing: .1em;
+  color: var(--steel); padding: 3px 5px;
+  background: var(--gunmetal-2); border: 1px solid var(--gunmetal);
+  font-variant-numeric: tabular-nums;
+}
+.dev-lad-row.total { color: var(--bone); border-color: var(--red-dim); }
+.dev-lad-row.sealed { opacity: .5; }
+
+/* The one control the panel exists for now. Red so it reads as the primary action in a column of
+   otherwise identical grey buttons. */
+.dev-primary {
+  color: var(--bone);
+  border-color: var(--red-dim);
+  background: linear-gradient(180deg, rgba(226, 58, 46, .18), rgba(226, 58, 46, .05));
+}
+.dev-primary:hover { border-color: var(--red); background: linear-gradient(180deg, rgba(226, 58, 46, .3), rgba(226, 58, 46, .1)); }
+
 /* ---------- hardpoint slots ----------
    A rack of mounts under the platform. Clicking one opens the gear that will go in THAT slot on
    THIS hull — the old single "fit" button hid both the choice of mount and the reason anything was

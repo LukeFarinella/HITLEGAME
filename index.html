@@ -186,6 +186,41 @@
           <button class="dev-close" id="dev-close" type="button" aria-label="Close">✕</button>
         </div>
         <div class="dev-body">
+          <!-- CONTRACT: the mission ladder, first because the ladder IS the campaign now. The
+               headline control is one button — clear whatever mission you are looking at — so
+               reaching a late-game state is a click rather than seventeen matches. -->
+          <div class="dev-sect">CONTRACT</div>
+          <div class="dev-ladder" id="dev-ladder"></div>
+          <button class="dev-regen dev-primary" id="dev-mission-clear" type="button">✔ COMPLETE CURRENT MISSION</button>
+          <p class="dev-note" id="dev-mission-note">—</p>
+          <div class="dev-grants">
+            <button class="dev-mini" id="dev-mission-phase" type="button">CLEAR PHASE</button>
+            <button class="dev-mini" id="dev-mission-all" type="button">CLEAR ALL</button>
+            <button class="dev-mini" id="dev-mission-reset" type="button">RESET LADDER</button>
+          </div>
+
+          <!-- MATCH: everything that only means something with a skirmish running. -->
+          <div class="dev-sect">MATCH</div>
+          <label class="dev-check" for="dev-millstone">
+            <input type="checkbox" id="dev-millstone" checked />
+            <span>Millstone attacks (next match)</span>
+          </label>
+          <div class="dev-k">Grant</div>
+          <div class="dev-grants">
+            <button class="dev-mini" id="dev-rts-5k" type="button">+5K</button>
+            <button class="dev-mini" id="dev-rts-50k" type="button">+50K</button>
+            <button class="dev-mini" id="dev-rts-research" type="button">ALL RESEARCH</button>
+            <button class="dev-mini" id="dev-rts-sites" type="button">OPEN ALL SITES</button>
+          </div>
+          <div class="dev-k">Decide the match</div>
+          <div class="dev-grants">
+            <button class="dev-mini" id="dev-rts-win" type="button">WIN</button>
+            <button class="dev-mini" id="dev-rts-lose" type="button">LOSE</button>
+          </div>
+          <p class="dev-note">In a match: 7 opens the full build menu, 8 fields any unit under the cursor.</p>
+
+          <!-- CITY: the procedural skyline the theater is drawn from. -->
+          <div class="dev-sect">CITY</div>
           <label class="dev-row" for="dev-population">
             <span class="dev-k">Building population <span class="dev-v" id="dev-population-val">—</span></span>
             <input type="range" id="dev-population" min="0.25" max="2" step="0.05" value="0.65" />
@@ -202,17 +237,12 @@
             <input type="checkbox" id="dev-strict" checked />
             <span>Keep off crossing streets</span>
           </label>
-          <label class="dev-check" for="dev-millstone">
-            <input type="checkbox" id="dev-millstone" />
-            <span>RTS: Millstone attacks (next match)</span>
-          </label>
-          <p class="dev-note">RTS: shift + right-click the map to field any Millstone unit there (dev only).</p>
           <button class="dev-regen" id="dev-regen" type="button">↻ REGENERATE CITY</button>
           <p class="dev-note">Adjustments rebuild the current theater's skyline. Enter a theater to see them.</p>
 
-          <!-- Sandbox: jump the campaign to any point so every stage can be played without
-               grinding to it. Everything here writes real state, not a preview. -->
-          <div class="dev-sect">SANDBOX</div>
+          <!-- LEGACY CAMPAIGN: the pre-ladder surveillance game. Not reachable from the menu any
+               more (see __gorgon.openLegacyCampaign) but intact, and this is its sandbox. -->
+          <div class="dev-sect">LEGACY CAMPAIGN</div>
           <label class="dev-row" for="dev-tolerance">
             <span class="dev-k">Public tolerance <span class="dev-v" id="dev-tolerance-val">—</span></span>
             <input type="range" id="dev-tolerance" min="0" max="100" step="1" value="28" />
@@ -261,9 +291,11 @@
           </div>
           <p class="dev-note">Fires the event immediately in the current theater. One at a time.</p>
 
-          <div class="dev-sect">CAMPAIGN</div>
+          <div class="dev-sect">SESSION</div>
+          <button class="dev-regen" id="dev-board" type="button">◀ OPERATIONS BOARD</button>
+          <p class="dev-note">Abandons a running match and returns to the mission globe.</p>
           <button class="dev-regen" id="dev-exit-title" type="button">◀ EXIT TO START MENU</button>
-          <p class="dev-note">Saves and returns to the title screen. Pick this campaign again from its slot to carry on.</p>
+          <p class="dev-note">Saves and returns to the title screen. Pick this contract again from its slot to carry on.</p>
         </div>
       </div>
     </div>

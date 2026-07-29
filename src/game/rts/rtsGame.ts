@@ -509,6 +509,40 @@ export class RtsGame {
     return Math.round(Math.max(1, obeliskCount) * RTS_ECON.CAP_PER_OBELISK * this._economy.capMult);
   }
 
+  // ---- dev grants ----------------------------------------------------------------------------
+  //
+  // Not cheats bolted on the side: they write the SAME state the earned versions write, so a granted
+  // match behaves exactly like a played one. That is the only way they are useful for finding
+  // problems — a preview mode that diverged from real play would hide the bugs it was built to find.
+
+  /** Drop money in the bank. Not capped: the point is to skip the accrual, not to model it. */
+  devGrantMoney(amount: number): void {
+    this._money += amount;
+    this.changed();
+  }
+
+  /**
+   * Complete every research project at once.
+   *
+   * Returns the same shape {@link tickResearch} does, because the caller has the same work to do
+   * with it: an upgrade only becomes real when the scene re-arms the chassis it touched.
+   */
+  devGrantAllResearch(all: Iterable<ResearchId>): { id: ResearchId; kinds: ReturnType<typeof kindsTouchedBy> }[] {
+    const done: { id: ResearchId; kinds: ReturnType<typeof kindsTouchedBy> }[] = [];
+    for (const id of all) {
+      if (this._researched.has(id)) continue;
+      this._researched.add(id);
+      done.push({ id, kinds: kindsTouchedBy(id) });
+    }
+    // Anything mid-flight would otherwise complete a second time and re-fire its effects.
+    this.researching.clear();
+    if (done.length) {
+      this._economy = foldEffects(this._researched);
+      this.changed();
+    }
+    return done;
+  }
+
   onChange(fn: RtsListener): () => void {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
