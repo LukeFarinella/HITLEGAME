@@ -2092,6 +2092,26 @@ export class UnitField {
     return !!this.units[index]?.rtsc?.assist;
   }
 
+  /** What chassis this unit is, so the presentation layer can style by kind. */
+  kindOf(index: number): UnitKind | null {
+    return this.units[index]?.kind ?? null;
+  }
+
+  /**
+   * Whether this unit is FIGHTING right now, by order or by necessity.
+   *
+   * Three ways in, and they are all "attacking" from the operator's point of view: an attack-move
+   * was ordered, something hit it recently enough to still be answering (the threat ages out), or
+   * the field sent it to a distress call. Deliberately not "has an enemy in range" — every combatant
+   * shoots what wanders past it, and a route that turned red every time a civilian convoy crossed a
+   * firing line would mean nothing.
+   */
+  engagedNow(index: number): boolean {
+    const c = this.units[index]?.rtsc;
+    if (!c) return false;
+    return !!c.attackMove || !!c.assist || !!c.threat;
+  }
+
   /**
    * Armed structures take their shot.
    *

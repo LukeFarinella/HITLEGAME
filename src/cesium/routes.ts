@@ -21,11 +21,30 @@ import * as Cesium from 'cesium';
 const WHITE = Cesium.Color.fromCssColorString('#ECEEF1');
 const RED = Cesium.Color.fromCssColorString('#E23A2E');
 const AMBER = Cesium.Color.fromCssColorString('#F2A83B');
+
+/**
+ * What a route is FOR, and therefore what colour it is.
+ *
+ * Four intents, four colours, borrowed from where the same meanings already live on this map so the
+ * language is one language: the blue is the build-site ring's blue, the green is the valid-placement
+ * green, and red is red everywhere in this game.
+ */
+export type RouteIntent = 'build' | 'move' | 'patrol' | 'attack';
+
+const INTENT_COLOUR: Record<RouteIntent, Cesium.Color> = {
+  build: Cesium.Color.fromCssColorString('#3FA0E0'),
+  move: Cesium.Color.fromCssColorString('#3FBF6F'),
+  patrol: Cesium.Color.fromCssColorString('#E7C13B'),
+  attack: Cesium.Color.fromCssColorString('#E23A2E'),
+};
+
 /** Metres above the terrain, so a route doesn't z-fight the ground it's drawn on. */
 const LIFT_M = 45;
 /** Points sampled along each leg, so a line follows relief instead of cutting through it. */
 const SAMPLES = 24;
 const MARKER_PX = 7;
+/** The lone destination node on a collapsed route. Bigger, because it is now the only one. */
+const DEST_PX = 9;
 /**
  * How many routes are drawn at once.
  *
@@ -70,6 +89,17 @@ export class RouteLayer {
       legs: { lon: number; lat: number }[];
       action: RouteAction;
       loops: boolean;
+      /**
+       * Draw this route COLLAPSED: one continuous thin thread in {@link intent}'s colour, and a
+       * single node at the far end.
+       *
+       * For a unit that routes along roads, a leg is a street corner rather than a decision — a
+       * worker crossing a city produces dozens of them, and a dot on every one turned "where is it
+       * going" into a dotted line you had to trace. The path is still the real path; only the
+       * per-corner nodes and the queued-leg dashes go.
+       */
+      collapse?: boolean;
+      intent?: RouteIntent;
     }[],
     heightAt: (lon: number, lat: number) => number,
   ): void {
@@ -77,7 +107,8 @@ export class RouteLayer {
     const sig = use
       .map(
         (r) =>
-          `${r.action}|${r.loops}|${r.from.lon.toFixed(4)},${r.from.lat.toFixed(4)}|` +
+          `${r.action}|${r.loops}|${r.collapse ? 'c' : ''}${r.intent ?? ''}|` +
+          `${r.from.lon.toFixed(4)},${r.from.lat.toFixed(4)}|` +
           r.legs.map((l) => `${l.lon.toFixed(4)},${l.lat.toFixed(4)}`).join(';'),
       )
       .join('#');
@@ -86,7 +117,55 @@ export class RouteLayer {
 
     this.lines.removeAll();
     this.markers.removeAll();
-    for (const r of use) this.addRoute(r.from, r.legs, r.action, r.loops, heightAt);
+    for (const r of use) {
+      if (r.collapse) this.addCollapsed(r.from, r.legs, r.intent ?? 'move', r.loops, heightAt);
+      else this.addRoute(r.from, r.legs, r.action, r.loops, heightAt);
+    }
+  }
+
+  /**
+   * One thread, one node.
+   *
+   * Drawn as a SINGLE polyline through every sampled leg rather than one per leg: it is one drive,
+   * so it should be one line, and it costs one primitive instead of thirty for a road route.
+   */
+  private addCollapsed(
+    from: { lon: number; lat: number },
+    legs: { lon: number; lat: number }[],
+    intent: RouteIntent,
+    loops: boolean,
+    heightAt: (lon: number, lat: number) => number,
+  ): void {
+    const colour = INTENT_COLOUR[intent];
+    const points = [from, ...legs];
+    // A patrol still closes its circuit — that IS the information a patrol carries.
+    if (loops) points.push(from);
+
+    const path: Cesium.Cartesian3[] = [];
+    for (let i = 0; i + 1 < points.length; i++) {
+      const leg = this.sampleLeg(points[i], points[i + 1], heightAt);
+      // Drop each leg's first sample after the first leg: it is the previous leg's last point.
+      path.push(...(i === 0 ? leg : leg.slice(1)));
+    }
+    if (path.length < 2) return;
+
+    this.lines.add({
+      positions: path,
+      width: 1.4,
+      material: Cesium.Material.fromType('Color', { color: colour }),
+    });
+
+    // The destination. On a loop the last leg point is the far side of the circuit, which is still
+    // the most useful single thing to mark.
+    const dest = legs[legs.length - 1];
+    this.markers.add({
+      position: Cesium.Cartesian3.fromDegrees(dest.lon, dest.lat, heightAt(dest.lon, dest.lat) + LIFT_M),
+      color: colour,
+      outlineColor: Cesium.Color.BLACK.withAlpha(0.6),
+      outlineWidth: 1,
+      pixelSize: DEST_PX,
+      disableDepthTestDistance: 1e12,
+    });
   }
 
   private addRoute(

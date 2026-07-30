@@ -90,7 +90,7 @@ import { CombatAudio } from './combatAudio';
 import { ScanBeams, Blasts, Sparks, Impacts, Cuffs, ViolationPings, Rounds, CameraFlashes } from './effects';
 import { Reactions } from './reactions';
 import { ActionMarks, type ActionKind } from './actionMarks';
-import { RouteLayer } from './routes';
+import { RouteLayer, type RouteIntent } from './routes';
 import { AttackPulse } from './pulse';
 import { SiegeDirector, type SiegeEvent } from './siege';
 import { DropSites } from './dropSites';
@@ -713,6 +713,30 @@ function updateAttackPulse() {
 }
 
 /** Redraw the route for whatever platform is selected, or clear it when none is. */
+/**
+ * Chassis whose routes are drawn COLLAPSED: one thin thread, one node at the end.
+ *
+ * The workers and the dogs, because they are the two that route along roads. A road drive is a leg
+ * per street corner, and a node on every corner made a simple errand look like a twelve-stop
+ * itinerary. Widen this set to give another chassis the same treatment; nothing else needs changing.
+ */
+const SIMPLE_ROUTE_KINDS = new Set<UnitKind>(['skid', 'dog']);
+
+/**
+ * What a unit's route is FOR, which is what decides its colour.
+ *
+ * Precedence, most specific first: a worker assigned to a site is BUILDING whatever else is going on
+ * around it; a unit that is fighting is ATTACKING; a closed route is a PATROL; anything else is a
+ * MOVE. Fighting outranks patrolling on purpose — when a patrol engages, the fact worth seeing is
+ * the fight, not the circuit.
+ */
+function routeIntentOf(index: number): RouteIntent {
+  if (rtsConstruction.some((c) => c.workerIndex === index)) return 'build';
+  if (unitField?.engagedNow(index)) return 'attack';
+  if (unitField?.routeLoops(index)) return 'patrol';
+  return 'move';
+}
+
 function updateRouteLayer() {
   if (!routes) return;
   if (!unitField || !theaterMap || mode !== 'theater') return routes.clear();
@@ -727,11 +751,18 @@ function updateRouteLayer() {
     const st = unitField.platformStatus(i);
     const legs = unitField.routeOf(i);
     if (!st || !legs.length) continue;
+    const kind = unitField.kindOf(i);
+    const collapse = !!kind && SIMPLE_ROUTE_KINDS.has(kind);
     draw.push({
       from: { lon: st.lon, lat: st.lat },
       legs,
       action: unitField.routeActionOf(i),
       loops: unitField.routeLoops(i),
+      // Only the collapsed kinds carry an intent, so every other platform keeps the white/dashed
+      // route it has always had. Both halves are per-kind on purpose: this is a change to how the
+      // road-routing chassis read, not a new colour scheme for the whole map.
+      collapse,
+      intent: collapse ? routeIntentOf(i) : undefined,
     });
   }
   routes.drawMany(draw, theaterMap.heightAt);
