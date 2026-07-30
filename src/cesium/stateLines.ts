@@ -26,6 +26,15 @@ const BASE = Cesium.Color.fromCssColorString('#39424E');
  * a red continent is the one thing on the screen that has to be unmistakable and wasn't.
  */
 const HOT = Cesium.Color.fromCssColorString('#F2EFEA');
+/**
+ * An ARMED selection — clicked once, waiting for the confirming second click.
+ *
+ * Amber, and thicker. It has to be unmistakably a different state from the hover outline, because
+ * the whole two-step interaction rests on the operator knowing which one they are looking at: bone
+ * means "this is what that click would take", amber means "this is what the NEXT click commits to".
+ * Amber rather than red for the same reason the hover is bone — every coastline here is already red.
+ */
+const ARMED = Cesium.Color.fromCssColorString('#F2C13B');
 /** Other members of the same block, when the selection resolves to a block rather than a state. */
 const BLOCK = Cesium.Color.fromCssColorString('#6FA8B8');
 
@@ -161,11 +170,13 @@ export class StateLines {
   /**
    * Pull out a set of states — the one under the selection, and the rest of its block behind it.
    *
-   * `primary` draws in brand red; `also` in a muted version of it, which is what makes "this click
-   * takes the whole SOUTHERN BLOCK" readable as one shape rather than as fifty-one separate ones.
+   * `primary` is the state the selection resolves to; `also` are the rest of its block, drawn in a
+   * muted blue, which is what makes "this takes the whole SOUTHERN BLOCK" readable as one shape
+   * rather than as fifty-one separate ones. `armed` switches the primary from the hover look to the
+   * waiting-for-confirmation look — see {@link ARMED}.
    */
-  highlight(primary: string | null, also: readonly string[] = []): void {
-    const sig = `${primary ?? '-'}|${also.join(',')}`;
+  highlight(primary: string | null, also: readonly string[] = [], armed = false): void {
+    const sig = `${primary ?? '-'}|${also.join(',')}|${armed ? 'a' : ''}`;
     if (sig === this.hotSig) return;
     this.hotSig = sig;
     this.hot.removeAll();
@@ -175,7 +186,7 @@ export class StateLines {
       if (s) for (const ring of s.rings) this.add(this.hot, ring, BLOCK, 2);
     }
     const p = primary ? this.byId.get(primary) : undefined;
-    if (p) for (const ring of p.rings) this.add(this.hot, ring, HOT, 3);
+    if (p) for (const ring of p.rings) this.add(this.hot, ring, armed ? ARMED : HOT, armed ? 5 : 3);
     this.hot.show = this.visible;
   }
 

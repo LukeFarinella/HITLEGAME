@@ -83,11 +83,13 @@ function render(): void {
     `<div class="gch-track"><span style="width:${pct}%"></span></div>` +
     `<div class="gch-count">${p.done} / ${p.total} THEATERS HELD</div>` +
     `</div>` +
+    // The legend used to explain arrow colours. There are no arrows: the interaction is the two
+    // clicks, so that is what the chrome explains.
     `<div class="gch-legend">` +
-    `<span class="gch-key"><i class="k-open"></i>AVAILABLE</span>` +
-    `<span class="gch-key"><i class="k-held"></i>HELD</span>` +
+    `<span class="gch-key"><i class="k-step"></i>CLICK GROUND TO SELECT IT</span>` +
+    `<span class="gch-key"><i class="k-step armed"></i>CLICK THE AMBER AREA AGAIN TO DEPLOY</span>` +
     `</div>` +
-    `<div class="gch-hint">CLICK ANY GROUND TO DEPLOY · MARKERS ARE THE HEADLINE CONTRACTS</div>` +
+    `<div class="gch-hint">LIT GROUND IS HELD · ANY GROUND CAN BE TAKEN</div>` +
     `<button type="button" class="gch-exit" id="gch-exit">EXIT TO TITLE</button>`;
 
   document.getElementById('gch-exit')?.addEventListener('click', () => {
@@ -106,7 +108,7 @@ function render(): void {
  * Bottom-centre, over the globe, so the thing you just clicked stays visible above it — a modal
  * here would hide the map the decision is being made on.
  */
-export function showMissionBrief(m: MissionDef): void {
+export function showMissionBrief(m: MissionDef, armed = false): void {
   hideMissionBrief();
   // A free contract's own ground has never been fought over, but the rung it fills may already be
   // held — say so, because that changes whether the win is worth anything to the ladder.
@@ -114,14 +116,18 @@ export function showMissionBrief(m: MissionDef): void {
 
   const card = document.createElement('div');
   card.id = BRIEF;
-  card.className = `gmb${held ? ' held' : ''}${m.free ? ' free' : ''}`;
+  card.className = `gmb${held ? ' held' : ''}${m.free ? ' free' : ''}${armed ? ' armed' : ''}`;
   card.innerHTML =
     `<div class="gmb-top">` +
     `<span class="gmb-sub">${m.sub}</span>` +
-    `<span class="gmb-flag">${m.free ? 'OPEN GROUND' : held ? 'HELD' : 'AVAILABLE'}</span>` +
+    `<span class="gmb-flag">${armed ? 'SELECTED' : m.free ? 'OPEN GROUND' : held ? 'HELD' : 'AVAILABLE'}</span>` +
     `</div>` +
     `<div class="gmb-name">${m.name}</div>` +
-    `<p class="gmb-blurb">${m.blurb}</p>`;
+    `<p class="gmb-blurb">${m.blurb}</p>` +
+    // The second click is the whole interaction, so it is stated on the card rather than left for
+    // the operator to discover. The button below does the same job for anyone who would rather press
+    // a button than click a map.
+    (armed ? `<p class="gmb-confirm">Click the highlighted area again to deploy.</p>` : '');
 
   const actions = document.createElement('div');
   actions.className = 'gmb-actions';

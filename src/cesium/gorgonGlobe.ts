@@ -77,13 +77,12 @@ import { showLoading, setStage, hideLoading } from '../ui/loading';
 import { setActiveSlot, activeSlot, migrateLegacySave } from '../game/saves';
 import {
   MISSIONS as CAMPAIGN_MISSIONS, markComplete, markStarted, campaignWon, campaignProgress, isComplete,
-  missionById, creditFor, resetCampaign, TIER_NAME, type MissionDef,
+  creditFor, resetCampaign, TIER_NAME, type MissionDef,
 } from '../game/rts/campaign';
 import {
   showCampaignHud, hideCampaignHud, campaignHudOpen, refreshCampaignHud,
   showMissionBrief, hideMissionBrief, missionBriefOpen,
 } from '../ui/rtsCampaign';
-import { MissionMarkers, type MissionMarker } from './missionMarkers';
 import { StateLines, loadStateGeometry } from './stateLines';
 import { LaserBeams } from './lasers';
 import { CombatAudio } from './combatAudio';
@@ -1444,9 +1443,6 @@ scene.preUpdate.addEventListener(() => {
   const now = performance.now();
   const dt = (now - lastTickMs) / 1000;
   lastTickMs = now;
-  // Mission select runs with no unit field behind it — the globe is the whole screen — so the
-  // markers breathe from out here rather than inside the sim branch.
-  if (missionSelect) missionMarkers?.update(dt);
   tickDevLadder();
   if (unitField) {
     unitField.tick(dt);
@@ -2508,17 +2504,27 @@ async function openCampaign(slot: number): Promise<void> {
 
 // ---- mission select --------------------------------------------------------------------------
 //
-// The ladder is picked ON THE GLOBE. Seventeen arrows stand over the ground their contracts are
-// fought on; every theater you hold lights its obelisks underneath them. That means "which contract
-// next" and "how far have I got" are the same act of looking, which a grid of cards could never do:
-// a list can tell you 4/17, only the map can show you which quarter of the country is lit.
+// The ladder is picked ON THE GLOBE, and the globe is the only control: put the ring on ground, and
+// that ground is the contract. Every theater you hold lights its obelisks underneath, so "where next"
+// and "how far have I got" are the same act of looking — which a grid of cards could never do. A list
+// can tell you 4/17; only the map can show you which quarter of the country is lit.
+//
+// TWO CLICKS. The first ARMS a selection: the ring and the state outline lock where you clicked and
+// go amber, and the brief opens. The second, anywhere in that same highlighted area, commits. There
+// used to be seventeen arrows to click instead, which made the seventeen named contracts look like
+// the only doors when in fact any ground is one — and made a single click on a 320 km disc, chosen
+// from orbit, an irreversible thirty-second commitment.
 
 /** True while the globe IS the mission select. Gates the legacy theater-pick click. */
 let missionSelect = false;
-/** The arrow layer. Built on first use and kept — seventeen billboards cost nothing to leave live. */
-let missionMarkers: MissionMarkers | undefined;
-/** The marker currently under the pointer, for the hover swap. */
-let hotMission: string | null = null;
+/**
+ * The armed selection: ground clicked once and not yet confirmed.
+ *
+ * `stateId` is what "the same area" means for the confirming click — anywhere inside the highlighted
+ * state confirms, not just the exact pixel. Overseas, where there is no state, the disc itself is
+ * the area (see {@link sameArmedArea}).
+ */
+let armed: { mission: MissionDef; lon: number; lat: number; stateId: string | null } | null = null;
 /**
  * State boundaries under the mission select, with the state the ring's centre falls in pulled out.
  *
@@ -2548,40 +2554,6 @@ function ensureStateLines(): void {
     .finally(() => {
       stateLinesLoading = false;
     });
-}
-
-/** Where a mission's ARROW stands. Near its ground, but chosen to be readable from orbit. */
-function missionAnchor(m: MissionDef): { lon: number; lat: number } | null {
-  if (m.pin) return m.pin; // hand-placed, so a block's arrow never lands on a state's
-  if (m.anchor) return m.anchor;
-  if (m.tier === 'state') {
-    const s = m.fips ? territory?.byId.get(m.fips) : undefined;
-    return s ? s.center : null;
-  }
-  const region = territory?.regions.find((r) => r.id === m.regionId);
-  if (!region?.states.length) return null;
-  // A block's arrow goes at the mean of its members, weighted by nothing — the point is "roughly
-  // here", and weighting by site count dragged the western block's marker onto the coast.
-  let lon = 0;
-  let lat = 0;
-  for (const s of region.states) {
-    lon += s.center.lon;
-    lat += s.center.lat;
-  }
-  return { lon: lon / region.states.length, lat: lat / region.states.length };
-}
-
-/** The whole ladder as markers, in the state the save says they're in. */
-function missionMarkerSet(): MissionMarker[] {
-  const out: MissionMarker[] = [];
-  for (const m of CAMPAIGN_MISSIONS) {
-    const at = missionAnchor(m);
-    if (!at) continue;
-    // No sealed arrows any more: every contract is deployable, because every point on the globe is.
-    // See tierUnlocked.
-    out.push({ id: m.id, lon: at.lon, lat: at.lat, label: m.name, state: isComplete(m.id) ? 'held' : 'open' });
-  }
-  return out;
 }
 
 // ---- free deploy ------------------------------------------------------------------------------
@@ -2769,9 +2741,7 @@ function openCampaignBoard(): void {
   rebuildHeatField();
   if (orbitHomeRings) orbitHomeRings.show = false;
 
-  missionMarkers ??= new MissionMarkers(scene);
-  missionMarkers.set(missionMarkerSet());
-  missionMarkers.show = true;
+  disarm();
   updateChrome();
 
   showCampaignHud(slot, {
@@ -2794,12 +2764,11 @@ function openCampaignBoard(): void {
 /** Leave mission select — for a match, or for the title. */
 function closeCampaignBoard(): void {
   missionSelect = false;
-  hotMission = null;
+  armed = null;
   briefMission = null;
   hideMissionBrief();
   hideCampaignHud();
   el('globe-ui')?.classList.remove('mission-select');
-  if (missionMarkers) missionMarkers.show = false;
   if (stateLines) stateLines.show = false;
   cursor.show = false;
 }
@@ -2824,33 +2793,84 @@ function currentMission(): MissionDef | null {
 /** The mission whose brief is showing, if any. */
 let briefMission: MissionDef | null = null;
 
-/** A marker was clicked: open its brief. */
-function selectMissionMarker(id: string): void {
-  const m = missionById(id);
-  if (!m) return;
-  sound.play('click');
-  briefMission = m;
-  showMissionBrief(m);
-}
-
 /**
- * Open ground was clicked: draw a contract for it and brief that.
+ * FIRST CLICK — arm a selection on this ground.
  *
- * Water is the one refusal. A 200-mile disc of open ocean builds a theater with no land in it — no
- * roads, no buildings, no contacts, nowhere to put a second obelisk — so it is turned away here,
- * where the answer is instant, rather than after a thirty-second terrain bake.
+ * Locks the ring and the state outline here and turns them amber, and opens the brief for the
+ * contract this ground makes. Nothing is committed: the operator is looking at 320 km of disc chosen
+ * from orbit, and being able to see exactly what it covers before spending thirty seconds building it
+ * is the whole reason this is two clicks instead of one.
+ *
+ * Water is the one refusal, and it is refused HERE rather than on commit: a disc of open ocean builds
+ * a theater with no land in it — no roads, no buildings, no contacts, nowhere for a second obelisk —
+ * and the answer is instant at this end and thirty seconds late at the other.
  */
-function selectFreeGround(lon: number, lat: number): void {
+function armSelection(lon: number, lat: number): void {
   if (!isLand(lon, lat)) {
     sound.play('denied');
     toast('◈ NO LAND AT THIS POINT · PICK GROUND');
-    hideMissionBrief();
+    disarm();
     return;
   }
-  sound.play('click');
+  const r = freeResolution(lon, lat);
   const m = freeMissionAt(lon, lat);
+  armed = { mission: m, lon, lat, stateId: r.stateId };
   briefMission = m;
-  showMissionBrief(m);
+  sound.play('click');
+  // Ring and outline stop tracking the pointer and sit on what was chosen.
+  cursor.position = new Cesium.ConstantPositionProperty(Cesium.Cartesian3.fromDegrees(lon, lat));
+  cursor.show = true;
+  paintCursor(true);
+  stateLines?.highlight(r.stateId, r.blockIds, true);
+  showMissionBrief(m, true);
+}
+
+/**
+ * Whether a click at this point lands in the armed selection's area, and therefore confirms it.
+ *
+ * Deliberately the whole highlighted STATE rather than the exact point: the operator was shown a
+ * state outline, so the state is what they think they are clicking, and demanding they re-hit a pixel
+ * from 6,000 km up would make the second click a dexterity test. Off the state raster — overseas —
+ * the theater disc is the area instead, which is the only shape drawn there.
+ */
+function sameArmedArea(lon: number, lat: number): boolean {
+  if (!armed) return false;
+  if (armed.stateId) return territory?.stateAt(lon, lat)?.id === armed.stateId;
+  return metresBetween(armed.lon, armed.lat, lon, lat) <= THEATER_RADIUS_M;
+}
+
+/** SECOND CLICK — commit the armed selection. */
+function confirmArmed(): void {
+  if (!armed) return;
+  const m = armed.mission;
+  armed = null;
+  hideMissionBrief();
+  void startRtsMatch(m);
+}
+
+/** Drop the armed selection and hand the ring and the outline back to the pointer. */
+function disarm(): void {
+  armed = null;
+  briefMission = null;
+  hideMissionBrief();
+  paintCursor(false);
+  stateLines?.highlight(null);
+}
+
+/**
+ * Recolour the 200-mile ring for the two states of the selection.
+ *
+ * Red-and-faint while it follows the pointer (a proposal), amber-and-solid once armed (a decision
+ * waiting on one more click) — the same pair of meanings the state outline carries, so the two
+ * always agree about which step you are on.
+ */
+function paintCursor(isArmed: boolean): void {
+  const e = cursor.ellipse;
+  if (!e) return;
+  const colour = isArmed ? Cesium.Color.fromCssColorString('#F2C13B') : RED;
+  e.material = new Cesium.ColorMaterialProperty(colour.withAlpha(isArmed ? 0.16 : 0.06));
+  e.outlineColor = new Cesium.ConstantProperty(colour);
+  e.outlineWidth = new Cesium.ConstantProperty(isArmed ? 3 : 1);
 }
 
 /**
@@ -2864,7 +2884,6 @@ function refreshMissionSelect(): void {
   if (!missionSelect) return;
   obeliskMask = campaignObeliskMask();
   rebuildHeatField();
-  missionMarkers?.set(missionMarkerSet());
   refreshCampaignHud();
 }
 
@@ -6702,32 +6721,29 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.MotionEvent) => {
     return;
   }
   if (mode !== 'globe') return; // cursor readout is orbit-only
-  // Mission select: an arrow under the pointer is a headline contract; anywhere else is ground the
-  // operator can take on its own terms, so the ring and the state highlight track the pointer too.
+  // Mission select: the ring and the state outline track the pointer as a PROPOSAL — until something
+  // is armed, at which point they belong to the armed ground and must not move, because they are what
+  // the confirming click is aimed at.
   if (missionSelect) {
-    const id = missionMarkers?.pick(m.endPosition) ?? null;
-    if (id !== hotMission) {
-      hotMission = id;
-      missionMarkers?.setHot(id);
-      if (id) sound.play('hover');
-    }
-    scene.canvas.style.cursor = id ? 'pointer' : '';
     const at = pickLonLat(m.endPosition);
+    if (latEl) latEl.textContent = at ? fmt(at.latitude, 'N', 'S') : '—';
+    if (lonEl) lonEl.textContent = at ? fmt(at.longitude, 'E', 'W') : '—';
+    if (armed) {
+      // Pointer feedback only: over the armed area the next click commits, so say so with the cursor.
+      const inside = at
+        ? sameArmedArea(Cesium.Math.toDegrees(at.longitude), Cesium.Math.toDegrees(at.latitude))
+        : false;
+      scene.canvas.style.cursor = inside ? 'pointer' : 'crosshair';
+      return;
+    }
+    scene.canvas.style.cursor = '';
     if (at) {
-      const lon = Cesium.Math.toDegrees(at.longitude);
-      const lat = Cesium.Math.toDegrees(at.latitude);
       cursor.position = new Cesium.ConstantPositionProperty(Cesium.Cartesian3.fromRadians(at.longitude, at.latitude));
-      // The ring is hidden under an arrow: that click takes the marker's ground, not the pointer's,
-      // and drawing a selection the click won't honour is a lie.
-      cursor.show = !id;
-      if (latEl) latEl.textContent = fmt(at.latitude, 'N', 'S');
-      if (lonEl) lonEl.textContent = fmt(at.longitude, 'E', 'W');
-      highlightGroundAt(lon, lat);
+      cursor.show = true;
+      highlightGroundAt(Cesium.Math.toDegrees(at.longitude), Cesium.Math.toDegrees(at.latitude));
     } else {
       cursor.show = false;
       stateLines?.highlight(null);
-      if (latEl) latEl.textContent = '—';
-      if (lonEl) lonEl.textContent = '—';
     }
     return;
   }
@@ -6780,17 +6796,20 @@ handler.setInputAction((m: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
     return;
   }
   if (mode === 'globe') {
-    // Mission select owns the globe: a marker opens its brief, and ANY other ground opens a brief
-    // for a contract drawn right there. Never tryEnterTheater — that is the legacy campaign's door.
+    // Mission select owns the globe. Click once to arm the ground under the pointer, again inside the
+    // highlighted area to commit. Never tryEnterTheater — that is the legacy campaign's door.
     if (missionSelect) {
-      const id = missionMarkers?.pick(m.position) ?? null;
-      if (id) {
-        selectMissionMarker(id);
+      const at = pickLonLat(m.position);
+      if (!at) {
+        disarm(); // clicked off the globe entirely
         return;
       }
-      const at = pickLonLat(m.position);
-      if (at) selectFreeGround(Cesium.Math.toDegrees(at.longitude), Cesium.Math.toDegrees(at.latitude));
-      else hideMissionBrief();
+      const lon = Cesium.Math.toDegrees(at.longitude);
+      const lat = Cesium.Math.toDegrees(at.latitude);
+      // A click OUTSIDE the armed area re-arms there rather than committing — changing your mind is
+      // one click, the same as making it, and never an accidental deployment somewhere else.
+      if (armed && sameArmedArea(lon, lat)) confirmArmed();
+      else armSelection(lon, lat);
       return;
     }
     const carto = pickLonLat(m.position);
@@ -7862,7 +7881,9 @@ window.addEventListener('keydown', (e) => {
   // match uses. It must never fall through to exitTheater, which from here would do nothing visible
   // and leave the player pressing a dead key.
   if (e.key === 'Escape' && missionSelect) {
-    if (missionBriefOpen()) hideMissionBrief();
+    // Innermost first, as everywhere else: an armed selection is the thing Escape drops.
+    if (armed) disarm();
+    else if (missionBriefOpen()) hideMissionBrief();
     return;
   }
   if (e.key === 'Escape') exitTheater();
@@ -7921,8 +7942,12 @@ if (import.meta.env.DEV) {
     get missionSelect() {
       return missionSelect;
     },
-    selectMissionMarker,
-    missionMarkerSet,
+    get armedSelection() {
+      return armed;
+    },
+    armSelection,
+    confirmArmed,
+    disarm,
     campaignObeliskMask,
     get rtsGame() {
       return rtsGame;

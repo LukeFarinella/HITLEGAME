@@ -1457,17 +1457,20 @@ body:has(#globe-ui) #hint { display: none; }
   letter-spacing: .2em;
   color: var(--ash);
 }
-/* The swatch is a triangle so it reads as the same object as the marker it explains. */
-.gch-key i {
-  width: 0;
-  height: 0;
-  border-left: 6px solid transparent;
-  border-right: 6px solid transparent;
-  border-top: 10px solid var(--gunmetal);
+/* The swatch is a ring, because what it explains is the selection ring on the globe: hollow red
+   while it follows the pointer, filled amber once armed. */
+.gch-key i.k-step {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1px solid var(--red);
+  background: rgba(226, 58, 46, .12);
 }
-.gch-key i.k-open { border-top-color: var(--red); }
-.gch-key i.k-held { border-top-color: var(--ok); }
-.gch-key i.k-locked { border-top-color: #3A414A; }
+.gch-key i.k-step.armed {
+  border-color: var(--warn);
+  border-width: 2px;
+  background: rgba(242, 193, 59, .3);
+}
 
 /* Sits above the coordinate readout, which the mission select now keeps — see below. */
 .gch-hint {
@@ -1522,6 +1525,9 @@ body:has(#globe-ui) #hint { display: none; }
 #g-mission-brief.held { border-color: rgba(79, 158, 122, .5); border-left-color: var(--ok); }
 /* A contract the operator drew themselves, rather than one off the ladder. */
 #g-mission-brief.free { border-color: rgba(111, 168, 184, .45); border-left-color: var(--grid, #6FA8B8); }
+/* Armed wins over held/free: the card wears the same amber as the ring and the state outline, so all
+   three read as one pending decision rather than three unrelated highlights. */
+#g-mission-brief.armed { border-color: rgba(242, 193, 59, .55); border-left-color: var(--warn); }
 
 .gmb-top {
   display: flex;
@@ -1542,6 +1548,7 @@ body:has(#globe-ui) #hint { display: none; }
 }
 #g-mission-brief.held .gmb-flag { color: var(--ok); }
 #g-mission-brief.free .gmb-flag { color: #6FA8B8; }
+#g-mission-brief.armed .gmb-flag { color: var(--warn); }
 
 .gmb-name {
   margin-top: 6px;
@@ -1553,6 +1560,13 @@ body:has(#globe-ui) #hint { display: none; }
   margin: 8px 0 0;
   font: 400 12px/1.6 var(--sans);
   color: var(--ash);
+}
+
+.gmb-confirm {
+  margin: 9px 0 0;
+  font: 600 10px/1.4 var(--mono);
+  letter-spacing: .12em;
+  color: var(--warn);
 }
 
 .gmb-actions {

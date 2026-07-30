@@ -35,9 +35,9 @@ export const TIER_NAME: Record<MissionTier, string> = {
 };
 
 export const TIER_NOTE: Record<MissionTier, string> = {
-  state: 'Nine headline economies. Click any ground on the globe to deploy.',
-  block: 'The rest of the map, in blocks. Click any ground on the globe to deploy.',
-  theater: 'Foreign ground. Click any ground on the globe to deploy.',
+  state: 'Nine headline economies. Select ground, then confirm to deploy.',
+  block: 'The rest of the map, in blocks. Select ground, then confirm to deploy.',
+  theater: 'Foreign ground. Select ground, then confirm to deploy.',
 };
 
 export interface MissionDef {
@@ -67,15 +67,6 @@ export interface MissionDef {
    * chosen well inland, because a 200-mile disc centred on a coastal city is half ocean.
    */
   anchor?: { lon: number; lat: number };
-  /**
-   * Where this mission's ARROW stands on the globe, when that isn't where it deploys.
-   *
-   * Only the blocks need it, and they need it badly: a block's natural pin is the mean of its
-   * members, which for all three lands squarely on top of a headline state's arrow — the northern
-   * block's centroid sits between New York and Pennsylvania. These are hand-placed into empty ground
-   * inside each block instead, because two overlapping arrows is two missions you cannot click.
-   */
-  pin?: { lon: number; lat: number };
   /**
    * The ladder mission a win here fills in, when that isn't this mission itself.
    *
@@ -184,7 +175,6 @@ export const MISSIONS: readonly MissionDef[] = [
     name: 'WESTERN BLOCK',
     sub: 'WEST OF THE 100TH MERIDIAN',
     blurb: 'Sparse, cheap, and mostly dark between cities. Coverage costs more than it returns.',
-    pin: { lon: -113.5, lat: 41.5 }, // the Great Basin — no headline state within 800 km
   },
   {
     id: 'bl-south',
@@ -193,7 +183,6 @@ export const MISSIONS: readonly MissionDef[] = [
     name: 'SOUTHERN BLOCK',
     sub: 'REMAINING SOUTHERN STATES',
     blurb: 'Sprawl without density. The network has to be wide before it can be deep.',
-    pin: { lon: -91.5, lat: 33.5 }, // the lower Mississippi, clear of Texas and Georgia
   },
   {
     id: 'bl-north',
@@ -202,7 +191,6 @@ export const MISSIONS: readonly MissionDef[] = [
     name: 'NORTHERN BLOCK',
     sub: 'REMAINING NORTHERN STATES',
     blurb: 'The last of the domestic map, and the most watched. Public patience is thin.',
-    pin: { lon: -95.0, lat: 46.5 }, // upper Midwest, well north of Illinois and west of New York
   },
 
   // ---- PHASE III: overseas ----------------------------------------------------------------------
