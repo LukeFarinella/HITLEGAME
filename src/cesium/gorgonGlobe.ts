@@ -714,25 +714,28 @@ function updateAttackPulse() {
 
 /** Redraw the route for whatever platform is selected, or clear it when none is. */
 /**
- * Chassis whose routes are drawn COLLAPSED: one thin thread, one node at the end.
+ * What a unit's route is FOR, which is what decides its colour. Every controllable unit, one rule.
  *
- * The workers and the dogs, because they are the two that route along roads. A road drive is a leg
- * per street corner, and a node on every corner made a simple errand look like a twelve-stop
- * itinerary. Widen this set to give another chassis the same treatment; nothing else needs changing.
- */
-const SIMPLE_ROUTE_KINDS = new Set<UnitKind>(['skid', 'dog']);
-
-/**
- * What a unit's route is FOR, which is what decides its colour.
+ * Precedence, most specific first:
+ *   BUILD    a worker assigned to a construction site, whatever else is going on around it.
+ *   ATTACK   the unit is fighting — attack-move ordered, something hit it recently enough to still
+ *            be answering, it is running to a distress call, or it carries a coercive order against
+ *            a contact (the surveillance campaign's detain/prison/execute/strike). Deliberately NOT
+ *            "has something in range": every combatant shoots whatever wanders past it, and a line
+ *            that flushed red at each passing convoy would mean nothing.
+ *   PATROL   a closed route.
+ *   MOVE     anything else, including a plain investigate order — go there and look.
  *
- * Precedence, most specific first: a worker assigned to a site is BUILDING whatever else is going on
- * around it; a unit that is fighting is ATTACKING; a closed route is a PATROL; anything else is a
- * MOVE. Fighting outranks patrolling on purpose — when a patrol engages, the fact worth seeing is
- * the fight, not the circuit.
+ * Fighting outranks patrolling on purpose: when a patrol engages, the fight is the fact worth
+ * seeing, not the circuit. The arrest-versus-kill distinction the old amber route line carried has
+ * not been lost, it has moved — it is on the unit panel and in the action glyph that pops where the
+ * order lands, both of which say it more precisely than a line colour could.
  */
 function routeIntentOf(index: number): RouteIntent {
   if (rtsConstruction.some((c) => c.workerIndex === index)) return 'build';
   if (unitField?.engagedNow(index)) return 'attack';
+  const action = unitField?.routeActionOf(index);
+  if (action === 'detain' || action === 'prison' || action === 'execute' || action === 'strike') return 'attack';
   if (unitField?.routeLoops(index)) return 'patrol';
   return 'move';
 }
@@ -751,18 +754,11 @@ function updateRouteLayer() {
     const st = unitField.platformStatus(i);
     const legs = unitField.routeOf(i);
     if (!st || !legs.length) continue;
-    const kind = unitField.kindOf(i);
-    const collapse = !!kind && SIMPLE_ROUTE_KINDS.has(kind);
     draw.push({
       from: { lon: st.lon, lat: st.lat },
       legs,
-      action: unitField.routeActionOf(i),
       loops: unitField.routeLoops(i),
-      // Only the collapsed kinds carry an intent, so every other platform keeps the white/dashed
-      // route it has always had. Both halves are per-kind on purpose: this is a change to how the
-      // road-routing chassis read, not a new colour scheme for the whole map.
-      collapse,
-      intent: collapse ? routeIntentOf(i) : undefined,
+      intent: routeIntentOf(i),
     });
   }
   routes.drawMany(draw, theaterMap.heightAt);

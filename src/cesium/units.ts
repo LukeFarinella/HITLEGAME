@@ -2092,11 +2092,6 @@ export class UnitField {
     return !!this.units[index]?.rtsc?.assist;
   }
 
-  /** What chassis this unit is, so the presentation layer can style by kind. */
-  kindOf(index: number): UnitKind | null {
-    return this.units[index]?.kind ?? null;
-  }
-
   /**
    * Whether this unit is FIGHTING right now, by order or by necessity.
    *
