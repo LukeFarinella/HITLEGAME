@@ -201,9 +201,14 @@
 
           <!-- MATCH: everything that only means something with a skirmish running. -->
           <div class="dev-sect">MATCH</div>
+          <!-- The enemy is summoned, not scheduled. Everything about Millstone — the garrison, the
+               build-out, the wave ramp — starts from this button rather than from match start, so
+               the build order can be looked at without a clock running over the top of it. -->
+          <button class="dev-regen dev-primary" id="dev-millstone-seed" type="button">▲ SEED MILLSTONE NOW</button>
+          <p class="dev-note" id="dev-millstone-note">—</p>
           <label class="dev-check" for="dev-millstone">
-            <input type="checkbox" id="dev-millstone" checked />
-            <span>Millstone attacks (next match)</span>
+            <input type="checkbox" id="dev-millstone" />
+            <span>Auto-seed Millstone on a new match</span>
           </label>
           <div class="dev-k">Grant</div>
           <div class="dev-grants">

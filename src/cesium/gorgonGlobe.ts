@@ -2908,10 +2908,28 @@ let devLadderSig = '';
  */
 function tickDevLadder(): void {
   if (el('dev-panel')?.hasAttribute('hidden') !== false) return;
-  const sig = `${activeSlot()}|${campaignProgress().done}|${currentMission()?.id ?? '-'}|${rtsMission?.id ?? '-'}|${rtsEnded}`;
+  const foe = millstone && !millstone.destroyed ? `${millstone.waveN}|${millstone.structures.length}` : '-';
+  const sig =
+    `${activeSlot()}|${campaignProgress().done}|${currentMission()?.id ?? '-'}|${rtsMission?.id ?? '-'}|` +
+    `${rtsEnded}|${!!rtsGame}|${foe}`;
   if (sig === devLadderSig) return;
   devLadderSig = sig;
   refreshDevLadder();
+  refreshDevMillstone();
+}
+
+/** Say what the SEED button would do, and what Millstone is up to once it has been pressed. */
+function refreshDevMillstone(): void {
+  const standing = !!millstone && !millstone.destroyed;
+  setText(
+    'dev-millstone-note',
+    !rtsGame || rtsEnded
+      ? 'Deploy to a theater first.'
+      : standing
+        ? `Standing: wave ${millstone!.waveN}, ${millstone!.structures.length} buildings, ` +
+          `supply ${millstone!.supplyCap()}. Next wave ${Math.round(millstone!.nextWaveS(rtsGame.unrestPressure))}s.`
+        : 'Nothing hostile in this theater. The wave clock and the enemy build-out both start here.',
+  );
 }
 
 function refreshDevLadder(): void {
@@ -3245,26 +3263,10 @@ function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
     }
   }
 
-  // Millstone stands its base up across the map: a Nexus on a surveyed site at raiding distance,
-  // a garrison around it, and the wave clock starts running.
-  //
-  // HELD OFF BY DEFAULT while the economy and tech tree are being tuned — an attacker arriving at
-  // 150 s makes it impossible to judge whether the BUILD ORDER feels good, which is the question on
-  // the table. The whole enemy is intact behind this flag; flip it to bring the fight back.
+  // Millstone is seeded here only if the flag says so — see millstoneEnabled and seedMillstone.
   rtsEnded = false;
   millstone = null;
-  if (millstoneEnabled) {
-    millstone = pickMillstoneBase();
-    if (millstone) {
-      rtsBuild.setEnemyNexus(millstone.lon, millstone.lat);
-      refreshEnemyBase();
-      if (unitField) {
-        for (const g of millstone.garrison()) {
-          unitField.spawnRtsEnemy(g.kind, g.lon, g.lat, armamentOf(g.kind), true);
-        }
-      }
-    }
-  }
+  if (millstoneEnabled) seedMillstone();
 
   rtsCmd = new RtsCommandBar({
     money: () => rtsGame?.money ?? 0,
@@ -4675,6 +4677,33 @@ function pickMillstoneBase(): MillstoneDirector | null {
   }
   // index -1: Millstone stands on open ground now, not on one of the player's build slots.
   return best ? new MillstoneDirector({ index: -1, lon: best.lon, lat: best.lat }) : null;
+}
+
+/**
+ * Stand Millstone up in the CURRENT match: base, garrison, build plan and wave clock.
+ *
+ * Separate from match setup and callable at any time, because an opponent that arrives on its own
+ * timetable makes the build order impossible to look at. The first wave lands at 150 s whether or
+ * not you were ready, and while the economy and the base flow are the things being worked on, that
+ * is a clock running over the top of the thing you are trying to read. So the enemy waits for the
+ * dev panel's SEED MILLSTONE now, and everything about it — the wave ramp, the build-out, the
+ * garrison — starts from the moment it is pressed rather than from the start of the match.
+ *
+ * Returns false if there was nothing to seed onto, or if Millstone is already standing.
+ */
+function seedMillstone(): boolean {
+  if (!rtsGame || !rtsBuild || rtsEnded) return false;
+  if (millstone && !millstone.destroyed) return false;
+  const m = pickMillstoneBase();
+  if (!m) return false;
+  millstone = m;
+  rtsBuild.setEnemyNexus(m.lon, m.lat);
+  refreshEnemyBase();
+  if (unitField) {
+    for (const g of m.garrison()) unitField.spawnRtsEnemy(g.kind, g.lon, g.lat, armamentOf(g.kind), true);
+  }
+  updateRtsHud();
+  return true;
 }
 
 /**
@@ -6349,18 +6378,19 @@ let rtsSelectedStructure: Structure | null = null;
 let rtsUnitCard: RtsUnitCard | null = null;
 
 /**
- * Whether Millstone fights this match.
+ * Whether a match SEEDS Millstone automatically when it opens.
  *
- * ON, now that the ladder exists. It was held off while the economy and tech tree were being tuned —
- * an attacker arriving at 150 s makes it impossible to judge whether the BUILD ORDER feels good —
- * but razing Millstone's Nexus is the only thing that clears a mission, so with the enemy absent
- * every theater on the board is unwinnable and the campaign has no end.
+ * Off. Razing Millstone's Nexus is still the only thing that clears a mission, so a campaign match
+ * needs an enemy eventually — but an enemy that arrives on its own timetable makes the build order
+ * impossible to look at, and the build order is what is being worked on. So the enemy is now
+ * summoned rather than scheduled: the dev panel's SEED MILLSTONE stands it up in the running match
+ * whenever you are ready for it (see seedMillstone), and this flag only decides whether a NEW match
+ * does it for you.
  *
- * Nothing about the enemy is conditional beyond this flag: with it off the base simply isn't seeded
- * and the wave clock never runs. Toggle in the dev panel (RTS ▸ MILLSTONE) or via
- * `__gorgon.setMillstoneEnabled(false)`; it takes effect on the NEXT match.
+ * Nothing about the enemy is conditional beyond the seeding: with none standing the wave clock never
+ * runs and the build-out never starts, because both hang off `millstone` being non-null.
  */
-let millstoneEnabled = true;
+let millstoneEnabled = false;
 /** Screen-space radius for clicking a structure. */
 const STRUCTURE_PICK_PX = 30;
 
@@ -7533,7 +7563,10 @@ bindInterfaceSounds();
   gear?.addEventListener('click', () => {
     // Paint immediately on open so the panel is never blank for a frame; tickDevLadder keeps it
     // honest from then on.
-    if (panel?.hidden) refreshDevLadder();
+    if (panel?.hidden) {
+      refreshDevLadder();
+      refreshDevMillstone();
+    }
     setDev(!!panel?.hidden);
   });
   el('dev-close')?.addEventListener('click', () => setDev(false));
@@ -7717,9 +7750,29 @@ bindInterfaceSounds();
     mill.checked = millstoneEnabled;
     mill.addEventListener('change', () => {
       millstoneEnabled = mill.checked;
-      toast(mill.checked ? '◈ MILLSTONE ENABLED · STARTS NEXT MATCH' : '◈ MILLSTONE DISABLED · NEXT MATCH');
+      toast(mill.checked ? '◈ MILLSTONE WILL SEED ON A NEW MATCH' : '◈ MILLSTONE WILL NOT SEED AUTOMATICALLY');
     });
   }
+
+  el('dev-millstone-seed')?.addEventListener('click', () => {
+    if (!rtsGame || rtsEnded) {
+      sound.play('denied');
+      toast('◈ DEPLOY TO A THEATER FIRST');
+      return;
+    }
+    if (millstone && !millstone.destroyed) {
+      sound.play('denied');
+      toast('◈ MILLSTONE IS ALREADY STANDING');
+      return;
+    }
+    if (!seedMillstone()) {
+      sound.play('denied');
+      toast('◈ NO GROUND FOR A MILLSTONE BASE IN THIS THEATER');
+      return;
+    }
+    sound.play('alert');
+    toast(`◈ MILLSTONE SEEDED · FIRST WAVE IN ${Math.round(MILLSTONE.FIRST_WAVE_S)}s`);
+  });
 
   el('dev-regen')?.addEventListener('click', regenerateBuildings);
 
