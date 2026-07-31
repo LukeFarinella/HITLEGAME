@@ -1474,6 +1474,7 @@ scene.preUpdate.addEventListener(() => {
       rtsGame.tickUnrest(dt);
       runRtsObjectives(dt);
       refreshUnrestRings();
+      runMillstoneBuild(dt);
       runMillstone(dt);
       runRtsCombat(dt);
       rtsGame.tickUnits(dt); // shield/energy regen
@@ -3256,6 +3257,7 @@ function setupRtsBuild(map: TheaterMap, net: RoadNet | undefined): void {
     millstone = pickMillstoneBase();
     if (millstone) {
       rtsBuild.setEnemyNexus(millstone.lon, millstone.lat);
+      refreshEnemyBase();
       if (unitField) {
         for (const g of millstone.garrison()) {
           unitField.spawnRtsEnemy(g.kind, g.lon, g.lat, armamentOf(g.kind), true);
@@ -3925,6 +3927,8 @@ const STRUCT_GLYPH: Record<StructureType, string> = {
   special: 'S',
   turret: 'G',
   flak: 'F',
+  generator: 'P',
+  residence: 'B',
 };
 const STRUCT_ACCENT: Record<StructureType, string> = {
   nexus: '#E23A2E',
@@ -3939,6 +3943,8 @@ const STRUCT_ACCENT: Record<StructureType, string> = {
   special: '#E0553F',
   turret: '#C9CDD2',
   flak: '#9AA6C4',
+  generator: '#C4E04A',
+  residence: '#8FBF6F',
 };
 
 /**
@@ -4671,6 +4677,38 @@ function pickMillstoneBase(): MillstoneDirector | null {
   return best ? new MillstoneDirector({ index: -1, lon: best.lon, lat: best.lat }) : null;
 }
 
+/**
+ * Let Millstone put one building up, if it is due and there is anywhere legal to put it.
+ *
+ * The director proposes candidate points around one of its power anchors; this picks the first that
+ * is on land, inside the theater, and clear of what it has already built. If none of the fourteen
+ * work — a generator on the coast reaching out over water, say — nothing is built and it tries again
+ * on the next tick, which is the right outcome: a base hemmed in by terrain SHOULD grow slower.
+ */
+function runMillstoneBuild(dt: number): void {
+  if (!millstone || millstone.destroyed || !theaterMap || !theaterCenter) return;
+  const plan = millstone.planBuild(dt);
+  if (!plan) return;
+  for (const c of plan.candidates) {
+    if (theaterMap.heightAt(c.lon, c.lat) < 1) continue; // at sea
+    if (metresBetween(c.lon, c.lat, theaterCenter.lon, theaterCenter.lat) > THEATER_RADIUS_M * RIM_FADE_START) continue;
+    if (!millstone.spacedFrom(c.lon, c.lat)) continue;
+    millstone.place(plan.type, c.lon, c.lat);
+    refreshEnemyBase();
+    return;
+  }
+}
+
+/** Redraw Millstone's base after it builds or loses something. */
+function refreshEnemyBase(): void {
+  if (!rtsBuild) return;
+  rtsBuild.setEnemyFacilities(
+    millstone && !millstone.destroyed
+      ? millstone.structures.map((s) => ({ id: s.id, type: s.type, lon: s.lon, lat: s.lat }))
+      : [],
+  );
+}
+
 /** Advance Millstone's wave clock and field anything it sends. */
 function runMillstone(dt: number): void {
   if (!millstone || !unitField || rtsEnded) return;
@@ -4731,6 +4769,18 @@ function rtsStructTargets(): RtsStructTarget[] {
   }
   if (millstone && !millstone.destroyed) {
     out.push({ id: ENEMY_NEXUS_ID, side: 1, lon: millstone.lon, lat: millstone.lat, radiusM: STRUCTURES.nexus.footprintM });
+    // Everything Millstone has built. Offset ids so an enemy building can never collide with one of
+    // the player's — both sides' ids flow through the same hit events.
+    for (const s of millstone.structures) {
+      out.push({
+        id: ENEMY_ID_BASE - s.id,
+        side: 1,
+        lon: s.lon,
+        lat: s.lat,
+        radiusM: STRUCTURES[s.type].footprintM,
+        weapon: STRUCT_WEAPON[s.type],
+      });
+    }
   }
   return out;
 }
@@ -4812,6 +4862,31 @@ function applyStructureHit(hit: { id: number; dmg: number }): void {
     if (millstone && millstone.damage(hit.dmg)) onMillstoneRazed();
     return;
   }
+  if (hit.id <= ENEMY_ID_BASE) {
+    if (!millstone) return;
+    const eid = ENEMY_ID_BASE - hit.id;
+    const s = millstone.structures.find((x) => x.id === eid);
+    if (!s) return;
+    const type = s.type;
+    const lon = s.lon;
+    const lat = s.lat;
+    if (!millstone.damageStructure(eid, hit.dmg)) return;
+    const h = theaterMap?.heightAt(lon, lat) ?? 0;
+    blasts?.fire(lon, lat, h, STRUCTURES[type].footprintM);
+    combatAudio?.at('boomBig', Cesium.Cartesian3.fromDegrees(lon, lat, h));
+    combatAudio?.flush();
+    refreshEnemyBase();
+    // Say what levelling it BOUGHT, not just that it fell. A generator is ground they can no longer
+    // build on and a residence is a smaller wave; both are the reason to have gone there.
+    toast(
+      type === 'generator'
+        ? '◈ MILLSTONE GENERATOR DOWN · THEIR BUILD RANGE SHRINKS'
+        : type === 'residence'
+          ? `◈ MILLSTONE HOUSING DOWN · WAVE CAP ${millstone.supplyCap()}`
+          : '◈ MILLSTONE DEFENCE DOWN',
+    );
+    return;
+  }
   const s = rtsGame?.structures.find((x) => x.id === hit.id);
   if (!s) return;
   s.hp -= hit.dmg;
@@ -4857,6 +4932,10 @@ function onMillstoneRazed(): void {
   if (!millstone) return;
   blasts?.fire(millstone.lon, millstone.lat, theaterMap?.heightAt(millstone.lon, millstone.lat) ?? 0, 500);
   rtsBuild?.clearEnemyNexus();
+  // The base goes with the heart. Leaving generators and housing standing on a won map would say
+  // the match was not actually over.
+  millstone.structures.length = 0;
+  refreshEnemyBase();
   endRtsWith(true);
 }
 
@@ -6210,6 +6289,14 @@ let rtsEnded = false;
 const MILLSTONE_BEAM = Cesium.Color.fromCssColorString('#3FBF6F');
 /** The structure id the combat pass knows Millstone's Nexus by — no player id is ever negative. */
 const ENEMY_NEXUS_ID = -1;
+/**
+ * Where Millstone's building ids live in the shared id space.
+ *
+ * Combat hands hits back by id and does not know whose building it hit, so the two sides' ids must
+ * not collide. The player's count up from 1; the enemy's are -1000 downward, with the Nexus alone at
+ * -1. A gap that big is not going to be closed by either side building things.
+ */
+const ENEMY_ID_BASE = -1000;
 /** The RTS build layer (facility markers, site dots, placement ghost), or null outside a match. */
 let rtsBuild: RtsBuildLayer | null = null;
 /** The RTS build command bar, or null outside a match. */
@@ -8103,7 +8190,9 @@ if (import.meta.env.DEV) {
     runMillstone,
     runRtsCombat,
     rtsStructTargets,
+    runMillstoneBuild,
     applyStructureHit,
+    refreshEnemyBase,
     showRtsEnd,
     endRtsWith,
     RTS_COMBAT,

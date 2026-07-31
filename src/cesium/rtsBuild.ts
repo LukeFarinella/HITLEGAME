@@ -3,7 +3,7 @@ import type { RoadNet } from './roads';
 import { InstancedModelBatch } from './instancedModels';
 import {
   dataCenterMesh, roboticsMesh, acquisitionsMesh, harborMesh, skyhookMesh, techMesh, aviationMesh,
-  specialMesh, turretMesh, flakMesh,
+  specialMesh, turretMesh, flakMesh, generatorMesh, residenceMesh,
 } from './unitModels';
 import {
   STRUCTURES,
@@ -31,6 +31,23 @@ import {
 const mPerLat = 111_320;
 const DEG = Math.PI / 180;
 
+/**
+ * Millstone's colour, for everything of theirs on the map.
+ *
+ * The same green the enemy Nexus marker has always worn. Whose a building is outranks what it is:
+ * "is that mine" is the first question anyone asks of a structure on this map, and a Millstone
+ * generator in the player's yellow would be answering the second question first.
+ */
+const HOSTILE = Cesium.Color.fromCssColorString('#3FBF6F');
+
+/** One placed building in a mesh batch. `foe` is what makes it wear Millstone's colour. */
+interface FacilityInstance {
+  id: number;
+  lon: number;
+  lat: number;
+  foe?: boolean;
+}
+
 /** A surveyed obelisk position: where an obelisk MAY be built. */
 export interface BuildSite {
   index: number; // global obelisk index
@@ -52,6 +69,8 @@ const FACILITY_COLOR: Record<StructureType, string> = {
   special: '#E0553F',
   turret: '#C9CDD2',
   flak: '#9AA6C4',
+  generator: '#C4E04A',
+  residence: '#8FBF6F',
 };
 
 /** A short glyph per facility, drawn into the billboard so a base reads at a glance. */
@@ -68,11 +87,18 @@ const FACILITY_GLYPH: Record<StructureType, string> = {
   special: 'S',
   turret: 'G',
   flak: 'F',
+  generator: 'P',
+  residence: 'B',
 };
 
 /** The facilities that render as a 3D building. Obelisks/the Nexus render as obelisk geometry. */
-type FacilityType = 'supply' | 'robotics' | 'acquisitions' | 'harbor' | 'skyhook' | 'tech' | 'aviation' | 'special' | 'turret' | 'flak';
-const FACILITY_TYPES: FacilityType[] = ['supply', 'robotics', 'acquisitions', 'harbor', 'skyhook', 'tech', 'aviation', 'special', 'turret', 'flak'];
+type FacilityType =
+  | 'supply' | 'robotics' | 'acquisitions' | 'harbor' | 'skyhook' | 'tech' | 'aviation' | 'special'
+  | 'turret' | 'flak' | 'generator' | 'residence';
+const FACILITY_TYPES: FacilityType[] = [
+  'supply', 'robotics', 'acquisitions', 'harbor', 'skyhook', 'tech', 'aviation', 'special',
+  'turret', 'flak', 'generator', 'residence',
+];
 /** Built once at module load — one shared mesh per facility type. */
 const FACILITY_MESH: Record<FacilityType, ReturnType<typeof dataCenterMesh>> = {
   supply: dataCenterMesh(),
@@ -85,13 +111,15 @@ const FACILITY_MESH: Record<FacilityType, ReturnType<typeof dataCenterMesh>> = {
   special: specialMesh(),
   turret: turretMesh(),
   flak: flakMesh(),
+  generator: generatorMesh(),
+  residence: residenceMesh(),
 };
 /** Per-type mesh scale so each building reads at theater zoom. */
 // The skyhook is scaled DOWN relative to the others because its mesh is already ~130 m tall before
 // scale; at 2.4 it would tower absurdly over a city rather than impressively.
 // The two defences are scaled UP relative to their mesh, not down: they are small objects that
 // still have to be findable on a 320 km disc.
-const FACILITY_SCALE: Record<FacilityType, number> = { supply: 2.4, robotics: 2.4, acquisitions: 2.4, harbor: 2.4, skyhook: 1.6, tech: 2.6, aviation: 2.4, special: 2.5, turret: 3.6, flak: 3.4 };
+const FACILITY_SCALE: Record<FacilityType, number> = { supply: 2.4, robotics: 2.4, acquisitions: 2.4, harbor: 2.4, skyhook: 1.6, tech: 2.6, aviation: 2.4, special: 2.5, turret: 3.6, flak: 3.4, generator: 2.6, residence: 2.4 };
 const isFacilityType = (t: StructureType): t is FacilityType => (FACILITY_TYPES as StructureType[]).includes(t);
 
 /**
@@ -245,6 +273,32 @@ function facilityTexture(type: StructureType): HTMLCanvasElement {
 }
 
 /** The Millstone Nexus chip — the nexus glyph in hostile green. Built once, cached. */
+/** The facility chip in Millstone's green — an enemy building, whatever type it happens to be. */
+const foeTexCache = new Map<StructureType, HTMLCanvasElement>();
+function enemyFacilityTexture(type: StructureType): HTMLCanvasElement {
+  const hit = foeTexCache.get(type);
+  if (hit) return hit;
+  const c = document.createElement('canvas');
+  c.width = 64;
+  c.height = 64;
+  const g = c.getContext('2d')!;
+  const color = HOSTILE.toCssColorString();
+  g.fillStyle = 'rgba(10,12,16,0.9)';
+  g.strokeStyle = color;
+  g.lineWidth = 4;
+  g.beginPath();
+  g.roundRect(6, 6, 52, 52, 12);
+  g.fill();
+  g.stroke();
+  g.fillStyle = color;
+  g.font = '700 34px ui-monospace, monospace';
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillText(FACILITY_GLYPH[type], 32, 36);
+  foeTexCache.set(type, c);
+  return c;
+}
+
 let enemyNexusTex: HTMLCanvasElement | null = null;
 function enemyNexusTexture(): HTMLCanvasElement {
   if (enemyNexusTex) return enemyNexusTex;
@@ -306,8 +360,10 @@ export class RtsBuildLayer {
   // nowhere to record its instances — the previous hand-written literal was one line per type and
   // one more thing to forget.
   private facilityList = Object.fromEntries(
-    FACILITY_TYPES.map((t) => [t, [] as { id: number; lon: number; lat: number }[]]),
-  ) as Record<FacilityType, { id: number; lon: number; lat: number }[]>;
+    FACILITY_TYPES.map((t) => [t, [] as FacilityInstance[]]),
+  ) as Record<FacilityType, FacilityInstance[]>;
+  /** Ring + icon per ENEMY building id, kept apart so a rebuild can drop them all in one pass. */
+  private enemyVisuals = new Map<number, { ring: Cesium.Polyline; icon: Cesium.Billboard }>();
   /** Ring + icon per structure id, so a destroyed structure can take its chrome down with it. */
   private structureVisuals = new Map<number, { ring: Cesium.Polyline; icon: Cesium.Billboard }>();
   /** The Millstone Nexus marker, present only during a match with an enemy still standing. */
@@ -393,6 +449,53 @@ export class RtsBuildLayer {
   }
 
   /**
+   * Replace the whole of Millstone's built base.
+   *
+   * Wholesale rather than incremental: the enemy puts up a building every thirty-odd seconds and
+   * loses them in raids, so the list is short and changes rarely, and a rebuild that cannot drift
+   * out of step with the director is worth more than the handful of allocations it costs.
+   */
+  setEnemyFacilities(list: { id: number; type: StructureType; lon: number; lat: number }[]): void {
+    for (const vis of this.enemyVisuals.values()) {
+      this.rings.remove(vis.ring);
+      this.icons.remove(vis.icon);
+    }
+    this.enemyVisuals.clear();
+    const touched = new Set<FacilityType>();
+    for (const t of FACILITY_TYPES) {
+      if (this.facilityList[t].some((f) => f.foe)) {
+        this.facilityList[t] = this.facilityList[t].filter((f) => !f.foe);
+        touched.add(t);
+      }
+    }
+
+    for (const b of list) {
+      const def = STRUCTURES[b.type];
+      const h = this.heightAt(b.lon, b.lat);
+      const ring = this.rings.add({
+        positions: ringPositions(b.lon, b.lat, def.footprintM, h + 25),
+        width: 2,
+        material: Cesium.Material.fromType('Color', { color: HOSTILE.withAlpha(0.7) }),
+      });
+      const icon = this.icons.add({
+        position: Cesium.Cartesian3.fromDegrees(b.lon, b.lat, h + 220),
+        image: enemyFacilityTexture(b.type),
+        width: 26,
+        height: 26,
+        verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+        distanceDisplayCondition: new Cesium.DistanceDisplayCondition(12_000, Number.MAX_VALUE),
+        disableDepthTestDistance: 1e12,
+      });
+      this.enemyVisuals.set(b.id, { ring, icon });
+      if (isFacilityType(b.type)) {
+        this.facilityList[b.type].push({ id: -1000 - b.id, lon: b.lon, lat: b.lat, foe: true });
+        touched.add(b.type);
+      }
+    }
+    for (const t of touched) this.rewriteFacilityBatch(t);
+  }
+
+  /**
    * Mark the Millstone Nexus: a hostile-green ring and glyph on the enemy's home site. The obelisk
    * pyramid under it is ambient network geometry, the way the player's own Nexus renders — the
    * marker is what says WHOSE it is.
@@ -432,7 +535,9 @@ export class RtsBuildLayer {
     batch.beginFrame();
     for (const inst of this.facilityList[ft]) {
       const world = Cesium.Cartesian3.fromDegrees(inst.lon, inst.lat, this.heightAt(inst.lon, inst.lat));
-      batch.setInstance(world, 0, FACILITY_SCALE[ft], color);
+      // Whose it is beats what it is: an enemy building wears Millstone's green whatever type it is,
+      // because "is that mine" is the first question anybody asks of a building on this map.
+      batch.setInstance(world, 0, FACILITY_SCALE[ft], inst.foe ? HOSTILE : color);
     }
     batch.endFrame();
   }

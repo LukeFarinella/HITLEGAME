@@ -864,6 +864,39 @@ export function flakMesh(): ModelMesh {
   return m.build();
 }
 
+/**
+ * Millstone's power generator: a squat reactor drum flanked by two cooling stacks.
+ *
+ * Nothing in Millstone's base looks like the player's, and this is why: GORGON runs on obelisks —
+ * clean vertical monuments that watch — and Millstone runs on a generator, which is industrial,
+ * horizontal and visibly burning something. Two ways of being powered, and you can tell whose base
+ * you are looking at from the silhouette alone.
+ */
+export function generatorMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  m.box(0, 0, 4, 46, 40, 8); // slab
+  m.box(0, 0, 18, 26, 26, 22); // reactor drum
+  m.box(0, 0, 31, 32, 32, 6); // drum cap
+  for (const sx of [-17, 17]) {
+    m.box(sx, 6, 26, 9, 9, 38); // cooling stacks
+    m.box(sx, 6, 47, 12, 12, 5); // stack crowns
+  }
+  m.box(0, -19, 12, 34, 6, 14); // switchgear along the front
+  return m.build();
+}
+
+/** Millstone's residence block: a bare slab of housing. Supply, drawn as the people it is made of. */
+export function residenceMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  m.box(0, 0, 2, 50, 30, 4); // podium
+  // Three slabs of differing height, so a row of them reads as a district rather than a repeat.
+  m.box(-15, 0, 24, 16, 24, 44);
+  m.box(2, 0, 30, 16, 24, 56);
+  m.box(19, 0, 20, 16, 24, 36);
+  for (const sx of [-15, 2, 19]) m.box(sx, 0, 50, 18, 26, 3); // roof caps
+  return m.build();
+}
+
 export type UnitKind =
   | 'land'
   | 'sea'

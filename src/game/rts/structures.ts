@@ -35,7 +35,12 @@ export type StructureType =
   | 'supply'
   | 'special'
   | 'turret'
-  | 'flak';
+  | 'flak'
+  // Millstone's economy. The player never builds these — they are the enemy's answer to the two
+  // questions the player answers with obelisks and data centers, and they exist so that the enemy
+  // base is a base you can take apart rather than one building with a health bar.
+  | 'generator'
+  | 'residence';
 
 /** Placeable structure types, in command-bar order. The Nexus is never built — you start with it. */
 export const BUILDABLE: StructureType[] = [
@@ -197,6 +202,28 @@ export const STRUCTURES: Record<StructureType, StructureDef> = {
     footprintM: 150,
     buildTimeS: 14,
     requires: { structure: 'supply' },
+  },
+  generator: {
+    type: 'generator',
+    name: 'POWER GENERATOR',
+    blurb: "Millstone's pylon. Projects the ground it may build on. Take one out and its base stops growing outward.",
+    cost: 0,
+    maxHp: 620,
+    placement: 'free',
+    hotkey: '',
+    footprintM: 200,
+    buildTimeS: 0,
+  },
+  residence: {
+    type: 'residence',
+    name: 'RESIDENCE BLOCK',
+    blurb: "Millstone's supply. Every block it holds is a bigger wave. Every block you level is a smaller one.",
+    cost: 0,
+    maxHp: 540,
+    placement: 'free',
+    hotkey: '',
+    footprintM: 220,
+    buildTimeS: 0,
   },
   supply: {
     type: 'supply',
