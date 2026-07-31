@@ -54,6 +54,15 @@ export interface Weapon {
    * anyway, because that is what a missile is for.
    */
   air?: boolean;
+  /**
+   * Whether this weapon can engage GROUND targets. Omitted means yes — almost everything can.
+   *
+   * The one thing that says otherwise is the flak launcher, and it needs saying because {@link air}
+   * only ever OPENS a weapon up: setting `air` on a missile rack lets it reach flyers, it does not
+   * stop it flattening infantry. A dedicated anti-air mount has to be able to refuse the ground, or
+   * the two defence buildings collapse into one building that shoots everything.
+   */
+  airOnly?: boolean;
 }
 
 /**
@@ -80,6 +89,11 @@ export const AERIAL_KINDS = new Set<UnitKind>(['quad', 'interceptor', 'drone', '
  */
 export function canHitAir(w: Weapon): boolean {
   return w.air ?? w.kind === 'ranged';
+}
+
+/** Whether a weapon can hit something on the ground. Everything can, except a dedicated AA mount. */
+export function canHitGround(w: Weapon): boolean {
+  return !w.airOnly;
 }
 
 // ---- basic attacks ------------------------------------------------------------------------------

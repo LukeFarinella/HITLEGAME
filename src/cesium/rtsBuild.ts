@@ -1,7 +1,10 @@
 import * as Cesium from 'cesium';
 import type { RoadNet } from './roads';
 import { InstancedModelBatch } from './instancedModels';
-import { dataCenterMesh, roboticsMesh, acquisitionsMesh, harborMesh, skyhookMesh, techMesh, aviationMesh, specialMesh } from './unitModels';
+import {
+  dataCenterMesh, roboticsMesh, acquisitionsMesh, harborMesh, skyhookMesh, techMesh, aviationMesh,
+  specialMesh, turretMesh, flakMesh,
+} from './unitModels';
 import {
   STRUCTURES,
   BUILD_RULES,
@@ -47,6 +50,8 @@ const FACILITY_COLOR: Record<StructureType, string> = {
   tech: '#8B6FE0',
   supply: '#3FBF6F',
   special: '#E0553F',
+  turret: '#C9CDD2',
+  flak: '#9AA6C4',
 };
 
 /** A short glyph per facility, drawn into the billboard so a base reads at a glance. */
@@ -61,11 +66,13 @@ const FACILITY_GLYPH: Record<StructureType, string> = {
   tech: 'T',
   supply: 'D',
   special: 'S',
+  turret: 'G',
+  flak: 'F',
 };
 
 /** The facilities that render as a 3D building. Obelisks/the Nexus render as obelisk geometry. */
-type FacilityType = 'supply' | 'robotics' | 'acquisitions' | 'harbor' | 'skyhook' | 'tech' | 'aviation' | 'special';
-const FACILITY_TYPES: FacilityType[] = ['supply', 'robotics', 'acquisitions', 'harbor', 'skyhook', 'tech', 'aviation', 'special'];
+type FacilityType = 'supply' | 'robotics' | 'acquisitions' | 'harbor' | 'skyhook' | 'tech' | 'aviation' | 'special' | 'turret' | 'flak';
+const FACILITY_TYPES: FacilityType[] = ['supply', 'robotics', 'acquisitions', 'harbor', 'skyhook', 'tech', 'aviation', 'special', 'turret', 'flak'];
 /** Built once at module load — one shared mesh per facility type. */
 const FACILITY_MESH: Record<FacilityType, ReturnType<typeof dataCenterMesh>> = {
   supply: dataCenterMesh(),
@@ -76,11 +83,15 @@ const FACILITY_MESH: Record<FacilityType, ReturnType<typeof dataCenterMesh>> = {
   tech: techMesh(),
   aviation: aviationMesh(),
   special: specialMesh(),
+  turret: turretMesh(),
+  flak: flakMesh(),
 };
 /** Per-type mesh scale so each building reads at theater zoom. */
 // The skyhook is scaled DOWN relative to the others because its mesh is already ~130 m tall before
 // scale; at 2.4 it would tower absurdly over a city rather than impressively.
-const FACILITY_SCALE: Record<FacilityType, number> = { supply: 2.4, robotics: 2.4, acquisitions: 2.4, harbor: 2.4, skyhook: 1.6, tech: 2.6, aviation: 2.4, special: 2.5 };
+// The two defences are scaled UP relative to their mesh, not down: they are small objects that
+// still have to be findable on a 320 km disc.
+const FACILITY_SCALE: Record<FacilityType, number> = { supply: 2.4, robotics: 2.4, acquisitions: 2.4, harbor: 2.4, skyhook: 1.6, tech: 2.6, aviation: 2.4, special: 2.5, turret: 3.6, flak: 3.4 };
 const isFacilityType = (t: StructureType): t is FacilityType => (FACILITY_TYPES as StructureType[]).includes(t);
 
 /**
@@ -130,6 +141,31 @@ class RoadGrid {
       }
     }
     return false;
+  }
+
+  /**
+   * True if NO road vertex lies within `radiusM` — "how far from anything is this".
+   *
+   * The same index read at a coarser scale: the cell is sized to the build rule's 450 m, so a 6 km
+   * query walks a 27×27 block of cells. Expensive per call and run a few dozen times at match start
+   * to place the enemy base, never per frame.
+   */
+  clear(lon: number, lat: number, radiusM: number): boolean {
+    const cx = Math.floor(lon / this.cellLon);
+    const cy = Math.floor(lat / this.cellLat);
+    // Cells are one ROAD_DIST_M across in both axes by construction, so the span is the same number
+    // of cells either way regardless of latitude.
+    const span = Math.ceil(radiusM / BUILD_RULES.ROAD_DIST_M);
+    for (let dy = -span; dy <= span; dy++) {
+      for (let dx = -span; dx <= span; dx++) {
+        const list = this.cells.get(this.key(cx + dx, cy + dy));
+        if (!list) continue;
+        for (const [vlon, vlat] of list) {
+          if (metresBetween(lon, lat, vlon, vlat) <= radiusM) return false;
+        }
+      }
+    }
+    return true;
   }
 }
 
@@ -608,5 +644,10 @@ export class RtsBuildLayer {
   /** Whether a point is close enough to a road for a facility. */
   nearRoad(lon: number, lat: number): boolean {
     return this.roadGrid.near(lon, lat);
+  }
+
+  /** Whether there is NO road within `radiusM` — how empty a piece of ground is. */
+  roadFree(lon: number, lat: number, radiusM: number): boolean {
+    return this.roadGrid.clear(lon, lat, radiusM);
   }
 }

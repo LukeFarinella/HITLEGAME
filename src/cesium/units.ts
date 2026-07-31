@@ -10,7 +10,7 @@ import {
   type UnitKind,
 } from './unitModels';
 import { PLATFORM_BY_ID, type PlatformId } from '../game/platforms';
-import { AERIAL_KINDS, canHitAir, type AttackKind, type Weapon } from '../game/rts/weapons';
+import { AERIAL_KINDS, canHitAir, canHitGround, type AttackKind, type Weapon } from '../game/rts/weapons';
 import type { RoadNet, RoadClass } from './roads';
 import { makeViolation, VIOLATION_TTL_S, type LiveViolation } from '../game/violations';
 import { RouteGraph } from './routeGraph';
@@ -1872,10 +1872,12 @@ export class UnitField {
         // A weapon that cannot shoot upward simply has no answer to a flyer, grudge or not: being
         // shot by a censer does not teach a siege battery how to elevate.
         const hitsAir = canHitAir(w);
+        const hitsGround = canHitGround(w);
+        const engages = (k: UnitKind): boolean => (AERIAL_KINDS.has(k) ? hitsAir : hitsGround);
         const grudge = c.threat?.index ?? -1;
         if (grudge >= 0) {
           const a = this.units[grudge];
-          if (a && !a.dead && a.rtsc && a.rtsc.side !== c.side && (hitsAir || !AERIAL_KINDS.has(a.kind))) {
+          if (a && !a.dead && a.rtsc && a.rtsc.side !== c.side && engages(a.kind)) {
             const d = this.distM(u, a.lon, a.lat);
             if (d <= bd) {
               bd = d;
@@ -1889,7 +1891,7 @@ export class UnitField {
             if (j === i) continue;
             const v = this.units[j];
             if (v.dead || !v.rtsc || v.rtsc.side === c.side) continue;
-            if (!hitsAir && AERIAL_KINDS.has(v.kind)) continue;
+            if (!engages(v.kind)) continue;
             const d = this.distM(u, v.lon, v.lat);
             if (d <= bd) {
               bd = d;
@@ -2129,10 +2131,14 @@ export class UnitField {
       let tj = -1;
       let bd = w.rangeM + s.radiusM;
       const structHitsAir = canHitAir(w);
+      const structHitsGround = canHitGround(w);
       for (const j of live) {
         const v = this.units[j];
         if (!v || v.dead || !v.rtsc || v.rtsc.side === s.side) continue;
-        if (!structHitsAir && AERIAL_KINDS.has(v.kind)) continue;
+        const aerial = AERIAL_KINDS.has(v.kind);
+        // Both directions of the rule. A gun emplacement cannot elevate; a flak launcher cannot
+        // depress. Either one alone would collapse the pair back into a single do-everything turret.
+        if (aerial ? !structHitsAir : !structHitsGround) continue;
         const d = this.distLL(s.lon, s.lat, v.lon, v.lat);
         if (d <= bd) {
           bd = d;

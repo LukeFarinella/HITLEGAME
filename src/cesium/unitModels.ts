@@ -825,6 +825,45 @@ export function specialMesh(): ModelMesh {
   return m.build();
 }
 
+/**
+ * Gun emplacement: a low armoured tub with a stubby barrel over it, pointing flat.
+ *
+ * Deliberately the smallest thing in the base and deliberately HORIZONTAL. Both defences have to be
+ * told apart from across a theater at a glance, and the only reliable cue at that size is which way
+ * the barrel points — flat means it answers the ground.
+ */
+export function turretMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  m.box(0, 0, 3, 26, 26, 6); // concrete pad
+  m.box(0, 0, 9, 18, 18, 8); // armoured tub
+  m.box(0, 0, 15, 12, 14, 6); // mantlet
+  m.box(0, 13, 15, 3.5, 16, 3.5); // barrel, level
+  m.box(0, 22, 15, 5, 4, 5); // muzzle brake
+  return m.build();
+}
+
+/**
+ * Flak launcher: the same pad under a rack of tubes angled UP.
+ *
+ * Shares the emplacement's base on purpose — they are the same class of thing, built at the same
+ * rung, and the difference between them should read as one detail rather than as two unrelated
+ * buildings. The detail is the elevation.
+ */
+export function flakMesh(): ModelMesh {
+  const m = new MeshBuilder();
+  m.box(0, 0, 3, 26, 26, 6); // same pad
+  m.box(0, 0, 9, 16, 16, 8); // turntable
+  // Four tubes in a block, raked back and up.
+  for (const sx of [-4, 4]) {
+    for (const sy of [-3, 3]) {
+      m.box(sx, sy - 2, 20, 3, 4, 20);
+      m.box(sx, sy - 5, 30, 3, 8, 12);
+    }
+  }
+  m.box(9, 0, 13, 5, 9, 7); // radar box off one shoulder
+  return m.build();
+}
+
 export type UnitKind =
   | 'land'
   | 'sea'

@@ -33,12 +33,28 @@ export type StructureType =
   | 'aviation'
   | 'tech'
   | 'supply'
-  | 'special';
+  | 'special'
+  | 'turret'
+  | 'flak';
 
 /** Placeable structure types, in command-bar order. The Nexus is never built — you start with it. */
 export const BUILDABLE: StructureType[] = [
-  'obelisk', 'supply', 'robotics', 'acquisitions', 'harbor', 'tech', 'aviation', 'special', 'skyhook',
+  'obelisk', 'supply', 'turret', 'flak', 'robotics', 'acquisitions', 'harbor', 'tech', 'aviation', 'special', 'skyhook',
 ];
+
+/**
+ * The two defences, and why they are two rather than one.
+ *
+ * A single turret that shot everything would make air a decoration: the whole point of the anti-air
+ * rule (see weapons/canHitAir — if it arcs, it cannot) is that a line built to face the ground has a
+ * hole over it, and a base is the place that costs the most. So the emplacement answers ground and
+ * nothing else, and the launcher answers air and almost nothing else. Covering a base means paying
+ * for both, and a base that paid for only one has a shape an attacker can find.
+ *
+ * They are cheap and they die: 550 HP against a wave is a speed bump, not a wall. Static defence is
+ * meant to buy the seconds it takes an army to arrive, never to replace it.
+ */
+export const DEFENCE_TYPES: StructureType[] = ['turret', 'flak'];
 
 export interface StructureDef {
   type: StructureType;
@@ -156,6 +172,32 @@ export const STRUCTURES: Record<StructureType, StructureDef> = {
     buildTimeS: 20,
     requires: { structure: 'robotics' },
   },
+  turret: {
+    type: 'turret',
+    name: 'GUN EMPLACEMENT',
+    blurb: 'Automated cannon. Hits ground only — anything with air over it needs the launcher instead. Cheap, and dies to a wave; it buys the seconds your army needs to arrive.',
+    cost: 175,
+    maxHp: 550,
+    placement: 'free',
+    hotkey: 'G',
+    footprintM: 150,
+    buildTimeS: 12,
+    // The first thing after a data center, because the first thing a new obelisk out on its own
+    // needs is something standing next to it.
+    requires: { structure: 'supply' },
+  },
+  flak: {
+    type: 'flak',
+    name: 'FLAK LAUNCHER',
+    blurb: 'Missile rack on a fixed mount. Answers AIR and nothing on the ground. The other half of a covered base.',
+    cost: 225,
+    maxHp: 500,
+    placement: 'free',
+    hotkey: 'F',
+    footprintM: 150,
+    buildTimeS: 14,
+    requires: { structure: 'supply' },
+  },
   supply: {
     type: 'supply',
     name: 'DATA CENTER',
@@ -260,6 +302,46 @@ export const NEXUS_LASER = {
   rangeM: 800,
   dmg: 22,
   periodS: 0.8,
+};
+
+/**
+ * What the two defences fire. Both sides build both, so these are the numbers for everybody.
+ *
+ * The EMPLACEMENT is a real gun and a bad answer to a wave: 34 a shot at 1100 m out-reaches every
+ * melee chassis in the game and most of the light guns, so a raiding party dies to it and a line
+ * walks through it. `air: false` is explicit rather than inherited — it is hitscan, so the default
+ * rule would let it shoot down aircraft, and the whole reason there are two buildings is that it
+ * must not.
+ *
+ * The LAUNCHER is missiles: projectiles, which normally cannot touch air at all, flipped to `air`
+ * because that is what a missile is for. Shorter-reaching than the gun and slower-firing, with
+ * splash that catches a flight rather than one flyer. Against ground it is useless, and that is the
+ * trade — two buildings, two holes, and a base that has to choose or pay twice.
+ */
+export const TURRET_GUN = {
+  name: 'EMPLACED CANNON',
+  kind: 'ranged' as const,
+  rangeM: 1100,
+  dmg: 34,
+  periodS: 1.1,
+  air: false,
+};
+
+export const FLAK_MISSILES = {
+  name: 'FLAK RACK',
+  kind: 'projectile' as const,
+  rangeM: 950,
+  dmg: 30,
+  periodS: 1.4,
+  speedMps: 1200,
+  splashM: 70,
+  air: true,
+  /**
+   * Ground is not a target for this. Nothing in the weapon model says "air ONLY" — `air` opens a
+   * weapon up rather than narrowing it — so the launcher's refusal to shoot at ground lives with the
+   * structure that fires it, in the scene's target pick.
+   */
+  airOnly: true,
 };
 
 /**

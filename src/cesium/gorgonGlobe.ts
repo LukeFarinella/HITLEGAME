@@ -57,12 +57,14 @@ import { RtsGame } from '../game/rts/rtsGame';
 import { RtsBuildLayer, type BuildSite } from './rtsBuild';
 import { RtsCommandBar, type CommandContext } from '../ui/rtsCommand';
 import {
-  STRUCTURES, BUILDABLE, BUILD_RULES, ABILITY_BY_ID, NEXUS_LASER, ORBITAL, abilitiesFrom, metresBetween,
+  STRUCTURES, BUILDABLE, BUILD_RULES, ABILITY_BY_ID, NEXUS_LASER, TURRET_GUN, FLAK_MISSILES, ORBITAL,
+  abilitiesFrom, metresBetween,
   type AbilityId, type StructureType, type Structure,
 } from '../game/rts/structures';
 import { RTS_UNITS, RTS_UNIT_LIST, unitsFrom, producesUnits, type RtsUnitId } from '../game/rts/units';
 import { RESEARCH, ALL_RESEARCH, researchFrom, type ResearchId } from '../game/rts/research';
 import { RTS_COMBAT, armamentOf } from '../game/rts/combat';
+import type { Weapon } from '../game/rts/weapons';
 import { MILLSTONE_BY_KIND, MILLSTONE_UNIT_LIST } from '../game/rts/millstoneUnits';
 import { MillstoneDirector, MILLSTONE } from '../game/rts/millstone';
 import { unrestLabel } from '../game/rts/unrest';
@@ -3921,6 +3923,8 @@ const STRUCT_GLYPH: Record<StructureType, string> = {
   tech: 'T',
   supply: 'D',
   special: 'S',
+  turret: 'G',
+  flak: 'F',
 };
 const STRUCT_ACCENT: Record<StructureType, string> = {
   nexus: '#E23A2E',
@@ -3933,6 +3937,8 @@ const STRUCT_ACCENT: Record<StructureType, string> = {
   tech: '#8B6FE0',
   supply: '#3FBF6F',
   special: '#E0553F',
+  turret: '#C9CDD2',
+  flak: '#9AA6C4',
 };
 
 /**
@@ -4282,8 +4288,16 @@ function validateObelisk(site: BuildSite): string | null {
   if (!rtsGame) return 'NO MATCH';
   if (rtsBuiltSites.has(site.index)) return 'ALREADY BUILT';
   if (theaterMap && theaterMap.heightAt(site.lon, site.lat) < 1) return 'AT SEA';
-  // Millstone's home site is not a build slot while Millstone is still standing on it.
-  if (millstone && !millstone.destroyed && site.index === millstone.siteIndex) return 'MILLSTONE HOLDS THIS SITE';
+  // Ground under the enemy base is not a build slot while Millstone is still standing on it. Tested
+  // by DISTANCE rather than by site index: Millstone sits on open ground now, not on one of the
+  // surveyed slots, so there is no index to compare against.
+  if (
+    millstone &&
+    !millstone.destroyed &&
+    metresBetween(site.lon, site.lat, millstone.lon, millstone.lat) < STRUCTURES.nexus.footprintM * 2
+  ) {
+    return 'MILLSTONE HOLDS THIS GROUND';
+  }
   // And that is the whole rule. An obelisk may stand on ANY surveyed site, however far from anything
   // you already own — see the note on validateFacility.
   return null;
@@ -4541,26 +4555,120 @@ function buildObeliskAt(siteIndex: number, lon: number, lat: number): void {
 // on either side ends the match.
 
 /**
- * Seed Millstone's base: the surveyed site nearest to raiding distance from the player's Nexus
- * that isn't at sea. Distance-targeted rather than "farthest" deliberately — the enemy should be a
- * march away, not a pilgrimage across a 300 km theater.
+ * Where Millstone puts its base.
+ *
+ * NOT a surveyed obelisk site. Those exist where people do — the field is derived from real
+ * locations — so choosing one put the enemy in a suburb, often on top of the ground the player was
+ * about to expand into, and made a base that is supposed to be somewhere else feel like a
+ * neighbour. Millstone is a rival network operating off the map, and it should look like it: out
+ * near the rim, up in whatever high ground the theater has, with no road within miles of it.
+ *
+ * So the candidates are arbitrary ground, sampled on a polar grid, and scored on three things.
+ */
+const MILLSTONE_SITE = {
+  /**
+   * Where in the theater the base sits, as a fraction of the disc radius.
+   *
+   * The far end and no further: the rim bokeh starts defocusing at RIM_FADE_START (0.78 of the
+   * radius) and everything past it is deliberately unreadable, so a base out there would be a base
+   * the player cannot see coming or plan against. 0.62–0.74 is as far away as it can be and still be
+   * a place rather than a blur.
+   */
+  BAND_MIN: 0.62,
+  BAND_MAX: 0.74,
+  /** Bearings sampled around the disc, and radii per bearing. 48 x 5 = 240 candidates. */
+  RAYS: 48,
+  STEPS: 5,
+  /** Ideal emptiness: no road within this. Scored, not required — some theaters have no such ground. */
+  ROAD_CLEAR_M: 6_000,
+  /** The consolation prize when nothing is properly remote. */
+  ROAD_QUIET_M: 2_000,
+} as const;
+
+/**
+ * Seed Millstone's base on the most remote, roadless, elevated ground in the outer band.
+ *
+ * Scored rather than filtered, because every one of these preferences is unsatisfiable on some
+ * theater: an Illinois disc has no mountains, a Los Angeles disc has no roadless ground, and a
+ * requirement that cannot be met on a real map is a crash waiting for the right save. The score
+ * degrades instead — the base lands in the emptiest, highest ground that exists, whatever that
+ * happens to be.
  */
 function pickMillstoneBase(): MillstoneDirector | null {
-  if (!rtsGame || !theaterMap) return null;
+  if (!rtsGame || !theaterMap || !theaterCenter) return null;
   const nexus = rtsGame.nexus;
   if (!nexus) return null;
-  let best: BuildSite | null = null;
-  let bestScore = Infinity;
-  for (const s of inTheaterObeliskSites()) {
-    if (s.index === rtsGame.nexusIndex) continue;
-    if (theaterMap.heightAt(s.lon, s.lat) < 1) continue;
-    const score = Math.abs(metresBetween(s.lon, s.lat, nexus.lon, nexus.lat) - MILLSTONE.BASE_RANGE_M);
-    if (score < bestScore) {
-      bestScore = score;
-      best = s;
+  const map = theaterMap;
+  const mLon = 111_320 * Math.max(0.15, Math.cos((theaterCenter.lat * Math.PI) / 180));
+
+  // Elevation is scored against the theater's own ground, not an absolute: 400 m is a mountain in
+  // Ohio and a valley floor in Colorado, and "the high ground here" is what actually matters.
+  let refSum = 0;
+  let refN = 0;
+  for (let k = 0; k < 64; k++) {
+    const a = (k / 64) * Math.PI * 2;
+    const r = THEATER_RADIUS_M * 0.35;
+    const h = map.heightAt(theaterCenter.lon + (Math.cos(a) * r) / mLon, theaterCenter.lat + (Math.sin(a) * r) / 111_320);
+    if (h > 0) {
+      refSum += h;
+      refN++;
     }
   }
-  return best ? new MillstoneDirector(best) : null;
+  const refH = refN ? refSum / refN : 0;
+
+  let best: { lon: number; lat: number } | null = null;
+  let bestScore = -Infinity;
+  for (let i = 0; i < MILLSTONE_SITE.RAYS; i++) {
+    // Offset the bearings by a fixed fraction so the ray fan is never axis-aligned with the grid.
+    const a = ((i + 0.37) / MILLSTONE_SITE.RAYS) * Math.PI * 2;
+    for (let j = 0; j < MILLSTONE_SITE.STEPS; j++) {
+      const f =
+        MILLSTONE_SITE.BAND_MIN +
+        (j / Math.max(1, MILLSTONE_SITE.STEPS - 1)) * (MILLSTONE_SITE.BAND_MAX - MILLSTONE_SITE.BAND_MIN);
+      const r = THEATER_RADIUS_M * f;
+      const lon = theaterCenter.lon + (Math.cos(a) * r) / mLon;
+      const lat = theaterCenter.lat + (Math.sin(a) * r) / 111_320;
+
+      const h = map.heightAt(lon, lat);
+      if (h < 1) continue; // at sea — a Nexus needs ground under it
+      const fromNexus = metresBetween(lon, lat, nexus.lon, nexus.lat);
+      if (fromNexus < MILLSTONE.BASE_RANGE_M) continue; // never within raiding distance of the player
+
+      // EMPTINESS dominates. This is the one the player will read as "they are out in the middle of
+      // nowhere", and it is worth more than either of the others.
+      const empty = rtsBuild?.roadFree(lon, lat, MILLSTONE_SITE.ROAD_CLEAR_M)
+        ? 1000
+        : rtsBuild?.roadFree(lon, lat, MILLSTONE_SITE.ROAD_QUIET_M)
+          ? 400
+          : 0;
+      // HIGH GROUND next, capped so one absurd peak can't outweigh being properly remote.
+      const high = Math.max(0, Math.min(300, ((h - refH) / 400) * 300));
+      // DISTANCE last, as a tie-break within the band rather than a driver.
+      const far = (fromNexus / THEATER_RADIUS_M) * 100;
+
+      const score = empty + high + far;
+      if (score > bestScore) {
+        bestScore = score;
+        best = { lon, lat };
+      }
+    }
+  }
+
+  // Nothing in the band was land at all — an island theater, or one that is mostly ocean. Fall back
+  // to the old behaviour so the match still has an opponent rather than silently having none.
+  if (!best) {
+    for (const s of inTheaterObeliskSites()) {
+      if (s.index === rtsGame.nexusIndex) continue;
+      if (map.heightAt(s.lon, s.lat) < 1) continue;
+      const d = Math.abs(metresBetween(s.lon, s.lat, nexus.lon, nexus.lat) - MILLSTONE.BASE_RANGE_M);
+      if (d < bestScore || bestScore === -Infinity) {
+        bestScore = d;
+        best = { lon: s.lon, lat: s.lat };
+      }
+    }
+  }
+  // index -1: Millstone stands on open ground now, not on one of the player's build slots.
+  return best ? new MillstoneDirector({ index: -1, lon: best.lon, lat: best.lat }) : null;
 }
 
 /** Advance Millstone's wave clock and field anything it sends. */
@@ -4592,6 +4700,20 @@ function runMillstone(dt: number): void {
   toast(`◈ MILLSTONE WAVE ${millstone.waveN} INBOUND · ${fielded} UNITS`);
 }
 
+/**
+ * What each building shoots with, if anything.
+ *
+ * Three armed buildings and seven unarmed ones. The Nexus carries its battery so being nibbled by
+ * harassment isn't free (see NEXUS_LASER); the two defences are the ones you build ON PURPOSE when
+ * you want ground held. Everything else is a target, which is what makes an undefended expansion a
+ * real decision rather than a formality.
+ */
+const STRUCT_WEAPON: Partial<Record<StructureType, Weapon>> = {
+  nexus: NEXUS_LASER,
+  turret: TURRET_GUN,
+  flak: FLAK_MISSILES,
+};
+
 /** Every structure combat can march on or shoot at, both sides, rebuilt each tick. */
 function rtsStructTargets(): RtsStructTarget[] {
   const out: RtsStructTarget[] = [];
@@ -4603,8 +4725,7 @@ function rtsStructTargets(): RtsStructTarget[] {
         lon: s.lon,
         lat: s.lat,
         radiusM: STRUCTURES[s.type].footprintM,
-        // The Nexus is the one building that shoots back. See NEXUS_LASER for what it is sized to do.
-        weapon: s.type === 'nexus' ? NEXUS_LASER : undefined,
+        weapon: STRUCT_WEAPON[s.type],
       });
     }
   }
