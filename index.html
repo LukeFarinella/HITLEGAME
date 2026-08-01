@@ -77,6 +77,9 @@
         <div class="c2-body" id="c2-mission-list"></div>
       </div>
 
+      <!-- Says the sim is stopped, so a paused game is never mistaken for a hung one. -->
+      <div id="g-paused-bar" hidden>◼ PAUSED · PRESS P OR ❚❚ TO RESUME</div>
+
       <!-- Transient notice (e.g. clicking ground you don't hold) -->
       <div id="g-toast" hidden></div>
 
@@ -177,6 +180,10 @@
           <p class="dev-note">Music plays across the menus and world map, and rests while you're in a theater.</p>
         </div>
       </div>
+
+      <!-- Freeze the simulation. Sits beside the gear because it is the other thing you reach for
+           when you want to LOOK at the game rather than play it. -->
+      <button id="g-pause" type="button" aria-label="Pause" title="Pause (P)">❚❚</button>
 
       <!-- Dev settings -->
       <button id="dev-toggle" type="button" aria-label="Dev settings" title="Dev settings">⚙</button>

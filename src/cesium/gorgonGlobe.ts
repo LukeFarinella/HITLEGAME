@@ -1441,9 +1441,33 @@ function updateUnitHud() {
 // are what gets drawn this frame. Real wall-clock dt (the Cesium clock is frozen for the studio
 // light), clamped inside tick() so a backgrounded tab doesn't teleport everyone.
 let lastTickMs = performance.now();
+
+/**
+ * Whether the SIMULATION is stopped. The scene keeps rendering and the camera keeps working.
+ *
+ * Implemented as a gate on dt rather than as a flag every subsystem has to check: paused simply
+ * means no time passes, so nothing moves, no clock advances, no wave is due and no round lands —
+ * and nothing downstream needed a single line changed to respect it. The camera, the selection, the
+ * panels and the build menus all keep working, which is the point: pause is for LOOKING at the game,
+ * not for taking the screen away.
+ */
+let paused = false;
+
+function setPaused(on: boolean): void {
+  if (paused === on) return;
+  paused = on;
+  // Reset the clock on resume, or the pause duration arrives as one enormous dt and teleports
+  // everything that was mid-route.
+  lastTickMs = performance.now();
+  el('g-pause')?.classList.toggle('on', on);
+  const bar = el('g-paused-bar');
+  if (bar) bar.hidden = !on;
+  sound.play(on ? 'rescind' : 'click');
+}
+
 scene.preUpdate.addEventListener(() => {
   const now = performance.now();
-  const dt = (now - lastTickMs) / 1000;
+  const dt = paused ? 0 : (now - lastTickMs) / 1000;
   lastTickMs = now;
   tickDevLadder();
   if (unitField) {
@@ -6649,6 +6673,11 @@ function updateChrome() {
   );
   const title = el('g-title');
   if (title) title.style.display = mode === 'globe' ? '' : 'none';
+  // Pause belongs to the theater. On the globe there is no simulation to stop, and a dead control
+  // sitting next to a live one is worse than no control.
+  const pause = el('g-pause');
+  if (pause) (pause as HTMLButtonElement).hidden = mode !== 'theater';
+  if (mode !== 'theater' && paused) setPaused(false);
   const exit = el('g-exit');
   if (exit) {
     (exit as HTMLButtonElement).hidden = mode !== 'theater';
@@ -7422,6 +7451,7 @@ window.addEventListener('blur', () => {
 // In a campaign this is "back to the world map"; in an RTS match there is no world map, so it ends
 // the skirmish and returns to the title.
 el('g-exit')?.addEventListener('click', () => (rtsGame ? endRtsMatch() : exitTheater()));
+el('g-pause')?.addEventListener('click', () => setPaused(!paused));
 
 // The siege alert is a jump-to: an attack you can't see is one you can't do anything about.
 el('g-incident')?.addEventListener('click', () => {
@@ -8090,6 +8120,12 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   // RTS build hotkeys + placement cancel take the key before anything else in a match.
+  // P pauses from anywhere in a theater, campaign or match. Not inside the RTS block below, because
+  // freezing the sim is not an RTS-only idea and the key is not one the build menus want.
+  if ((e.key === 'p' || e.key === 'P') && !e.repeat && mode === 'theater') {
+    setPaused(!paused);
+    return;
+  }
   if (rtsGame) {
     if (e.key === 'Escape') {
       // Escape backs out of the INNERMOST thing and stops there. An open sheet is the innermost:
@@ -8244,6 +8280,11 @@ if (import.meta.env.DEV) {
     runRtsCombat,
     rtsStructTargets,
     runMillstoneBuild,
+    seedMillstone,
+    setPaused,
+    get paused() {
+      return paused;
+    },
     applyStructureHit,
     refreshEnemyBase,
     showRtsEnd,

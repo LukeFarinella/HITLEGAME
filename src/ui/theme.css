@@ -288,6 +288,48 @@ body:has(#globe-ui) #hint { display: none; }
 #dev-toggle:hover, #dev-toggle.active { color: var(--bone); border-color: var(--steel); }
 #dev-toggle:focus-visible { outline: 2px solid var(--steel); outline-offset: 2px; }
 
+/* Pause: the gear's twin, one slot to its left. Same chrome so they read as a pair of controls on
+   the same shelf rather than as two unrelated buttons that happen to be near each other. */
+#g-pause {
+  position: absolute;
+  top: calc(56px + env(safe-area-inset-top, 0px));
+  right: calc(clamp(20px, 4vw, 44px) + 40px);
+  z-index: 80;
+  pointer-events: auto;
+  width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; line-height: 1; letter-spacing: 1px;
+  color: var(--steel);
+  background: rgba(11, 12, 14, .72);
+  border: 1px solid var(--gunmetal);
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+}
+#g-pause:hover { color: var(--bone); border-color: var(--steel); }
+#g-pause:focus-visible { outline: 2px solid var(--steel); outline-offset: 2px; }
+/* Paused is a STATE, so the button wears it — amber, the same "held, waiting on you" amber the
+   armed mission selection uses. */
+#g-pause.on { color: var(--warn); border-color: var(--warn); background: rgba(242, 193, 59, .12); }
+
+/* A quiet banner, so a paused game can never be mistaken for a hung one. */
+#g-paused-bar {
+  position: absolute;
+  top: calc(56px + env(safe-area-inset-top, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 80;
+  pointer-events: none;
+  padding: 7px 16px;
+  font: 700 10px/1 var(--mono);
+  letter-spacing: .3em;
+  color: var(--warn);
+  border: 1px solid rgba(242, 193, 59, .5);
+  background: rgba(11, 12, 14, .8);
+  backdrop-filter: blur(6px);
+  animation: up-in .16s ease-out;
+}
+#g-paused-bar[hidden] { display: none; }
+
 #dev-panel {
   position: absolute;
   top: calc(96px + env(safe-area-inset-top, 0px));
