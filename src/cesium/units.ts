@@ -4551,6 +4551,38 @@ export class UnitField {
     return out;
   }
 
+  /**
+   * Every combatant that should be wearing a health bar, written into a reusable buffer.
+   *
+   * WHO: anything with combat state that is HURT or FIGHTING. Not everything, and not always —
+   * a bar over every machine on the board at all times is a wall of chrome that stops meaning
+   * anything, and the two moments a health bar is worth reading are "this one is losing" and "this
+   * one is in it right now". A full-health unit standing idle says both by having no bar at all.
+   *
+   * Fills `out` and returns how many entries are live, so the caller can keep one array forever
+   * rather than allocating a few dozen objects every frame.
+   */
+  healthBars(out: { lon: number; lat: number; alt: number; frac: number; side: 0 | 1 }[]): number {
+    let n = 0;
+    for (const u of this.units) {
+      const c = u.rtsc;
+      if (!c || u.dead) continue;
+      const hurt = c.hp < c.maxHp;
+      // "Fighting" is the same test the route colour uses: ordered to attack, recently hit, or
+      // answering a call. Deliberately not "has something in range" — every combatant always does.
+      const fighting = !!c.attackMove || !!c.assist || !!c.threat;
+      if (!hurt && !fighting) continue;
+      const slot = out[n] ?? (out[n] = { lon: 0, lat: 0, alt: 0, frac: 1, side: 0 });
+      slot.lon = u.lon;
+      slot.lat = u.lat;
+      slot.alt = this.combatAltOf(u);
+      slot.frac = Math.max(0, Math.min(1, c.hp / Math.max(1, c.maxHp)));
+      slot.side = c.side;
+      n++;
+    }
+    return n;
+  }
+
   /** World positions of the player's own platforms — who a company reaction plays over. */
   platformPositions(): Cesium.Cartesian3[] {
     return this.platformUnits().map(

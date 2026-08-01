@@ -88,6 +88,7 @@ import {
 import { StateLines, loadStateGeometry } from './stateLines';
 import { LaserBeams } from './lasers';
 import { CombatAudio } from './combatAudio';
+import { HealthBars, type HealthBarDatum } from './healthBars';
 import { ScanBeams, Blasts, Sparks, Impacts, Cuffs, ViolationPings, Rounds, CameraFlashes } from './effects';
 import { Reactions } from './reactions';
 import { ActionMarks, type ActionKind } from './actionMarks';
@@ -656,6 +657,10 @@ let rounds: Rounds | undefined;
  * theater anyway, so a queued volley can never carry into the next one.
  */
 let combatAudio: CombatAudio | undefined;
+/** Health bars over the machines currently in a fight. Lives and dies with the theater. */
+let healthBars: HealthBars | undefined;
+/** Reused every frame — a fight repopulates this constantly and it must not allocate. */
+const healthBarData: HealthBarDatum[] = [];
 /**
  * Damage per shot at which a hitscan weapon gets the heavy report instead of the light crack.
  *
@@ -997,6 +1002,8 @@ function addUnits(center: { lon: number; lat: number }, map: TheaterMap, net: Ro
   scene.primitives.add(rounds.trails); // trails under the heads, so a head is never hidden by its own smoke
   scene.primitives.add(rounds.collection);
   combatAudio = new CombatAudio(scene);
+  healthBars = new HealthBars();
+  scene.primitives.add(healthBars.collection);
   flashes = new CameraFlashes();
   scene.primitives.add(flashes.collection);
   impacts = new Impacts();
@@ -1404,6 +1411,10 @@ function removeUnits() {
   }
   combatAudio?.reset();
   combatAudio = undefined;
+  if (healthBars) {
+    scene.primitives.remove(healthBars.collection);
+    healthBars = undefined;
+  }
   if (flashes) {
     scene.primitives.remove(flashes.collection);
     flashes = undefined;
@@ -1501,6 +1512,8 @@ scene.preUpdate.addEventListener(() => {
       runMillstoneBuild(dt);
       runMillstone(dt);
       runRtsCombat(dt);
+      // After combat, so a bar shows the damage that landed this frame rather than last frame's.
+      if (healthBars && unitField) healthBars.show(healthBarData, unitField.healthBars(healthBarData));
       rtsGame.tickUnits(dt); // shield/energy regen
       // Traffic-incident economy: obelisks catch violations; auto-fine collects them, else they ping.
       runRtsViolations(dt);
@@ -8281,6 +8294,12 @@ if (import.meta.env.DEV) {
     rtsStructTargets,
     runMillstoneBuild,
     seedMillstone,
+    get healthBars() {
+      return healthBars;
+    },
+    get healthBarData() {
+      return healthBarData;
+    },
     setPaused,
     get paused() {
       return paused;
